@@ -1,0 +1,1928 @@
+{
+ "generated": "2026-10-01",
+ "source": "benchlm.ai leaderboards (mirroring Vals AI, Artificial Analysis, Scale Labs, Gray Swan, SWE-bench, ...)",
+ "benchmarks": {
+  "sweVerified": {
+   "topic": "coding",
+   "label": "SWE-bench Verified",
+   "higherIsBetter": true,
+   "url": "https://arxiv.org/abs/2310.06770",
+   "page": "https://benchlm.ai/benchmarks/sweverified",
+   "format": "Code patch generation",
+   "models": 80,
+   "updated": "October 1, 2026"
+  },
+  "swePro": {
+   "topic": "coding",
+   "label": "SWE-bench Pro",
+   "higherIsBetter": true,
+   "url": "https://arxiv.org/abs/2509.16941",
+   "page": "https://benchlm.ai/benchmarks/swepro",
+   "format": "Repository task completion",
+   "models": 76,
+   "updated": "October 1, 2026"
+  },
+  "liveCodeBenchV6": {
+   "topic": "coding",
+   "label": "LiveCodeBench v6",
+   "higherIsBetter": true,
+   "url": "https://github.com/LiveCodeBench/LiveCodeBench",
+   "page": "https://benchlm.ai/benchmarks/livecodebenchv6",
+   "format": "Provider-published v6 competitive programming results",
+   "models": 31,
+   "updated": "October 1, 2026"
+  },
+  "terminalBench21": {
+   "topic": "coding",
+   "label": "Terminal-Bench 2.1",
+   "higherIsBetter": true,
+   "url": "https://www.tbench.ai/",
+   "page": "https://benchlm.ai/benchmarks/terminalbench21",
+   "format": "Interactive task success rate",
+   "models": 63,
+   "updated": "October 1, 2026"
+  },
+  "sweRebench": {
+   "topic": "coding",
+   "label": "SWE-rebench",
+   "higherIsBetter": true,
+   "url": "https://swe-rebench.com",
+   "page": "https://benchlm.ai/benchmarks/swerebench",
+   "format": "Code patch generation",
+   "models": 13,
+   "updated": "October 1, 2026"
+  },
+  "aaLiveCodeBench": {
+   "topic": "coding",
+   "label": "AA LiveCodeBench",
+   "higherIsBetter": true,
+   "url": "https://artificialanalysis.ai/evaluations/livecodebench",
+   "page": "https://benchlm.ai/benchmarks/aalivecodebench",
+   "format": "Pass rate",
+   "models": 2,
+   "updated": "October 1, 2026"
+  },
+  "multiSweBench": {
+   "topic": "coding",
+   "label": "Multi-SWE-bench",
+   "higherIsBetter": true,
+   "url": "https://www.minimax.io/news/minimax-m27-en",
+   "page": "https://benchlm.ai/benchmarks/multiswebench",
+   "format": "Repository task completion",
+   "models": 1,
+   "updated": "October 1, 2026"
+  },
+  "bigCodeBench": {
+   "topic": "coding",
+   "label": "BigCodeBench",
+   "higherIsBetter": true,
+   "url": "https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro/blob/main/DeepSeek_V4.pdf",
+   "page": "https://benchlm.ai/benchmarks/bigcodebench",
+   "format": "Pass@1",
+   "models": 3,
+   "updated": "October 1, 2026"
+  },
+  "valsLegalBench": {
+   "topic": "legal",
+   "label": "Vals LegalBench",
+   "higherIsBetter": true,
+   "url": "https://www.vals.ai/benchmarks/legal_bench",
+   "page": "https://benchlm.ai/benchmarks/valslegalbench",
+   "format": "Accuracy score",
+   "models": 149,
+   "updated": "September 29, 2026"
+  },
+  "valsCaseLawV2": {
+   "topic": "legal",
+   "label": "Vals CaseLaw v2",
+   "higherIsBetter": true,
+   "url": "https://www.vals.ai/benchmarks/case_law_v2",
+   "page": "https://benchlm.ai/benchmarks/valscaselawv2",
+   "format": "Accuracy score",
+   "models": 54,
+   "updated": "May 4, 2026"
+  },
+  "legalResearchBench": {
+   "topic": "legal",
+   "label": "Vals Legal Research",
+   "higherIsBetter": true,
+   "url": "https://www.vals.ai/benchmarks/legal_research",
+   "page": "https://benchlm.ai/benchmarks/legalresearchbench",
+   "format": "Accuracy score",
+   "models": 72,
+   "updated": "September 29, 2026"
+  },
+  "scale-prbench-legal": {
+   "topic": "legal",
+   "label": "Scale PRBench Legal",
+   "higherIsBetter": true,
+   "url": "https://labs.scale.com/leaderboard/prbench-legal",
+   "page": "https://benchlm.ai/benchmarks/scale-prbench-legal",
+   "format": "Published Scale leaderboard score",
+   "models": 39,
+   "updated": "September 30, 2026 snapshot"
+  },
+  "hlab": {
+   "topic": "legal",
+   "label": "Harvey Legal Agent Bench (Vals)",
+   "higherIsBetter": true,
+   "url": "https://www.vals.ai/benchmarks/hlab",
+   "page": "https://benchlm.ai/benchmarks/hlab",
+   "format": "Accuracy score",
+   "models": 73,
+   "updated": "September 29, 2026"
+  },
+  "aaHarveyLab": {
+   "topic": "legal",
+   "label": "AA Harvey LAB",
+   "higherIsBetter": true,
+   "url": "https://artificialanalysis.ai/evaluations/harvey-lab-aa",
+   "page": "https://benchlm.ai/benchmarks/aaharveylab",
+   "format": "Task success rate",
+   "models": 12,
+   "updated": "October 1, 2026"
+  },
+  "cyberGym": {
+   "topic": "security",
+   "label": "CyberGym",
+   "higherIsBetter": true,
+   "url": "https://www.cybergym.io/",
+   "page": "https://benchlm.ai/benchmarks/cybergym",
+   "format": "Vulnerability reproduction and PoC generation",
+   "models": 28,
+   "updated": "October 1, 2026"
+  },
+  "cybench": {
+   "topic": "security",
+   "label": "Cybench",
+   "higherIsBetter": true,
+   "url": "https://arxiv.org/abs/2408.08926",
+   "page": "https://benchlm.ai/benchmarks/cybench",
+   "format": "Cybersecurity agent task completion",
+   "models": 1,
+   "updated": "October 1, 2026"
+  },
+  "cweBench": {
+   "topic": "security",
+   "label": "CWE-Bench",
+   "higherIsBetter": true,
+   "url": "https://cwe-bench.com/#leaderboard",
+   "page": "https://benchlm.ai/benchmarks/cwebench",
+   "format": "Pass@1",
+   "models": 1,
+   "updated": "October 1, 2026"
+  },
+  "cweBenchV1": {
+   "topic": "security",
+   "label": "CWE-bench v1 (patching)",
+   "higherIsBetter": true,
+   "url": "https://cwe-bench.com/",
+   "page": "https://benchlm.ai/benchmarks/cwebenchv1",
+   "format": "Pass@1",
+   "models": 11,
+   "updated": "October 1, 2026"
+  },
+  "cyber": {
+   "topic": "security",
+   "label": "Vals CyberBench",
+   "higherIsBetter": true,
+   "url": "https://www.vals.ai/benchmarks/cyber",
+   "page": "https://benchlm.ai/benchmarks/cyber",
+   "format": "Accuracy score",
+   "models": 43,
+   "updated": "September 29, 2026"
+  },
+  "secBenchPro": {
+   "topic": "security",
+   "label": "SEC-Bench Pro",
+   "higherIsBetter": true,
+   "url": "https://openai.com/index/gpt-5-6/",
+   "page": "https://benchlm.ai/benchmarks/secbenchpro",
+   "format": "Success rate",
+   "models": 9,
+   "updated": "October 1, 2026"
+  },
+  "cveBenchZeroDayBlackBox": {
+   "topic": "security",
+   "label": "CVE-Bench zero-day",
+   "higherIsBetter": true,
+   "url": "https://github.com/uiuc-kang-lab/cve-bench",
+   "page": "https://benchlm.ai/benchmarks/cvebenchzerodayblackbox",
+   "format": "Pass@1 over three rollouts",
+   "models": 0,
+   "updated": "October 1, 2026"
+  },
+  "frontierCyber": {
+   "topic": "security",
+   "label": "FrontierCyber",
+   "higherIsBetter": true,
+   "url": "https://www.irregular.com/research/frontiercyber",
+   "page": "https://benchlm.ai/benchmarks/frontiercyber",
+   "format": "Tasks solved",
+   "models": 2,
+   "updated": "October 1, 2026"
+  },
+  "graySwanIpi15": {
+   "topic": "safeguards",
+   "label": "Gray Swan indirect prompt injection (attack success @15)",
+   "higherIsBetter": false,
+   "url": "https://deepmind.google/models/evals-methodology/gemini-4-argon",
+   "page": "https://benchlm.ai/benchmarks/grayswanipi15",
+   "format": "Attack success rate at 15 attempts",
+   "models": 13,
+   "updated": "October 1, 2026"
+  },
+  "bullshitBenchV2": {
+   "topic": "safeguards",
+   "label": "BullshitBench v2 (pushes back on nonsense prompts)",
+   "higherIsBetter": true,
+   "url": "https://petergpt.github.io/bullshit-benchmark/",
+   "page": "https://benchlm.ai/benchmarks/bullshitbenchv2",
+   "format": "Prompt challenge and refusal evaluation",
+   "models": 228,
+   "updated": "September 29, 2026 at 8:42 PM UTC"
+  },
+  "kindBench": {
+   "topic": "safeguards",
+   "label": "KindBench psychological safety",
+   "higherIsBetter": true,
+   "url": "https://www.kindbench.com/methodology",
+   "page": "https://benchlm.ai/benchmarks/kindbench",
+   "format": "Judge-scored behavioral audit with human review",
+   "models": 10,
+   "updated": "September 30, 2026"
+  }
+ },
+ "scores": {
+  "anthropic/claude-opus-4.8": {
+   "sweVerified": {
+    "v": 88.6,
+    "rank": 5,
+    "of": 80
+   },
+   "swePro": {
+    "v": 69.2,
+    "rank": 8,
+    "of": 76
+   },
+   "terminalBench21": {
+    "v": 74.6,
+    "rank": 35,
+    "of": 63
+   },
+   "valsLegalBench": {
+    "v": 83.57,
+    "rank": 51,
+    "of": 149
+   },
+   "legalResearchBench": {
+    "v": 43.75,
+    "rank": 18,
+    "of": 72
+   },
+   "hlab": {
+    "v": 9.58,
+    "rank": 16,
+    "of": 73
+   },
+   "bullshitBenchV2": {
+    "v": 95,
+    "rank": 1,
+    "of": 228
+   },
+   "kindBench": {
+    "v": 85.6,
+    "rank": 5,
+    "of": 10
+   }
+  },
+  "anthropic/claude-opus-5": {
+   "sweVerified": {
+    "v": 96,
+    "rank": 1,
+    "of": 80
+   },
+   "swePro": {
+    "v": 79.2,
+    "rank": 6,
+    "of": 76
+   },
+   "valsLegalBench": {
+    "v": 86.97,
+    "rank": 8,
+    "of": 149
+   },
+   "legalResearchBench": {
+    "v": 55.29,
+    "rank": 1,
+    "of": 72
+   },
+   "hlab": {
+    "v": 6.67,
+    "rank": 24,
+    "of": 73
+   },
+   "aaHarveyLab": {
+    "v": 93.5,
+    "rank": 3,
+    "of": 12
+   },
+   "cyber": {
+    "v": 65.36,
+    "rank": 27,
+    "of": 43
+   },
+   "graySwanIpi15": {
+    "v": 4.6,
+    "rank": 4,
+    "of": 13
+   },
+   "bullshitBenchV2": {
+    "v": 73,
+    "rank": 21,
+    "of": 228
+   }
+  },
+  "claude-opus-4.6": {
+   "sweVerified": {
+    "v": 80.84,
+    "rank": 12,
+    "of": 80
+   },
+   "swePro": {
+    "v": 53.4,
+    "rank": 54,
+    "of": 76
+   },
+   "sweRebench": {
+    "v": 65.3,
+    "rank": 1,
+    "of": 13
+   },
+   "valsLegalBench": {
+    "v": 85.3,
+    "rank": 20,
+    "of": 149
+   },
+   "valsCaseLawV2": {
+    "v": 62.06,
+    "rank": 20,
+    "of": 54
+   },
+   "cyberGym": {
+    "v": 66.6,
+    "rank": 23,
+    "of": 28
+   },
+   "bullshitBenchV2": {
+    "v": 87,
+    "rank": 7,
+    "of": 228
+   }
+  },
+  "claude-opus-4.7": {
+   "sweVerified": {
+    "v": 87.6,
+    "rank": 6,
+    "of": 80
+   },
+   "swePro": {
+    "v": 64.3,
+    "rank": 14,
+    "of": 76
+   },
+   "valsLegalBench": {
+    "v": 85.25,
+    "rank": 22,
+    "of": 149
+   },
+   "valsCaseLawV2": {
+    "v": 68.38,
+    "rank": 5,
+    "of": 54
+   },
+   "legalResearchBench": {
+    "v": 38.46,
+    "rank": 28,
+    "of": 72
+   },
+   "hlab": {
+    "v": 6.67,
+    "rank": 24,
+    "of": 73
+   },
+   "cyberGym": {
+    "v": 73.1,
+    "rank": 21,
+    "of": 28
+   },
+   "bullshitBenchV2": {
+    "v": 83,
+    "rank": 8,
+    "of": 228
+   },
+   "kindBench": {
+    "v": 84.7,
+    "rank": 7,
+    "of": 10
+   }
+  },
+  "anthropic/claude-sonnet-4.6": {
+   "sweVerified": {
+    "v": 79.6,
+    "rank": 19,
+    "of": 80
+   },
+   "sweRebench": {
+    "v": 60.7,
+    "rank": 5,
+    "of": 13
+   },
+   "valsLegalBench": {
+    "v": 82.12,
+    "rank": 73,
+    "of": 149
+   },
+   "valsCaseLawV2": {
+    "v": 63.99,
+    "rank": 14,
+    "of": 54
+   },
+   "legalResearchBench": {
+    "v": 38.46,
+    "rank": 28,
+    "of": 72
+   },
+   "hlab": {
+    "v": 5,
+    "rank": 31,
+    "of": 73
+   },
+   "cyberGym": {
+    "v": 65.2,
+    "rank": 24,
+    "of": 28
+   },
+   "bullshitBenchV2": {
+    "v": 91,
+    "rank": 4,
+    "of": 228
+   }
+  },
+  "anthropic/claude-sonnet-5": {
+   "sweVerified": {
+    "v": 85.2,
+    "rank": 8,
+    "of": 80
+   },
+   "swePro": {
+    "v": 63.2,
+    "rank": 17,
+    "of": 76
+   },
+   "terminalBench21": {
+    "v": 80.4,
+    "rank": 28,
+    "of": 63
+   },
+   "valsLegalBench": {
+    "v": 83.92,
+    "rank": 44,
+    "of": 149
+   },
+   "legalResearchBench": {
+    "v": 41.83,
+    "rank": 20,
+    "of": 72
+   },
+   "hlab": {
+    "v": 5,
+    "rank": 31,
+    "of": 73
+   },
+   "cyber": {
+    "v": 61.91,
+    "rank": 31,
+    "of": 43
+   },
+   "bullshitBenchV2": {
+    "v": 80,
+    "rank": 10,
+    "of": 228
+   }
+  },
+  "claude-sonnet-5.5": {
+   "swePro": {
+    "v": 81.3,
+    "rank": 2,
+    "of": 76
+   },
+   "legalResearchBench": {
+    "v": 48.08,
+    "rank": 8,
+    "of": 72
+   },
+   "hlab": {
+    "v": 2.92,
+    "rank": 38,
+    "of": 73
+   },
+   "aaHarveyLab": {
+    "v": 93.1,
+    "rank": 5,
+    "of": 12
+   },
+   "cyber": {
+    "v": 59.58,
+    "rank": 32,
+    "of": 43
+   },
+   "bullshitBenchV2": {
+    "v": 60,
+    "rank": 46,
+    "of": 228
+   }
+  },
+  "anthropic/claude-haiku-4.5": {
+   "sweVerified": {
+    "v": 73.3,
+    "rank": 52,
+    "of": 80
+   },
+   "valsLegalBench": {
+    "v": 81.24,
+    "rank": 81,
+    "of": 149
+   },
+   "valsCaseLawV2": {
+    "v": 56.48,
+    "rank": 30,
+    "of": 54
+   },
+   "legalResearchBench": {
+    "v": 10.58,
+    "rank": 62,
+    "of": 72
+   },
+   "hlab": {
+    "v": 0.83,
+    "rank": 52,
+    "of": 73
+   },
+   "bullshitBenchV2": {
+    "v": 77,
+    "rank": 16,
+    "of": 228
+   }
+  },
+  "claude-fable-5-1": {
+   "swePro": {
+    "v": 81.2,
+    "rank": 3,
+    "of": 76
+   },
+   "valsLegalBench": {
+    "v": 88.51,
+    "rank": 2,
+    "of": 149
+   },
+   "legalResearchBench": {
+    "v": 55.29,
+    "rank": 1,
+    "of": 72
+   },
+   "hlab": {
+    "v": 6.67,
+    "rank": 24,
+    "of": 73
+   },
+   "aaHarveyLab": {
+    "v": 93,
+    "rank": 6,
+    "of": 12
+   },
+   "cweBenchV1": {
+    "v": 58,
+    "rank": 5,
+    "of": 11
+   },
+   "cyber": {
+    "v": 70.42,
+    "rank": 18,
+    "of": 43
+   },
+   "graySwanIpi15": {
+    "v": 1,
+    "rank": 2,
+    "of": 13
+   },
+   "bullshitBenchV2": {
+    "v": 77,
+    "rank": 16,
+    "of": 228
+   }
+  },
+  "openai/gpt-5.6-luna": {
+   "swePro": {
+    "v": 62.7,
+    "rank": 18,
+    "of": 76
+   },
+   "terminalBench21": {
+    "v": 84.7,
+    "rank": 18,
+    "of": 63
+   },
+   "valsLegalBench": {
+    "v": 84.03,
+    "rank": 41,
+    "of": 149
+   },
+   "legalResearchBench": {
+    "v": 36.54,
+    "rank": 34,
+    "of": 72
+   },
+   "hlab": {
+    "v": 1.25,
+    "rank": 49,
+    "of": 73
+   },
+   "cyberGym": {
+    "v": 77.9,
+    "rank": 19,
+    "of": 28
+   },
+   "cyber": {
+    "v": 73.63,
+    "rank": 9,
+    "of": 43
+   },
+   "bullshitBenchV2": {
+    "v": 41,
+    "rank": 100,
+    "of": 228
+   }
+  },
+  "openai/gpt-5.6-terra": {
+   "swePro": {
+    "v": 63.4,
+    "rank": 15,
+    "of": 76
+   },
+   "terminalBench21": {
+    "v": 87.4,
+    "rank": 12,
+    "of": 63
+   },
+   "valsLegalBench": {
+    "v": 85.11,
+    "rank": 23,
+    "of": 149
+   },
+   "legalResearchBench": {
+    "v": 41.35,
+    "rank": 21,
+    "of": 72
+   },
+   "hlab": {
+    "v": 0.83,
+    "rank": 52,
+    "of": 73
+   },
+   "cyberGym": {
+    "v": 81.8,
+    "rank": 15,
+    "of": 28
+   },
+   "cyber": {
+    "v": 72.08,
+    "rank": 14,
+    "of": 43
+   },
+   "bullshitBenchV2": {
+    "v": 54,
+    "rank": 65,
+    "of": 228
+   }
+  },
+  "openai/gpt-5.6-sol": {
+   "swePro": {
+    "v": 64.6,
+    "rank": 13,
+    "of": 76
+   },
+   "terminalBench21": {
+    "v": 91.9,
+    "rank": 2,
+    "of": 63
+   },
+   "valsLegalBench": {
+    "v": 86.97,
+    "rank": 9,
+    "of": 149
+   },
+   "legalResearchBench": {
+    "v": 48.08,
+    "rank": 8,
+    "of": 72
+   },
+   "hlab": {
+    "v": 2.5,
+    "rank": 40,
+    "of": 73
+   },
+   "cyberGym": {
+    "v": 84.5,
+    "rank": 9,
+    "of": 28
+   },
+   "cyber": {
+    "v": 76.31,
+    "rank": 3,
+    "of": 43
+   },
+   "secBenchPro": {
+    "v": 71.2,
+    "rank": 3,
+    "of": 9
+   },
+   "frontierCyber": {
+    "v": 9.6,
+    "rank": 2,
+    "of": 2
+   },
+   "graySwanIpi15": {
+    "v": 27,
+    "rank": 10,
+    "of": 13
+   },
+   "bullshitBenchV2": {
+    "v": 48,
+    "rank": 79,
+    "of": 228
+   },
+   "kindBench": {
+    "v": 89.2,
+    "rank": 3,
+    "of": 10
+   }
+  },
+  "gpt-6-astra": {
+   "legalResearchBench": {
+    "v": 39.42,
+    "rank": 26,
+    "of": 72
+   },
+   "hlab": {
+    "v": 5.42,
+    "rank": 29,
+    "of": 73
+   },
+   "cweBenchV1": {
+    "v": 68,
+    "rank": 1,
+    "of": 11
+   },
+   "cyber": {
+    "v": 41.07,
+    "rank": 40,
+    "of": 43
+   },
+   "secBenchPro": {
+    "v": 85.4,
+    "rank": 1,
+    "of": 9
+   },
+   "frontierCyber": {
+    "v": 38.1,
+    "rank": 1,
+    "of": 2
+   },
+   "graySwanIpi15": {
+    "v": 8.5,
+    "rank": 7,
+    "of": 13
+   },
+   "bullshitBenchV2": {
+    "v": 69,
+    "rank": 28,
+    "of": 228
+   }
+  },
+  "gpt-6-luna": {
+   "legalResearchBench": {
+    "v": 30.29,
+    "rank": 39,
+    "of": 72
+   },
+   "scale-prbench-legal": {
+    "v": 42.85,
+    "rank": 22,
+    "of": 39
+   },
+   "hlab": {
+    "v": 2.92,
+    "rank": 38,
+    "of": 73
+   },
+   "cyber": {
+    "v": 76.25,
+    "rank": 4,
+    "of": 43
+   },
+   "secBenchPro": {
+    "v": 34.2,
+    "rank": 9,
+    "of": 9
+   },
+   "bullshitBenchV2": {
+    "v": 59,
+    "rank": 48,
+    "of": 228
+   }
+  },
+  "gpt-6-sol": {
+   "legalResearchBench": {
+    "v": 28.85,
+    "rank": 42,
+    "of": 72
+   },
+   "scale-prbench-legal": {
+    "v": 38.6,
+    "rank": 30,
+    "of": 39
+   },
+   "hlab": {
+    "v": 1.67,
+    "rank": 44,
+    "of": 73
+   },
+   "cweBenchV1": {
+    "v": 52,
+    "rank": 10,
+    "of": 11
+   },
+   "cyber": {
+    "v": 77.98,
+    "rank": 1,
+    "of": 43
+   },
+   "secBenchPro": {
+    "v": 66.3,
+    "rank": 4,
+    "of": 9
+   },
+   "graySwanIpi15": {
+    "v": 10.1,
+    "rank": 8,
+    "of": 13
+   },
+   "bullshitBenchV2": {
+    "v": 59,
+    "rank": 48,
+    "of": 228
+   }
+  },
+  "gpt-6.1-sol": {
+   "legalResearchBench": {
+    "v": 38.46,
+    "rank": 28,
+    "of": 72
+   },
+   "hlab": {
+    "v": 5.42,
+    "rank": 29,
+    "of": 73
+   },
+   "cyber": {
+    "v": 39.29,
+    "rank": 41,
+    "of": 43
+   },
+   "secBenchPro": {
+    "v": 78.8,
+    "rank": 2,
+    "of": 9
+   },
+   "bullshitBenchV2": {
+    "v": 65,
+    "rank": 34,
+    "of": 228
+   }
+  },
+  "claude-opus-5.5": {
+   "swePro": {
+    "v": 89.9,
+    "rank": 1,
+    "of": 76
+   },
+   "legalResearchBench": {
+    "v": 50.48,
+    "rank": 5,
+    "of": 72
+   },
+   "scale-prbench-legal": {
+    "v": 47.58,
+    "rank": 16,
+    "of": 39
+   },
+   "hlab": {
+    "v": 3.75,
+    "rank": 34,
+    "of": 73
+   },
+   "aaHarveyLab": {
+    "v": 91.2,
+    "rank": 7,
+    "of": 12
+   },
+   "cweBenchV1": {
+    "v": 67,
+    "rank": 4,
+    "of": 11
+   },
+   "cyber": {
+    "v": 55.36,
+    "rank": 35,
+    "of": 43
+   },
+   "graySwanIpi15": {
+    "v": 1,
+    "rank": 2,
+    "of": 13
+   },
+   "bullshitBenchV2": {
+    "v": 63,
+    "rank": 41,
+    "of": 228
+   }
+  },
+  "deepseek/deepseek-v4-flash-0731": {
+   "sweVerified": {
+    "v": 79,
+    "rank": 21,
+    "of": 80
+   },
+   "swePro": {
+    "v": 52.6,
+    "rank": 56,
+    "of": 76
+   },
+   "terminalBench21": {
+    "v": 82.7,
+    "rank": 23,
+    "of": 63
+   },
+   "valsLegalBench": {
+    "v": 77.71,
+    "rank": 109,
+    "of": 149
+   },
+   "legalResearchBench": {
+    "v": 30.29,
+    "rank": 39,
+    "of": 72
+   },
+   "hlab": {
+    "v": 8.33,
+    "rank": 20,
+    "of": 73
+   },
+   "cyberGym": {
+    "v": 76.7,
+    "rank": 20,
+    "of": 28
+   },
+   "cyber": {
+    "v": 72.08,
+    "rank": 14,
+    "of": 43
+   },
+   "bullshitBenchV2": {
+    "v": 39,
+    "rank": 103,
+    "of": 228
+   }
+  },
+  "deepseek-v4.1-flash": {
+   "terminalBench21": {
+    "v": 90.6,
+    "rank": 3,
+    "of": 63
+   },
+   "valsLegalBench": {
+    "v": 83.28,
+    "rank": 54,
+    "of": 149
+   },
+   "legalResearchBench": {
+    "v": 41.35,
+    "rank": 21,
+    "of": 72
+   },
+   "hlab": {
+    "v": 6.67,
+    "rank": 24,
+    "of": 73
+   },
+   "cyberGym": {
+    "v": 88.1,
+    "rank": 3,
+    "of": 28
+   },
+   "cweBenchV1": {
+    "v": 55,
+    "rank": 7,
+    "of": 11
+   },
+   "cyber": {
+    "v": 73.69,
+    "rank": 8,
+    "of": 43
+   },
+   "secBenchPro": {
+    "v": 62.8,
+    "rank": 6,
+    "of": 9
+   },
+   "bullshitBenchV2": {
+    "v": 57,
+    "rank": 55,
+    "of": 228
+   }
+  },
+  "deepseek/deepseek-v4-pro-0813": {
+   "sweVerified": {
+    "v": 80.6,
+    "rank": 13,
+    "of": 80
+   },
+   "swePro": {
+    "v": 55.4,
+    "rank": 47,
+    "of": 76
+   },
+   "terminalBench21": {
+    "v": 87.9,
+    "rank": 10,
+    "of": 63
+   },
+   "valsLegalBench": {
+    "v": 82.36,
+    "rank": 71,
+    "of": 149
+   },
+   "valsCaseLawV2": {
+    "v": 59.38,
+    "rank": 27,
+    "of": 54
+   },
+   "legalResearchBench": {
+    "v": 40.87,
+    "rank": 23,
+    "of": 72
+   },
+   "hlab": {
+    "v": 7.5,
+    "rank": 22,
+    "of": 73
+   },
+   "cyberGym": {
+    "v": 83.3,
+    "rank": 12,
+    "of": 28
+   },
+   "cyber": {
+    "v": 72.86,
+    "rank": 11,
+    "of": 43
+   },
+   "bullshitBenchV2": {
+    "v": 35,
+    "rank": 115,
+    "of": 228
+   }
+  },
+  "google/gemini-3.1-pro-preview": {
+   "valsLegalBench": {
+    "v": 87.4,
+    "rank": 4,
+    "of": 149
+   },
+   "valsCaseLawV2": {
+    "v": 64.84,
+    "rank": 12,
+    "of": 54
+   },
+   "legalResearchBench": {
+    "v": 20.67,
+    "rank": 49,
+    "of": 72
+   },
+   "scale-prbench-legal": {
+    "v": 44.02,
+    "rank": 20,
+    "of": 39
+   },
+   "hlab": {
+    "v": 0,
+    "rank": 57,
+    "of": 73
+   },
+   "bullshitBenchV2": {
+    "v": 37,
+    "rank": 109,
+    "of": 228
+   }
+  },
+  "google/gemini-3.5-flash": {
+   "swePro": {
+    "v": 55.1,
+    "rank": 48,
+    "of": 76
+   },
+   "terminalBench21": {
+    "v": 76.2,
+    "rank": 33,
+    "of": 63
+   },
+   "valsLegalBench": {
+    "v": 83.6,
+    "rank": 50,
+    "of": 149
+   },
+   "legalResearchBench": {
+    "v": 30.77,
+    "rank": 38,
+    "of": 72
+   },
+   "hlab": {
+    "v": 2.5,
+    "rank": 40,
+    "of": 73
+   },
+   "bullshitBenchV2": {
+    "v": 20,
+    "rank": 156,
+    "of": 228
+   },
+   "kindBench": {
+    "v": 77,
+    "rank": 8,
+    "of": 10
+   }
+  },
+  "google/gemini-3.7-flash": {
+   "terminalBench21": {
+    "v": 85.8,
+    "rank": 15,
+    "of": 63
+   },
+   "valsLegalBench": {
+    "v": 87.26,
+    "rank": 5,
+    "of": 149
+   },
+   "legalResearchBench": {
+    "v": 34.62,
+    "rank": 36,
+    "of": 72
+   },
+   "hlab": {
+    "v": 8.75,
+    "rank": 19,
+    "of": 73
+   },
+   "aaHarveyLab": {
+    "v": 90.7,
+    "rank": 8,
+    "of": 12
+   },
+   "cyber": {
+    "v": 43.75,
+    "rank": 38,
+    "of": 43
+   },
+   "bullshitBenchV2": {
+    "v": 35,
+    "rank": 115,
+    "of": 228
+   }
+  },
+  "google/gemini-3.8-flash": {
+   "terminalBench21": {
+    "v": 89.4,
+    "rank": 5,
+    "of": 63
+   },
+   "valsLegalBench": {
+    "v": 86.99,
+    "rank": 7,
+    "of": 149
+   },
+   "legalResearchBench": {
+    "v": 38.94,
+    "rank": 27,
+    "of": 72
+   },
+   "scale-prbench-legal": {
+    "v": 48.9,
+    "rank": 12,
+    "of": 39
+   },
+   "hlab": {
+    "v": 10,
+    "rank": 15,
+    "of": 73
+   },
+   "cyber": {
+    "v": 43.75,
+    "rank": 38,
+    "of": 43
+   },
+   "graySwanIpi15": {
+    "v": 5.5,
+    "rank": 5,
+    "of": 13
+   }
+  },
+  "qwen/qwen3.6-max-preview": {
+   "swePro": {
+    "v": 57.3,
+    "rank": 36,
+    "of": 76
+   },
+   "valsCaseLawV2": {
+    "v": 47.91,
+    "rank": 51,
+    "of": 54
+   }
+  },
+  "qwen/qwen3.7-plus": {
+   "sweVerified": {
+    "v": 77.7,
+    "rank": 29,
+    "of": 80
+   },
+   "swePro": {
+    "v": 57.6,
+    "rank": 35,
+    "of": 76
+   },
+   "legalResearchBench": {
+    "v": 16.35,
+    "rank": 51,
+    "of": 72
+   },
+   "hlab": {
+    "v": 0,
+    "rank": 57,
+    "of": 73
+   }
+  },
+  "hy4-preview": {
+   "swePro": {
+    "v": 65.7,
+    "rank": 10,
+    "of": 76
+   },
+   "terminalBench21": {
+    "v": 85.4,
+    "rank": 16,
+    "of": 63
+   },
+   "valsLegalBench": {
+    "v": 83.76,
+    "rank": 48,
+    "of": 149
+   },
+   "legalResearchBench": {
+    "v": 45.19,
+    "rank": 14,
+    "of": 72
+   },
+   "hlab": {
+    "v": 9.17,
+    "rank": 17,
+    "of": 73
+   },
+   "cyberGym": {
+    "v": 78.4,
+    "rank": 18,
+    "of": 28
+   },
+   "cweBenchV1": {
+    "v": 53,
+    "rank": 9,
+    "of": 11
+   },
+   "cyber": {
+    "v": 65.36,
+    "rank": 27,
+    "of": 43
+   }
+  },
+  "qwen/qwen3.8-max": {
+   "swePro": {
+    "v": 67.7,
+    "rank": 9,
+    "of": 76
+   },
+   "terminalBench21": {
+    "v": 86.6,
+    "rank": 13,
+    "of": 63
+   },
+   "valsLegalBench": {
+    "v": 83.61,
+    "rank": 49,
+    "of": 149
+   },
+   "legalResearchBench": {
+    "v": 47.6,
+    "rank": 11,
+    "of": 72
+   },
+   "hlab": {
+    "v": 10.42,
+    "rank": 14,
+    "of": 73
+   },
+   "cyber": {
+    "v": 28.57,
+    "rank": 43,
+    "of": 43
+   },
+   "bullshitBenchV2": {
+    "v": 95,
+    "rank": 1,
+    "of": 228
+   }
+  },
+  "openai/gpt-oss-120b": {
+   "valsLegalBench": {
+    "v": 75.94,
+    "rank": 113,
+    "of": 149
+   },
+   "valsCaseLawV2": {
+    "v": 48.77,
+    "rank": 50,
+    "of": 54
+   },
+   "scale-prbench-legal": {
+    "v": 40.21,
+    "rank": 28,
+    "of": 39
+   },
+   "bullshitBenchV2": {
+    "v": 12,
+    "rank": 187,
+    "of": 228
+   }
+  },
+  "glm-5.1": {
+   "swePro": {
+    "v": 58.4,
+    "rank": 33,
+    "of": 76
+   },
+   "sweRebench": {
+    "v": 62.7,
+    "rank": 3,
+    "of": 13
+   },
+   "valsLegalBench": {
+    "v": 84.39,
+    "rank": 31,
+    "of": 149
+   },
+   "valsCaseLawV2": {
+    "v": 51.55,
+    "rank": 48,
+    "of": 54
+   },
+   "legalResearchBench": {
+    "v": 27.89,
+    "rank": 44,
+    "of": 72
+   },
+   "hlab": {
+    "v": 0,
+    "rank": 57,
+    "of": 73
+   },
+   "cyberGym": {
+    "v": 68.7,
+    "rank": 22,
+    "of": 28
+   },
+   "bullshitBenchV2": {
+    "v": 22,
+    "rank": 150,
+    "of": 228
+   }
+  },
+  "z-ai/glm-5.2": {
+   "swePro": {
+    "v": 62.1,
+    "rank": 21,
+    "of": 76
+   },
+   "terminalBench21": {
+    "v": 81,
+    "rank": 27,
+    "of": 63
+   },
+   "valsLegalBench": {
+    "v": 84.07,
+    "rank": 38,
+    "of": 149
+   },
+   "legalResearchBench": {
+    "v": 31.25,
+    "rank": 37,
+    "of": 72
+   },
+   "hlab": {
+    "v": 7.08,
+    "rank": 23,
+    "of": 73
+   },
+   "bullshitBenchV2": {
+    "v": 31,
+    "rank": 126,
+    "of": 228
+   }
+  },
+  "z-ai/glm-5.3": {
+   "terminalBench21": {
+    "v": 88.2,
+    "rank": 8,
+    "of": 63
+   },
+   "valsLegalBench": {
+    "v": 84.84,
+    "rank": 27,
+    "of": 149
+   },
+   "legalResearchBench": {
+    "v": 49.04,
+    "rank": 7,
+    "of": 72
+   },
+   "hlab": {
+    "v": 8.33,
+    "rank": 20,
+    "of": 73
+   },
+   "cyberGym": {
+    "v": 84.5,
+    "rank": 9,
+    "of": 28
+   },
+   "cyber": {
+    "v": 72.08,
+    "rank": 14,
+    "of": 43
+   },
+   "graySwanIpi15": {
+    "v": 31.5,
+    "rank": 11,
+    "of": 13
+   },
+   "bullshitBenchV2": {
+    "v": 72,
+    "rank": 22,
+    "of": 228
+   }
+  },
+  "z-ai/glm-5.3-flash": {
+   "terminalBench21": {
+    "v": 84.3,
+    "rank": 19,
+    "of": 63
+   },
+   "valsLegalBench": {
+    "v": 83.93,
+    "rank": 43,
+    "of": 149
+   },
+   "legalResearchBench": {
+    "v": 45.19,
+    "rank": 14,
+    "of": 72
+   },
+   "hlab": {
+    "v": 6.67,
+    "rank": 24,
+    "of": 73
+   },
+   "cyber": {
+    "v": 67.86,
+    "rank": 23,
+    "of": 43
+   }
+  },
+  "grok-4.3": {
+   "valsLegalBench": {
+    "v": 84.46,
+    "rank": 30,
+    "of": 149
+   },
+   "valsCaseLawV2": {
+    "v": 79.31,
+    "rank": 1,
+    "of": 54
+   },
+   "legalResearchBench": {
+    "v": 15.38,
+    "rank": 55,
+    "of": 72
+   },
+   "hlab": {
+    "v": 0.42,
+    "rank": 54,
+    "of": 73
+   },
+   "bullshitBenchV2": {
+    "v": 50,
+    "rank": 72,
+    "of": 228
+   },
+   "kindBench": {
+    "v": 85.2,
+    "rank": 6,
+    "of": 10
+   }
+  },
+  "x-ai/grok-4.6": {
+   "valsLegalBench": {
+    "v": 86.31,
+    "rank": 13,
+    "of": 149
+   },
+   "legalResearchBench": {
+    "v": 48.08,
+    "rank": 8,
+    "of": 72
+   },
+   "hlab": {
+    "v": 15.83,
+    "rank": 6,
+    "of": 73
+   },
+   "cweBenchV1": {
+    "v": 57,
+    "rank": 6,
+    "of": 11
+   },
+   "cyber": {
+    "v": 67.68,
+    "rank": 25,
+    "of": 43
+   },
+   "graySwanIpi15": {
+    "v": 51.8,
+    "rank": 12,
+    "of": 13
+   },
+   "bullshitBenchV2": {
+    "v": 66,
+    "rank": 31,
+    "of": 228
+   }
+  },
+  "grok-4.7": {
+   "valsLegalBench": {
+    "v": 84.39,
+    "rank": 32,
+    "of": 149
+   },
+   "legalResearchBench": {
+    "v": 47.12,
+    "rank": 12,
+    "of": 72
+   },
+   "hlab": {
+    "v": 12.5,
+    "rank": 8,
+    "of": 73
+   },
+   "aaHarveyLab": {
+    "v": 19.6,
+    "rank": 12,
+    "of": 12
+   },
+   "cweBenchV1": {
+    "v": 68,
+    "rank": 1,
+    "of": 11
+   },
+   "cyber": {
+    "v": 69.46,
+    "rank": 21,
+    "of": 43
+   }
+  },
+  "google/gemini-3.1-flash-lite": {
+   "valsLegalBench": {
+    "v": 83.76,
+    "rank": 46,
+    "of": 149
+   },
+   "valsCaseLawV2": {
+    "v": 54.98,
+    "rank": 35,
+    "of": 54
+   },
+   "legalResearchBench": {
+    "v": 3.37,
+    "rank": 68,
+    "of": 72
+   },
+   "hlab": {
+    "v": 0,
+    "rank": 57,
+    "of": 73
+   },
+   "bullshitBenchV2": {
+    "v": 11,
+    "rank": 189,
+    "of": 228
+   }
+  },
+  "minimax/minimax-m3": {
+   "sweVerified": {
+    "v": 80.5,
+    "rank": 14,
+    "of": 80
+   },
+   "swePro": {
+    "v": 59,
+    "rank": 29,
+    "of": 76
+   },
+   "terminalBench21": {
+    "v": 66,
+    "rank": 43,
+    "of": 63
+   },
+   "valsLegalBench": {
+    "v": 85.42,
+    "rank": 19,
+    "of": 149
+   },
+   "legalResearchBench": {
+    "v": 29.81,
+    "rank": 41,
+    "of": 72
+   },
+   "hlab": {
+    "v": 4.17,
+    "rank": 33,
+    "of": 73
+   },
+   "aaHarveyLab": {
+    "v": 88.4,
+    "rank": 9,
+    "of": 12
+   },
+   "cyber": {
+    "v": 65,
+    "rank": 29,
+    "of": 43
+   },
+   "bullshitBenchV2": {
+    "v": 64,
+    "rank": 37,
+    "of": 228
+   }
+  },
+  "minimax/minimax-m2.7": {
+   "swePro": {
+    "v": 56.2,
+    "rank": 43,
+    "of": 76
+   },
+   "sweRebench": {
+    "v": 51.9,
+    "rank": 12,
+    "of": 13
+   },
+   "multiSweBench": {
+    "v": 52.7,
+    "rank": 1,
+    "of": 1
+   },
+   "valsLegalBench": {
+    "v": 83.98,
+    "rank": 42,
+    "of": 149
+   },
+   "valsCaseLawV2": {
+    "v": 60.88,
+    "rank": 23,
+    "of": 54
+   },
+   "legalResearchBench": {
+    "v": 10.58,
+    "rank": 62,
+    "of": 72
+   },
+   "hlab": {
+    "v": 0,
+    "rank": 57,
+    "of": 73
+   },
+   "bullshitBenchV2": {
+    "v": 8,
+    "rank": 202,
+    "of": 228
+   }
+  },
+  "minimax/minimax-m2.5": {
+   "valsLegalBench": {
+    "v": 79.96,
+    "rank": 92,
+    "of": 149
+   },
+   "valsCaseLawV2": {
+    "v": 53.48,
+    "rank": 40,
+    "of": 54
+   },
+   "bullshitBenchV2": {
+    "v": 9,
+    "rank": 201,
+    "of": 228
+   }
+  },
+  "xiaomi/mimo-v2.5-pro": {
+   "swePro": {
+    "v": 57.2,
+    "rank": 37,
+    "of": 76
+   },
+   "valsLegalBench": {
+    "v": 77.13,
+    "rank": 111,
+    "of": 149
+   },
+   "legalResearchBench": {
+    "v": 15.87,
+    "rank": 52,
+    "of": 72
+   },
+   "hlab": {
+    "v": 2.08,
+    "rank": 42,
+    "of": 73
+   },
+   "bullshitBenchV2": {
+    "v": 62,
+    "rank": 44,
+    "of": 228
+   }
+  },
+  "xiaomi/mimo-v2.5": {
+   "swePro": {
+    "v": 56.1,
+    "rank": 44,
+    "of": 76
+   },
+   "valsLegalBench": {
+    "v": 78.89,
+    "rank": 101,
+    "of": 149
+   },
+   "legalResearchBench": {
+    "v": 9.13,
+    "rank": 64,
+    "of": 72
+   },
+   "hlab": {
+    "v": 1.67,
+    "rank": 44,
+    "of": 73
+   },
+   "bullshitBenchV2": {
+    "v": 35,
+    "rank": 115,
+    "of": 228
+   }
+  },
+  "mimo-v2.6-pro": {
+   "terminalBench21": {
+    "v": 89.9,
+    "rank": 4,
+    "of": 63
+   },
+   "legalResearchBench": {
+    "v": 47.12,
+    "rank": 12,
+    "of": 72
+   },
+   "hlab": {
+    "v": 10.83,
+    "rank": 12,
+    "of": 73
+   },
+   "cyberGym": {
+    "v": 94,
+    "rank": 2,
+    "of": 28
+   },
+   "cyber": {
+    "v": 72.86,
+    "rank": 11,
+    "of": 43
+   },
+   "secBenchPro": {
+    "v": 66.3,
+    "rank": 4,
+    "of": 9
+   }
+  },
+  "mimo-v2.6-flash": {
+   "terminalBench21": {
+    "v": 87.6,
+    "rank": 11,
+    "of": 63
+   },
+   "legalResearchBench": {
+    "v": 37.98,
+    "rank": 31,
+    "of": 72
+   },
+   "hlab": {
+    "v": 11.25,
+    "rank": 9,
+    "of": 73
+   },
+   "cyberGym": {
+    "v": 95.1,
+    "rank": 1,
+    "of": 28
+   },
+   "cyber": {
+    "v": 75.36,
+    "rank": 5,
+    "of": 43
+   },
+   "secBenchPro": {
+    "v": 47.5,
+    "rank": 7,
+    "of": 9
+   }
+  },
+  "moonshotai/kimi-k3": {
+   "terminalBench21": {
+    "v": 88.3,
+    "rank": 7,
+    "of": 63
+   },
+   "valsLegalBench": {
+    "v": 86.02,
+    "rank": 16,
+    "of": 149
+   },
+   "legalResearchBench": {
+    "v": 44.23,
+    "rank": 17,
+    "of": 72
+   },
+   "hlab": {
+    "v": 10.83,
+    "rank": 12,
+    "of": 73
+   },
+   "aaHarveyLab": {
+    "v": 94.6,
+    "rank": 1,
+    "of": 12
+   },
+   "cyber": {
+    "v": 75.24,
+    "rank": 6,
+    "of": 43
+   },
+   "graySwanIpi15": {
+    "v": 52.7,
+    "rank": 13,
+    "of": 13
+   },
+   "bullshitBenchV2": {
+    "v": 74,
+    "rank": 18,
+    "of": 228
+   },
+   "kindBench": {
+    "v": 91,
+    "rank": 2,
+    "of": 10
+   }
+  }
+ }
+}

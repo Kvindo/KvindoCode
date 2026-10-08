@@ -1,0 +1,183 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:v="clr-namespace:KvindoCode.App.Views"
+        x:Class="KvindoCode.App.MainWindow"
+        Title="KvindoCode" Width="1280" Height="820" MinWidth="760" MinHeight="520"
+        Icon="/Assets/icon.png"
+        WindowStartupLocation="CenterScreen">
+  <Window.Styles>
+    <Style Selector="ComboBox.flat">
+      <Setter Property="Background" Value="Transparent"/>
+      <Setter Property="BorderThickness" Value="0"/>
+      <Setter Property="Padding" Value="9,0"/>
+      <Setter Property="FontSize" Value="12.5"/>
+      <Setter Property="CornerRadius" Value="999"/>
+      <Setter Property="Foreground" Value="{DynamicResource KvMuted}"/>
+      <Setter Property="Height" Value="26"/>
+      <Setter Property="MinHeight" Value="26"/>
+      <Setter Property="VerticalContentAlignment" Value="Center"/>
+    </Style>
+    <Style Selector="ComboBox.flat:pointerover /template/ Border#Background">
+      <Setter Property="Background" Value="{DynamicResource KvHover}"/>
+    </Style>
+  </Window.Styles>
+
+  <Panel>
+    <Grid ColumnDefinitions="300,*">
+    <!-- ================= Sidebar ================= -->
+    <Border Classes="sidebar edge" BorderThickness="0,0,1,0" x:Name="SidebarBorder">
+      <Grid RowDefinitions="Auto,Auto,Auto,Auto,*,Auto">
+        <Grid Grid.Row="0" ColumnDefinitions="Auto,*" Margin="16,16,12,8">
+          <Border Width="26" Height="26" CornerRadius="8" Background="#D97757" VerticalAlignment="Center">
+            <TextBlock Text="✻" Foreground="White" FontSize="16" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+          </Border>
+          <TextBlock Grid.Column="1" Text="KvindoCode" FontWeight="SemiBold" FontSize="15" Margin="10,0,0,0" VerticalAlignment="Center"/>
+        </Grid>
+
+        <Button Grid.Row="1" x:Name="NewSessionBtn" Classes="ghost" HorizontalAlignment="Stretch" HorizontalContentAlignment="Left" Margin="10,2,10,4" Padding="10,8">
+          <StackPanel Orientation="Horizontal" Spacing="10" x:Name="NewSessionContent"/>
+        </Button>
+
+        <Border Grid.Row="2" Classes="card" Margin="12,4,12,4" Padding="10,0,6,0" CornerRadius="8">
+          <Grid ColumnDefinitions="Auto,*,Auto">
+            <ContentControl x:Name="SearchIcon" VerticalAlignment="Center" Margin="0,0,8,0"/>
+            <TextBox Grid.Column="1" x:Name="SearchBox" Classes="composer" FontSize="13" MinHeight="34" VerticalContentAlignment="Center"
+                     Watermark="Search sessions (regex)…" ToolTip.Tip="Regular expression, case-insensitive. Searches titles and the text inside sessions (Ctrl+F)"/>
+            <Button Grid.Column="2" x:Name="SearchClear" Classes="ghost" Padding="6" IsVisible="False"/>
+          </Grid>
+        </Border>
+        <TextBlock Grid.Row="3" x:Name="SearchStatus" Classes="muted" FontSize="11.5" Margin="16,2,12,4" Height="16" TextTrimming="CharacterEllipsis"/>
+
+        <ScrollViewer Grid.Row="4" x:Name="SidebarScroll" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+          <StackPanel x:Name="ProjectsPanel" Margin="8,0,8,8" Spacing="2"/>
+        </ScrollViewer>
+
+        <Border Grid.Row="5" Classes="edge" BorderThickness="0,1,0,0" Padding="8" x:Name="SidebarFooter">
+          <StackPanel Spacing="2">
+            <Button x:Name="OpenFolderBtn" Classes="ghost" HorizontalAlignment="Stretch" HorizontalContentAlignment="Left" Padding="10,7">
+              <StackPanel Orientation="Horizontal" Spacing="10" x:Name="OpenFolderContent"/>
+            </Button>
+            <Button x:Name="SecretsBtn" Classes="ghost" HorizontalAlignment="Stretch" HorizontalContentAlignment="Left" Padding="10,7" ToolTip.Tip="Encrypted secret vault: values are handed to a session as a file or the clipboard, never typed into the chat">
+              <StackPanel Orientation="Horizontal" Spacing="10" x:Name="SecretsContent"/>
+            </Button>
+            <Button x:Name="SettingsBtn" Classes="ghost" HorizontalAlignment="Stretch" HorizontalContentAlignment="Left" Padding="10,7">
+              <StackPanel Orientation="Horizontal" Spacing="10" x:Name="SettingsContent"/>
+            </Button>
+          </StackPanel>
+        </Border>
+      </Grid>
+    </Border>
+
+    <!-- ================= Main ================= -->
+    <Grid Grid.Column="1" ColumnDefinitions="*,Auto,0" x:Name="MainArea">
+    <Grid Grid.Column="0" RowDefinitions="Auto,*,Auto">
+      <Border Grid.Row="0" Classes="edge" Height="52" BorderThickness="0,0,0,1" x:Name="TopBar" Padding="22,0,10,0">
+        <Grid ColumnDefinitions="*,Auto,Auto,Auto,Auto">
+          <!-- One control per column: sharing a column is what makes two texts draw over each other. -->
+          <Grid ColumnDefinitions="*,Auto,Auto,Auto,Auto" VerticalAlignment="Center" Margin="0,0,12,0">
+            <!-- The title lives in a *-column INSIDE this group so it truncates instead of overlapping: with an Auto
+                 column a long session name kept its full width and ran under the icons and the search box
+                 (reported 2026-10-08). The icons stay adjacent to the name because their column is Auto next to it. -->
+            <Grid Grid.Column="0" ColumnDefinitions="*,Auto" VerticalAlignment="Center">
+              <TextBlock Grid.Column="0" x:Name="TitleText" Text="KvindoCode" FontWeight="SemiBold" FontSize="14" TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
+              <!-- These act ON the session, so they belong beside its name, not in the row of view toggles on the
+                   right (asked 2026-10-07). Copy name is first: it needs no session state to be useful. -->
+              <StackPanel Grid.Column="1" x:Name="SessionIconBar" Orientation="Horizontal" Margin="6,0,0,0" VerticalAlignment="Center">
+                <Button x:Name="CopyNameBtn" Classes="ghost" Padding="6" ToolTip.Tip="Copy the session name to the clipboard"/>
+                <Button x:Name="RenameBtn" Classes="ghost" Padding="6" ToolTip.Tip="Rename session"/>
+                <Button x:Name="RegenBtn" Classes="ghost" Padding="6" ToolTip.Tip="Regenerate the title with AI"/>
+                <Button x:Name="PinBtn" Classes="ghost" Padding="6" ToolTip.Tip="Pin / unpin session"/>
+              </StackPanel>
+            </Grid>
+            <TextBlock Grid.Column="1" x:Name="ProjectText" Classes="muted" FontSize="12.5" TextTrimming="CharacterEllipsis" MaxWidth="200" Margin="8,0,0,0" VerticalAlignment="Center"/>
+            <!-- search inside this session: same regexp engine as the sidebar box -->
+            <TextBox Grid.Column="2" x:Name="AskSearchBox" Classes="composer" FontSize="12.5" MinHeight="26" Height="26" Width="180" Margin="8,0,0,0"
+                     VerticalContentAlignment="Center" Watermark="Find in session (regexp)"
+                     ToolTip.Tip="Find in this session — case-insensitive regexp (literal if invalid). Enter / Shift+Enter step through the matches, Esc clears."/>
+            <TextBlock Grid.Column="3" x:Name="FindStatus" Classes="muted" FontSize="11.5" VerticalAlignment="Center" Margin="6,0,0,0" Width="44" TextAlignment="Right" IsVisible="False"/>
+            <StackPanel Grid.Column="4" Orientation="Horizontal" Margin="4,0,0,0" VerticalAlignment="Center">
+              <ToggleButton x:Name="OnlyMineBtn" Classes="ghost" Padding="6" ToolTip.Tip="Show only my messages (hide the assistant's answers, tool calls and notices)"/>
+              <Button x:Name="AuditBtn" Classes="ghost" Padding="6" ToolTip.Tip="Enable/disable secret auditing for this session"/>
+              <Button x:Name="WorkModeBtn" Classes="ghost" Padding="6" ToolTip.Tip="How this session works: Normal (the model uses every tool itself), Delegate (it only answers, asks and works through subagents)"/>
+            </StackPanel>
+          </Grid>
+          <TextBlock Grid.Column="1" x:Name="UsageText" Classes="muted" FontSize="12" VerticalAlignment="Center" Margin="0,0,10,0"/>
+          <Button Grid.Column="2" x:Name="BrowserBtn" Classes="ghost" ToolTip.Tip="Chrome connection for the Browser tool">
+            <StackPanel Orientation="Horizontal" Spacing="7" x:Name="BrowserContent"/>
+          </Button>
+          <Button Grid.Column="3" x:Name="ContextBtn" Classes="ghost" ToolTip.Tip="Project context: instructions, skills, memory, hooks">
+            <StackPanel Orientation="Horizontal" Spacing="8" x:Name="ContextContent"/>
+          </Button>
+          <Button Grid.Column="4" x:Name="PaneBtn" Classes="ghost" ToolTip.Tip="Side panel: plan, tool output, files"/>
+        </Grid>
+      </Border>
+
+      <Grid Grid.Row="1" x:Name="Host">
+        <StackPanel x:Name="EmptyState" HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="10" MaxWidth="560" IsHitTestVisible="False">
+          <TextBlock Text="✻" FontSize="40" Foreground="#D97757" HorizontalAlignment="Center"/>
+          <TextBlock x:Name="EmptyTitle" Text="What are we building?" FontSize="24" FontWeight="SemiBold" HorizontalAlignment="Center"/>
+          <TextBlock x:Name="EmptyHint" Classes="muted" TextWrapping="Wrap" TextAlignment="Center" HorizontalAlignment="Center"/>
+        </StackPanel>
+      </Grid>
+
+      <v:LeftColumn Grid.Row="2" x:Name="BottomColumn" MaxContentWidth="1000" HorizontalAlignment="Stretch">
+        <StackPanel Margin="28,0,28,18" Spacing="8">
+          <Border x:Name="TodoPanel" Classes="card" IsVisible="False" Padding="14,10">
+            <StackPanel Spacing="6">
+              <Grid ColumnDefinitions="*,Auto">
+                <Button x:Name="TodoHeader" Classes="ghost" Padding="0" HorizontalContentAlignment="Left" HorizontalAlignment="Stretch">
+                  <TextBlock x:Name="TodoTitle" FontWeight="SemiBold" FontSize="13"/>
+                </Button>
+                <Button Grid.Column="1" x:Name="TodoClose" Classes="ghost" Padding="6,4" ToolTip.Tip="Close task list" VerticalAlignment="Top"/>
+              </Grid>
+              <StackPanel x:Name="TodoList" Spacing="4"/>
+            </StackPanel>
+          </Border>
+          <Border x:Name="TasksPanel" Classes="card" IsVisible="False" Padding="14,10">
+            <StackPanel Spacing="6">
+              <TextBlock x:Name="TasksTitle" FontWeight="SemiBold" FontSize="13"/>
+              <StackPanel x:Name="TasksList" Spacing="4"/>
+            </StackPanel>
+          </Border>
+          <Border x:Name="QueuePanel" Classes="card" IsVisible="False" Padding="12,9">
+            <StackPanel Spacing="6">
+              <Grid ColumnDefinitions="*,Auto">
+                <TextBlock x:Name="QueueTitle" Classes="muted" FontSize="12"/>
+                <Button Grid.Column="1" x:Name="QueueEdit" Classes="ghost" Padding="6,2" FontSize="11.5" ToolTip.Tip="Move every queued message back into the composer for editing"/>
+              </Grid>
+              <StackPanel x:Name="QueueList" Spacing="5"/>
+            </StackPanel>
+          </Border>
+
+          <Border x:Name="ComposerBox" Classes="composer" Padding="16,12,10,8">
+            <StackPanel Spacing="4">
+              <WrapPanel x:Name="AttachStrip" IsVisible="False" Margin="0,0,0,4"/>
+              <TextBox x:Name="Input" Classes="composer" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="44" MaxHeight="240" FontSize="14.5"/>
+              <Grid ColumnDefinitions="Auto,*,Auto,Auto,Auto">
+                <Button x:Name="ModeBtn" Classes="pill" VerticalAlignment="Center" ToolTip.Tip="Toggle plan mode (Shift+Tab)">
+                  <StackPanel Orientation="Horizontal" Spacing="6" x:Name="ModeContent"/>
+                </Button>
+                <Button Grid.Column="1" x:Name="AttachBtn" Classes="ghost" HorizontalAlignment="Left" Padding="7,5" ToolTip.Tip="Attach images or files (or drag &amp; drop, or Ctrl+V)"/>
+                <ComboBox Grid.Column="2" x:Name="EffortBox" Classes="flat" MinWidth="110" Margin="0,0,2,0"
+                          VerticalAlignment="Center"/>
+                <Button Grid.Column="3" x:Name="ModelBtn" Classes="pill" VerticalAlignment="Center" Margin="0,0,6,0" ToolTip.Tip="Choose model — browse prices, context, size, release dates">
+                  <StackPanel Orientation="Horizontal" Spacing="6" x:Name="ModelContent"/>
+                </Button>
+                <Button Grid.Column="4" x:Name="SendBtn" Classes="send" ToolTip.Tip="Send (Enter)"/>
+              </Grid>
+            </StackPanel>
+          </Border>
+        </StackPanel>
+      </v:LeftColumn>
+    </Grid>
+    <GridSplitter Grid.Column="1" x:Name="PaneSplitter" Width="5" IsVisible="False" ResizeDirection="Columns" Background="Transparent"/>
+    <Border Grid.Column="2" x:Name="PaneHost" IsVisible="False" Classes="sidebar edge" BorderThickness="1,0,0,0"/>
+    </Grid>
+    </Grid>
+
+    <!-- Hover hints are drawn here, as ordinary controls inside the window, NOT as a popup: a popup appearing under
+         the pointer destroyed the hover that opened it, which is what made the composer row flicker (2026-10-06).
+         IsHitTestVisible=False matters most - this layer can never take the pointer from a control. -->
+    <Canvas x:Name="TipLayer" IsHitTestVisible="False"/>
+  </Panel>
+</Window>

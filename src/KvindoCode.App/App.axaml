@@ -1,0 +1,325 @@
+<Application xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Class="KvindoCode.App.App"
+             RequestedThemeVariant="Default">
+  <Application.Styles>
+    <FluentTheme />
+    <StyleInclude Source="avares://Avalonia.Controls.DataGrid/Themes/Fluent.xaml"/>
+
+    <!-- ============ surfaces ============ -->
+    <Style Selector="Window"><Setter Property="Background" Value="{DynamicResource KvBg}"/></Style>
+    <Style Selector="Border.sidebar"><Setter Property="Background" Value="{DynamicResource KvSidebar}"/></Style>
+    <Style Selector=":is(Border).card">
+      <Setter Property="Background" Value="{DynamicResource KvPanel}"/>
+      <Setter Property="BorderBrush" Value="{DynamicResource KvBorder}"/>
+      <Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="CornerRadius" Value="10"/>
+    </Style>
+    <Style Selector="Border.composer">
+      <Setter Property="Background" Value="{DynamicResource KvInput}"/>
+      <Setter Property="BorderBrush" Value="{DynamicResource KvBorder}"/>
+      <Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="CornerRadius" Value="16"/>
+    </Style>
+    <Style Selector="Border.composer:focus-within">
+      <Setter Property="BorderBrush" Value="{DynamicResource KvAccent}"/>
+    </Style>
+    <Style Selector="Border.userbubble">
+      <Setter Property="Background" Value="{DynamicResource KvUserBubble}"/>
+      <Setter Property="CornerRadius" Value="14"/>
+      <Setter Property="Padding" Value="14,10"/>
+    </Style>
+    <Style Selector="Border.codeblock">
+      <Setter Property="Background" Value="{DynamicResource KvindoCode}"/>
+      <Setter Property="BorderBrush" Value="{DynamicResource KvBorder}"/>
+      <Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="CornerRadius" Value="8"/>
+    </Style>
+    <Style Selector="Border.diffadd"><Setter Property="Background" Value="{DynamicResource KvAddBg}"/></Style>
+    <Style Selector="Border.diffdel"><Setter Property="Background" Value="{DynamicResource KvDelBg}"/></Style>
+    <Style Selector="Border.edge"><Setter Property="BorderBrush" Value="{DynamicResource KvBorder}"/></Style>
+    <Style Selector="Border.divider"><Setter Property="Background" Value="{DynamicResource KvBorder}"/><Setter Property="Height" Value="1"/></Style>
+    <Style Selector="Border.composer.planmode, Border.composer.planmode:focus-within">
+      <Setter Property="BorderBrush" Value="{DynamicResource KvPlan}"/>
+    </Style>
+    <Style Selector=":is(Border).planmode">
+      <Setter Property="BorderBrush" Value="{DynamicResource KvPlan}"/>
+    </Style>
+
+    <!-- ============ text ============ -->
+    <Style Selector="TextBlock"><Setter Property="Foreground" Value="{DynamicResource KvText}"/></Style>
+    <Style Selector="SelectableTextBlock"><Setter Property="Foreground" Value="{DynamicResource KvText}"/></Style>
+    <Style Selector="TextBlock.muted"><Setter Property="Foreground" Value="{DynamicResource KvMuted}"/></Style>
+    <Style Selector="TextBlock.accent"><Setter Property="Foreground" Value="{DynamicResource KvAccent}"/></Style>
+    <Style Selector="TextBlock.ok"><Setter Property="Foreground" Value="{DynamicResource KvOk}"/></Style>
+    <Style Selector="TextBlock.err"><Setter Property="Foreground" Value="{DynamicResource KvErr}"/></Style>
+    <Style Selector="TextBlock.mono"><Setter Property="FontFamily" Value="{DynamicResource KvMono}"/><Setter Property="FontSize" Value="12.5"/></Style>
+    <Style Selector="SelectableTextBlock.mono"><Setter Property="FontFamily" Value="{DynamicResource KvMono}"/><Setter Property="FontSize" Value="12.5"/></Style>
+
+    <!-- ============ scrollbars ============ -->
+    <!-- Fluent's overlay scrollbar appears, shrinks and expands over the content; when it expands it covers the
+         right-hand edge of the text (reported 2026-10-05). Reserve the lane so it is always in its own space. -->
+    <Style Selector="ScrollViewer">
+      <Setter Property="AllowAutoHide" Value="False"/>
+    </Style>
+
+    <!-- ============ tooltips ============ -->
+    <!-- The popup tooltip service stays OFF. It is the popup appearing under the pointer that breaks the hover which
+         opened it: measured 2026-10-06 in ~/.kvindocode/ui-trace.log, a tip-bearing control flipped open/closed every
+         ~30 ms with a motionless mouse (EffortBox 266 flips, AttachBtn 133, ModelBtn 70, SecretsBtn 46), and only on
+         controls carrying a tip. The placement is NOT the trigger — it loops at Pointer, Top and Bottom alike, because
+         ToolTipService reopens within BetweenShowDelay while the popup keeps closing itself.
+         Hover hints are drawn instead by SimpleTips: an ordinary Border on the non-hit-testable TipLayer canvas inside
+         the window, so it can never take the pointer. Turning this back on brings the flicker back. -->
+    <Style Selector="Window">
+      <Setter Property="ToolTip.ServiceEnabled" Value="False"/>
+    </Style>
+
+
+
+
+    <!-- ============ buttons ============ -->
+    <!-- A control you can click shows a hand. The Fluent default is the arrow, which read as "not clickable" on the
+         model / plan-mode / secrets buttons (reported 2026-10-04). Text entry keeps the I-beam. -->
+    <Style Selector="Button"><Setter Property="Cursor" Value="Hand"/></Style>
+    <Style Selector="CheckBox"><Setter Property="Cursor" Value="Hand"/></Style>
+    <Style Selector="ComboBox"><Setter Property="Cursor" Value="Hand"/></Style>
+    <Style Selector="MenuItem"><Setter Property="Cursor" Value="Hand"/></Style>
+    <Style Selector="TabItem"><Setter Property="Cursor" Value="Hand"/></Style>
+    <!-- a ghost ToggleButton must look like the ghost icon buttons around it: the theme's default checked background
+         showed as a grey block next to the pin / audit icons (reported 2026-10-06) -->
+    <Style Selector="ToggleButton.ghost">
+      <Setter Property="Background" Value="Transparent"/>
+      <Setter Property="BorderThickness" Value="0"/>
+      <Setter Property="Foreground" Value="{DynamicResource KvMuted}"/>
+      <Setter Property="Padding" Value="6"/>
+      <Setter Property="CornerRadius" Value="6"/>
+      <Setter Property="Cursor" Value="Hand"/>
+    </Style>
+    <Style Selector="ToggleButton.ghost /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="Transparent"/>
+    </Style>
+    <Style Selector="ToggleButton.ghost:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="{DynamicResource KvHover}"/>
+    </Style>
+    <Style Selector="ToggleButton.ghost:checked /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="{DynamicResource KvHover}"/>
+    </Style>
+    <Style Selector="ToggleButton.ghost:pressed /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="{DynamicResource KvHover}"/>
+    </Style>
+
+    <Style Selector="Button.ghost">
+      <Setter Property="Background" Value="Transparent"/>
+      <Setter Property="Foreground" Value="{DynamicResource KvText}"/>
+      <Setter Property="BorderThickness" Value="0"/>
+      <Setter Property="Padding" Value="8,5"/>
+      <Setter Property="CornerRadius" Value="8"/>
+      <Setter Property="Cursor" Value="Hand"/>
+    </Style>
+    <Style Selector="Button.ghost:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="{DynamicResource KvHover}"/>
+      <Setter Property="Foreground" Value="{DynamicResource KvText}"/>
+    </Style>
+    <Style Selector="Button.ghost:pressed /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="{DynamicResource KvHover}"/>
+    </Style>
+    <Style Selector="Button.selected /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="{DynamicResource KvSelected}"/>
+    </Style>
+
+    <Style Selector="Button.accent">
+      <Setter Property="Background" Value="{DynamicResource KvAccent}"/>
+      <Setter Property="Foreground" Value="White"/>
+      <Setter Property="BorderThickness" Value="0"/>
+      <Setter Property="Padding" Value="14,7"/>
+      <Setter Property="CornerRadius" Value="8"/>
+      <Setter Property="FontWeight" Value="Medium"/>
+      <Setter Property="Cursor" Value="Hand"/>
+    </Style>
+    <Style Selector="Button.accent:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="{DynamicResource KvAccentHover}"/>
+      <Setter Property="Foreground" Value="White"/>
+    </Style>
+    <Style Selector="Button.accent:disabled /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="{DynamicResource KvBorder}"/>
+      <Setter Property="Foreground" Value="{DynamicResource KvMuted}"/>
+    </Style>
+
+    <Style Selector="Button.outline">
+      <Setter Property="Background" Value="Transparent"/>
+      <Setter Property="Foreground" Value="{DynamicResource KvText}"/>
+      <Setter Property="BorderBrush" Value="{DynamicResource KvBorder}"/>
+      <Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="Padding" Value="14,7"/>
+      <Setter Property="CornerRadius" Value="8"/>
+      <Setter Property="Cursor" Value="Hand"/>
+    </Style>
+    <Style Selector="Button.outline:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="{DynamicResource KvHover}"/>
+      <Setter Property="BorderBrush" Value="{DynamicResource KvBorder}"/>
+      <Setter Property="Foreground" Value="{DynamicResource KvText}"/>
+    </Style>
+
+    <Style Selector="Button.pill">
+      <Setter Property="Background" Value="Transparent"/>
+      <Setter Property="Foreground" Value="{DynamicResource KvMuted}"/>
+      <Setter Property="BorderThickness" Value="0"/>
+      <Setter Property="Padding" Value="9,0"/>
+      <Setter Property="CornerRadius" Value="999"/>
+      <Setter Property="FontSize" Value="12.5"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <!-- the effort combo next to it is 26 high: matching heights keeps the composer row on one line -->
+      <Setter Property="Height" Value="26"/>
+      <Setter Property="MinHeight" Value="26"/>
+      <Setter Property="VerticalContentAlignment" Value="Center"/>
+    </Style>
+    <Style Selector="Button.pill:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="{DynamicResource KvHover}"/>
+      <Setter Property="Foreground" Value="{DynamicResource KvText}"/>
+    </Style>
+    <Style Selector="Button.pill.plan /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="{DynamicResource KvPlanBg}"/>
+      <Setter Property="Foreground" Value="{DynamicResource KvPlan}"/>
+    </Style>
+
+    <Style Selector="Button.send">
+      <Setter Property="Width" Value="34"/><Setter Property="Height" Value="34"/>
+      <Setter Property="CornerRadius" Value="17"/>
+      <Setter Property="Padding" Value="0"/>
+      <Setter Property="Background" Value="{DynamicResource KvAccent}"/>
+      <Setter Property="Foreground" Value="White"/>
+      <Setter Property="HorizontalContentAlignment" Value="Center"/>
+      <Setter Property="VerticalContentAlignment" Value="Center"/>
+      <Setter Property="Cursor" Value="Hand"/>
+    </Style>
+    <Style Selector="Button.send:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="{DynamicResource KvAccentHover}"/>
+      <Setter Property="Foreground" Value="White"/>
+    </Style>
+    <Style Selector="Button.send:disabled /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="{DynamicResource KvBorder}"/>
+      <Setter Property="Foreground" Value="{DynamicResource KvMuted}"/>
+    </Style>
+
+    <!-- ============ inputs ============ -->
+    <Style Selector="TextBox.composer">
+      <Setter Property="Background" Value="Transparent"/>
+      <Setter Property="BorderThickness" Value="0"/>
+      <Setter Property="Padding" Value="0"/>
+    </Style>
+    <Style Selector="TextBox.composer:pointerover /template/ Border#PART_BorderElement,
+                     TextBox.composer:focus /template/ Border#PART_BorderElement,
+                     TextBox.composer:focus:pointerover /template/ Border#PART_BorderElement">
+      <Setter Property="Background" Value="Transparent"/>
+      <Setter Property="BorderThickness" Value="0"/>
+    </Style>
+    <Style Selector="TextBox.plain:focus /template/ Border#PART_BorderElement">
+      <Setter Property="BorderBrush" Value="{DynamicResource KvAccent}"/>
+    </Style>
+
+    <Style Selector="ScrollBar"><Setter Property="AllowAutoHide" Value="True"/></Style>
+
+    <!-- ============ icons ============ -->
+    <Style Selector="Path.icon">
+      <Setter Property="Stroke" Value="{Binding $parent[TemplatedControl].Foreground}"/>
+      <Setter Property="StrokeThickness" Value="1.8"/>
+      <Setter Property="StrokeLineCap" Value="Round"/>
+      <Setter Property="StrokeJoin" Value="Round"/>
+      <Setter Property="Stretch" Value="Uniform"/>
+      <Setter Property="Width" Value="16"/>
+      <Setter Property="Height" Value="16"/>
+    </Style>
+  </Application.Styles>
+
+  <Application.Resources>
+    <ResourceDictionary>
+      <Color x:Key="SystemAccentColor">#D97757</Color>
+      <Color x:Key="SystemAccentColorLight1">#E58868</Color>
+      <Color x:Key="SystemAccentColorLight2">#EC9B80</Color>
+      <Color x:Key="SystemAccentColorLight3">#F2AE98</Color>
+      <Color x:Key="SystemAccentColorDark1">#C6613F</Color>
+      <Color x:Key="SystemAccentColorDark2">#B5532F</Color>
+      <Color x:Key="SystemAccentColorDark3">#9A4524</Color>
+      <FontFamily x:Key="KvMono">JetBrains Mono, Cascadia Mono, DejaVu Sans Mono, Liberation Mono, monospace</FontFamily>
+
+      <StreamGeometry x:Key="IconPlus">M12 5v14M5 12h14</StreamGeometry>
+      <StreamGeometry x:Key="IconSend">M12 19V5M5 12l7-7 7 7</StreamGeometry>
+      <StreamGeometry x:Key="IconStop">M7 7h10v10H7z</StreamGeometry>
+      <StreamGeometry x:Key="IconFolder">M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z</StreamGeometry>
+      <StreamGeometry x:Key="IconSliders">M4 7h9M17 7h3M4 17h3M11 17h9M15 4v6M9 14v6</StreamGeometry>
+      <StreamGeometry x:Key="IconChevronRight">M9 6l6 6-6 6</StreamGeometry>
+      <StreamGeometry x:Key="IconChevronDown">M6 9l6 6 6-6</StreamGeometry>
+      <StreamGeometry x:Key="IconCheck">M5 12l5 5L20 7</StreamGeometry>
+      <StreamGeometry x:Key="IconX">M6 6l12 12M18 6L6 18</StreamGeometry>
+      <StreamGeometry x:Key="IconPlan">M9 6h11M9 12h11M9 18h11M4.5 6h.01M4.5 12h.01M4.5 18h.01</StreamGeometry>
+      <StreamGeometry x:Key="IconBolt">M13 3L5 14h6l-1 7 8-11h-6z</StreamGeometry>
+      <StreamGeometry x:Key="IconBook">M4 5a2 2 0 0 1 2-2h13v16H6a2 2 0 0 0-2 2zM4 21h15</StreamGeometry>
+      <StreamGeometry x:Key="IconGlobe">M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM3 12h18M12 3c2.5 2.5 3.5 5.5 3.5 9s-1 6.5-3.5 9c-2.5-2.5-3.5-5.5-3.5-9s1-6.5 3.5-9z</StreamGeometry>
+      <StreamGeometry x:Key="IconPencil">M4 20h4L19 9l-4-4L4 16zM13.5 6.5l4 4</StreamGeometry>
+      <StreamGeometry x:Key="IconSparkle">M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8zM19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z</StreamGeometry>
+      <StreamGeometry x:Key="IconSearch">M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14zM20 20l-4-4</StreamGeometry>
+      <StreamGeometry x:Key="IconClock">M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM12 7v5l3 2</StreamGeometry>
+      <StreamGeometry x:Key="IconPin">M9 4h6l-1 6 3 3H7l3-3zM12 13v7</StreamGeometry>
+      <StreamGeometry x:Key="IconRewind">M9 14L4 9l5-5M4 9h10a6 6 0 0 1 0 12h-3</StreamGeometry>
+      <StreamGeometry x:Key="IconFork">M6 3v7a4 4 0 0 0 4 4h4a4 4 0 0 1 4 4v3M6 3a2 2 0 1 0 0 .01M18 21a2 2 0 1 0 0 .01M6 21V10</StreamGeometry>
+      <StreamGeometry x:Key="IconPanel">M4 5h16v14H4zM14 5v14</StreamGeometry>
+      <StreamGeometry x:Key="IconAttach">M21 11l-8.5 8.5a5 5 0 0 1-7-7L14 4a3.5 3.5 0 0 1 5 5l-8.5 8.5a2 2 0 0 1-3-3L15 7</StreamGeometry>
+      <StreamGeometry x:Key="IconTrash">M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13</StreamGeometry>
+      <StreamGeometry x:Key="IconKey">M14 4l3 3-8 8H6v-3zM17 3l4 4M5 19l-2 2</StreamGeometry>
+      <StreamGeometry x:Key="IconUser">M12 11a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7zM5 20c0-3.3 3.1-5.5 7-5.5s7 2.2 7 5.5</StreamGeometry>
+      <StreamGeometry x:Key="IconClipboard">M9 3h6v3H9zM7 5H4v16h16V5h-3</StreamGeometry>
+      <StreamGeometry x:Key="IconEye">M2 12l10-6 10 6-10 6zM12 10l2 2-2 2-2-2z</StreamGeometry>
+      <StreamGeometry x:Key="IconLock">M7 10V8h10v2M5 10h14v11H5z</StreamGeometry>
+      <StreamGeometry x:Key="IconShield">M12 3l8 3v5c0 5-3.3 8.2-8 10-4.7-1.8-8-5-8-10V6zM9 12l2 2 4-4</StreamGeometry>
+      <StreamGeometry x:Key="IconDelegate">M9 4h6a2 2 0 0 1 2 2v1H7V6a2 2 0 0 1 2-2zM5 9h14v11H5zM9 13h6M9 16h4M12 4V2</StreamGeometry>
+
+      <ResourceDictionary.ThemeDictionaries>
+        <ResourceDictionary x:Key="Dark">
+          <SolidColorBrush x:Key="KvBg">#262624</SolidColorBrush>
+          <SolidColorBrush x:Key="KvSidebar">#1F1E1D</SolidColorBrush>
+          <SolidColorBrush x:Key="KvPanel">#2F2E2B</SolidColorBrush>
+          <SolidColorBrush x:Key="KvInput">#30302E</SolidColorBrush>
+          <SolidColorBrush x:Key="KvText">#F0EEE6</SolidColorBrush>
+          <SolidColorBrush x:Key="KvMuted">#9C9A92</SolidColorBrush>
+          <SolidColorBrush x:Key="KvBorder">#403F3B</SolidColorBrush>
+          <SolidColorBrush x:Key="KvAccent">#D97757</SolidColorBrush>
+          <SolidColorBrush x:Key="KvAccentHover">#E58868</SolidColorBrush>
+          <SolidColorBrush x:Key="KvindoCode">#1B1A19</SolidColorBrush>
+          <SolidColorBrush x:Key="KvUserBubble">#393936</SolidColorBrush>
+          <SolidColorBrush x:Key="KvHover">#3A3935</SolidColorBrush>
+          <SolidColorBrush x:Key="KvSelected">#38372F</SolidColorBrush>
+          <SolidColorBrush x:Key="KvOk">#7FB77E</SolidColorBrush>
+          <SolidColorBrush x:Key="KvErr">#E5776F</SolidColorBrush>
+          <SolidColorBrush x:Key="KvAddBg">#233A27</SolidColorBrush>
+          <SolidColorBrush x:Key="KvDelBg">#442826</SolidColorBrush>
+          <SolidColorBrush x:Key="KvPlan">#6FA8DC</SolidColorBrush>
+          <SolidColorBrush x:Key="KvPlanBg">#22313F</SolidColorBrush>
+          <SolidColorBrush x:Key="KvInlineCode">#3A3935</SolidColorBrush>
+        </ResourceDictionary>
+        <ResourceDictionary x:Key="Light">
+          <SolidColorBrush x:Key="KvBg">#FAF9F5</SolidColorBrush>
+          <SolidColorBrush x:Key="KvSidebar">#F0EEE6</SolidColorBrush>
+          <SolidColorBrush x:Key="KvPanel">#FFFFFF</SolidColorBrush>
+          <SolidColorBrush x:Key="KvInput">#FFFFFF</SolidColorBrush>
+          <SolidColorBrush x:Key="KvText">#1F1E1D</SolidColorBrush>
+          <SolidColorBrush x:Key="KvMuted">#73726C</SolidColorBrush>
+          <SolidColorBrush x:Key="KvBorder">#DDD9CC</SolidColorBrush>
+          <SolidColorBrush x:Key="KvAccent">#C6613F</SolidColorBrush>
+          <SolidColorBrush x:Key="KvAccentHover">#B5532F</SolidColorBrush>
+          <SolidColorBrush x:Key="KvindoCode">#F3F1EA</SolidColorBrush>
+          <SolidColorBrush x:Key="KvUserBubble">#EDE9DC</SolidColorBrush>
+          <SolidColorBrush x:Key="KvHover">#E6E3D8</SolidColorBrush>
+          <SolidColorBrush x:Key="KvSelected">#E3DFD1</SolidColorBrush>
+          <SolidColorBrush x:Key="KvOk">#2F7D3A</SolidColorBrush>
+          <SolidColorBrush x:Key="KvErr">#C0392B</SolidColorBrush>
+          <SolidColorBrush x:Key="KvAddBg">#E3F4E3</SolidColorBrush>
+          <SolidColorBrush x:Key="KvDelBg">#FBE3E0</SolidColorBrush>
+          <SolidColorBrush x:Key="KvPlan">#2C6FAE</SolidColorBrush>
+          <SolidColorBrush x:Key="KvPlanBg">#E3EEF8</SolidColorBrush>
+          <SolidColorBrush x:Key="KvInlineCode">#ECE9DD</SolidColorBrush>
+        </ResourceDictionary>
+      </ResourceDictionary.ThemeDictionaries>
+    </ResourceDictionary>
+  </Application.Resources>
+</Application>

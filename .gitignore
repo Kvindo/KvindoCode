@@ -1,0 +1,18 @@
+# build output
+bin/
+obj/
+dist/
+
+# IDE / editor
+.vs/
+.idea/
+*.user
+*.suo
+
+# local run artifacts
+*.log
+.pvcode/
+.kvindocode/
+
+# OS
+.DS_Store
