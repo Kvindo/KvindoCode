@@ -25,8 +25,14 @@ public sealed class HeaderLayoutTests(ITestOutputHelper o)
 
     static MainWindow Show(int width)
     {
-        var vault = new SecretVault(Path.Combine(Path.GetTempPath(), "hl-" + Guid.NewGuid().ToString("N")[..6] + ".json"),
-                                    Path.Combine(Path.GetTempPath(), "hl-" + Guid.NewGuid().ToString("N")[..6] + ".key"));
+        // NEVER the real config dir. Building a real MainWindow with the real ~/.kvindocode made the app REMEMBER
+        // PROJECTS and SAVE SETTINGS: it wrote a temp project into settings.json (clearing the Claude sessions dir)
+        // and left ~60 test sandbox dirs in the native session store, so the user's sessions vanished from the
+        // sidebar (reported and repaired 2026-10-09). Isolate the home for every such test.
+        var home = Path.Combine(Path.GetTempPath(), "hl-home-" + Guid.NewGuid().ToString("N")[..6]);
+        Directory.CreateDirectory(home);
+        Environment.SetEnvironmentVariable("KVINDOCODE_HOME", home);
+        var vault = new SecretVault(Path.Combine(home, "secrets.vault.json"), Path.Combine(home, "secrets.key"));
         vault.Unlock();
         SecretVault.Default = vault;
         Environment.SetEnvironmentVariable("KVINDOCODE_SCRIPT", null);

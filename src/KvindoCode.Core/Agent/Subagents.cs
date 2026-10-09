@@ -96,7 +96,10 @@ public sealed class SubagentManager : IDisposable
                         case NoticeEvent n: h.Append($"\n{n.Text}\n"); break;
                     }
                 };
-                await child.RunTurnAsync(prompt, linked.Token);
+                // §1: a preamble the user configured for subagents, prepended to the task (empty = none)
+                var preamble = _parent.Settings.SubagentSystemPrompt;
+                var task = string.IsNullOrWhiteSpace(preamble) ? prompt : preamble.Trim() + "\n\n" + prompt;
+                await child.RunTurnAsync(task, linked.Token);
                 // RunTurnAsync swallows the failure internally (it emits a NoticeEvent and returns), so without this
                 // the child looked "finished" after e.g. HTTP 404 for an unknown model and the UI showed no error.
                 h.Error = child.LastTurnError;

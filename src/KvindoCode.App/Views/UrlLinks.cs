@@ -47,9 +47,16 @@ public static class UrlLinks
     /// Record one URL at a known offset (the markdown renderer already knows where it put it) and make sure the host
     /// has a click handler.
     /// </summary>
-    public static void Add(SelectableTextBlock host, int start, int length, string url)
+    /// <remarks>
+    /// The click action MUST be set here. It was not: this overload only added the span and wired the handlers, leaving
+    /// <c>OnClick</c> null, so <see cref="TryOpen"/> returned false and every URL the MARKDOWN renderer produced was
+    /// registered, showed the hand cursor, and did nothing when clicked — reported 2026-10-09 as "the portal link is
+    /// not clickable". Only <see cref="Attach"/> (plain blocks) set it.
+    /// </remarks>
+    public static void Add(SelectableTextBlock host, int start, int length, string url, Action<string>? open = null)
     {
         if (!Maps.TryGetValue(host, out var map)) { map = new Map(); Maps[host] = map; }
+        map.OnClick ??= open ?? Shell.Open;
         if (map.Spans.Any(s => s.Start == start && s.Length == length)) return;
         map.Spans.Add(new Span(start, length, url));
         Wire(host, map);
@@ -128,11 +135,8 @@ public static class UrlLinks
     {
         if (!Maps.TryGetValue(host, out var map) || map.Spans.Count == 0) return null;
         if (host.TextLayout is not { } layout) return null;
-        var hit = layout.HitTestPoint(e.GetPosition(host));
-        if (!hit.IsInside) return null;
-        foreach (var s in map.Spans)
-            if (hit.TextPosition >= s.Start && hit.TextPosition < s.Start + s.Length) return s;
-        return null;
+        int i = PathLinks.SpanIndexAt(layout, e.GetPosition(host), map.Spans.Select(s => (s.Start, s.Length)).ToList());
+        return i < 0 ? null : map.Spans[i];
     }
 
     static bool TryOpen(SelectableTextBlock host, PointerEventArgs e, Action<string>? open)
@@ -140,16 +144,14 @@ public static class UrlLinks
         if (!Maps.TryGetValue(host, out var map) || map.Spans.Count == 0) return false;
         if (open is null) return false;
         // SelectableTextBlock renders its own text (no TextPresenter inside): use its public TextLayout.
+        // The hit test is PathLinks.SpanIndexAt, shared with the path links: Avalonia's HitTestPoint returns the right
+        // TextPosition but a WRONG IsInside, so requiring IsInside made every URL in an answer inert while still being
+        // registered and showing a hand cursor (reported 2026-10-09: "the portal link is not clickable").
         if (host.TextLayout is not { } layout) return false;
-        var hit = layout.HitTestPoint(e.GetPosition(host));
-        if (!hit.IsInside) return false;
-        foreach (var s in map.Spans)
-            if (hit.TextPosition >= s.Start && hit.TextPosition < s.Start + s.Length)
-            {
-                open(s.Url);
-                return true;
-            }
-        return false;
+        int i = PathLinks.SpanIndexAt(layout, e.GetPosition(host), map.Spans.Select(s => (s.Start, s.Length)).ToList());
+        if (i < 0) return false;
+        open(map.Spans[i].Url);
+        return true;
     }
 
     /// <summary>Double-click / ctrl-click text (a copied URL) is a plain selection, not a navigation.</summary>

@@ -40,6 +40,15 @@ public sealed class SessionView
     public void ClearQueue() { lock (_queueLock) Queue.Clear(); }
     public bool RemoveQueued(QueuedMessage message) { lock (_queueLock) return Queue.Remove(message); }
     public string Draft { get; set; } = "";
+    /// <summary>
+    /// Prompts the user sent in this session, for ↑/↓ recall in the composer (asked 2026-10-09, like [CC]). Held per
+    /// view and bounded, so a long session does not grow it without limit.
+    /// </summary>
+    public List<string> SentPrompts { get; } = new();
+    /// <summary>Position while walking the history: -1 = not recalling (the composer holds a draft).</summary>
+    public int HistoryCursor { get; set; } = -1;
+    /// <summary>The draft that was in the composer when recall started, so ↓ past the newest restores it.</summary>
+    public string HistoryDraft { get; set; } = "";
     public bool TodosDismissed { get; set; }
     public string TodosSig { get; set; } = "";
     public int PromptTokens { get; set; }

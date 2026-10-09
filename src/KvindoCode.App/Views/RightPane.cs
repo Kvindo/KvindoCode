@@ -82,7 +82,7 @@ public sealed class RightPane : UserControl
         // sessions slow (measured 10-17k TreeViewItems per switch, 2026-10-07). One assignment is all this costs.
         if (_filesTree is not null && _filesRoot == (_cwd.Length > 0 ? _cwd : Directory.GetCurrentDirectory()))
         {
-            _body.Content = _filesTree; _title.Text = _filesRoot; _active = "files";
+            _body.Content = _filesPane; _title.Text = _filesRoot; _active = "files";
         }
         else _active = "";
     }
@@ -137,6 +137,7 @@ public sealed class RightPane : UserControl
 
     string _filesRoot = "";                                          // the project the built tree belongs to
     TreeView? _filesTree;
+    Control? _filesPane;
 
     /// <summary>The body of the Files tab: the project tree, with the file that was clicked selected and revealed.</summary>
     /// <remarks>
@@ -156,7 +157,7 @@ public sealed class RightPane : UserControl
             // _body.Content MUST be re-assigned: the tree was cached, but the pane was showing a file, so returning
             // here without it changed only the title and left the file on screen — "I click Files but see no tree"
             // (reported 2026-10-08).
-            _body.Content = _filesTree;
+            _body.Content = _filesPane;
             if (_file is { } same && File.Exists(same.path))
                 Dispatcher.UIThread.Post(() => SelectPath(_filesTree!, same.path), DispatcherPriority.Background);
             return;
@@ -168,9 +169,135 @@ public sealed class RightPane : UserControl
             if (tree.SelectedItem is TreeViewItem { Tag: string file } && File.Exists(file)) FileRequested?.Invoke(file, null);
         };
         _filesTree = tree;
-        _body.Content = tree;
+        // §8: search — recursively by folder NAME, or by CONTENT inside the selected folder (asked 2026-10-09)
+        var panel = new DockPanel();
+        var searchRow = FilesSearchRow(root);
+        DockPanel.SetDock(searchRow, Dock.Top);
+        panel.Children.Add(searchRow);
+        panel.Children.Add(tree);
+        _filesPane = panel;
+        _body.Content = panel;
         if (_file is { } f && File.Exists(f.path))
             Dispatcher.UIThread.Post(() => SelectPath(tree, f.path), DispatcherPriority.Background);
+    }
+
+    CancellationTokenSource? _filesSearchCts;
+
+    /// <summary>
+    /// The Files tab's search bar: a query, a mode (folder names recursively, or file contents inside a folder) and a
+    /// results area. Runs off the UI thread, bounded, and cancels the previous search (asked 2026-10-09).
+    /// </summary>
+    Control FilesSearchRow(string root)
+    {
+        var box = new TextBox { Watermark = "Search…", Classes = { "plain" }, FontSize = 12.5, MinHeight = 28 };
+        var folders = new ToggleButton { Content = "Folders", Classes = { "outline" }, FontSize = 11.5, Padding = new Thickness(8, 2), IsChecked = true };
+        var content = new ToggleButton { Content = "Content", Classes = { "outline" }, FontSize = 11.5, Padding = new Thickness(8, 2) };
+        var hint = Ui.Muted("folder names, recursively", 11);
+        var results = new StackPanel { Spacing = 2, Margin = new Thickness(6, 4, 6, 6) };
+
+        folders.IsCheckedChanged += (_, _) => { if (folders.IsChecked == true) { content.IsChecked = false; hint.Text = "folder names, recursively"; } };
+        content.IsCheckedChanged += (_, _) => { if (content.IsChecked == true) { folders.IsChecked = false; hint.Text = "file contents in the selected folder"; } };
+
+        async void RunSearch()
+        {
+            var q = (box.Text ?? "").Trim();
+            results.Children.Clear();
+            _filesSearchCts?.Cancel();
+            if (q.Length < 2) { results.Children.Add(hint); return; }
+            var cts = _filesSearchCts = new CancellationTokenSource();
+            // the content mode searches the selected folder (the tree's own selection), else the project root
+            var from = _filesTree?.SelectedItem is TreeViewItem { Tag: string t } && Directory.Exists(t) ? t : root;
+            results.Children.Add(Ui.Muted("Searching…", 11.5));
+            try
+            {
+                var hits = await Task.Run(() => content.IsChecked == true
+                    ? SearchContent(from, q, cts.Token)
+                    : SearchFolders(from, q, cts.Token), cts.Token);
+                if (cts.IsCancellationRequested) return;
+                results.Children.Clear();
+                if (hits.Count == 0) { results.Children.Add(Ui.Muted("Nothing found.", 11.5)); return; }
+                foreach (var hit in hits.Take(200))
+                {
+                    var rel = _cwd.Length > 0 && hit.StartsWith(_cwd, StringComparison.Ordinal) ? Path.GetRelativePath(_cwd, hit) : hit;
+                    var b = new Button { Content = rel, Classes = { "ghost" }, FontSize = 12, Padding = new Thickness(4, 2), HorizontalAlignment = HorizontalAlignment.Stretch, HorizontalContentAlignment = HorizontalAlignment.Left };
+                    ToolTip.SetTip(b, hit);
+                    b.Click += (_, _) => { if (File.Exists(hit)) FileRequested?.Invoke(hit, null); else Shell.Open(hit); };
+                    results.Children.Add(b);
+                }
+                if (hits.Count > 200) results.Children.Add(Ui.Muted($"… {hits.Count - 200} more — refine the query", 11));
+            }
+            catch (OperationCanceledException) { }
+            catch (Exception e) { results.Children.Clear(); results.Children.Add(Ui.Muted("Search failed: " + e.Message, 11.5)); }
+        }
+
+        box.KeyDown += (_, e) => { if (e.Key == Avalonia.Input.Key.Enter) { e.Handled = true; RunSearch(); } };
+        var go = new Button { Content = "Search", Classes = { "outline" }, FontSize = 11.5, Padding = new Thickness(8, 2) };
+        go.Click += (_, _) => RunSearch();
+        var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4, Margin = new Thickness(6, 6, 6, 2) };
+        box.Width = 190;
+        row.Children.Add(box); row.Children.Add(folders); row.Children.Add(content); row.Children.Add(go);
+        var top = new StackPanel { Spacing = 2 };
+        top.Children.Add(row);
+        top.Children.Add(hint);
+        var scroller = new ScrollViewer { MaxHeight = 260, Content = results, VerticalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto };
+        top.Children.Add(scroller);
+        return top;
+    }
+
+    /// <summary>Directories whose NAME matches, recursively. Bounded in depth and count.</summary>
+    public static List<string> SearchFolders(string root, string query, CancellationToken ct)
+    {
+        var hits = new List<string>();
+        var stack = new Stack<(string Dir, int Depth)>();
+        stack.Push((root, 0));
+        while (stack.Count > 0 && hits.Count < 500)
+        {
+            ct.ThrowIfCancellationRequested();
+            var (dir, depth) = stack.Pop();
+            if (depth > 8) continue;
+            string[] subs;
+            try { subs = Directory.GetDirectories(dir); } catch { continue; }
+            foreach (var sub in subs)
+            {
+                var name = Path.GetFileName(sub);
+                if (ShouldSkip(name)) continue;
+                if (name.Contains(query, StringComparison.OrdinalIgnoreCase)) hits.Add(sub);
+                stack.Push((sub, depth + 1));
+            }
+        }
+        return hits;
+    }
+
+    /// <summary>Files whose CONTENT contains the query, under one folder. Binary and oversized files are skipped.</summary>
+    public static List<string> SearchContent(string from, string query, CancellationToken ct)
+    {
+        var hits = new List<string>();
+        var deadline = DateTime.UtcNow.AddSeconds(15);
+        var stack = new Stack<(string Dir, int Depth)>();
+        stack.Push((from, 0));
+        while (stack.Count > 0 && hits.Count < 500 && DateTime.UtcNow < deadline)
+        {
+            ct.ThrowIfCancellationRequested();
+            var (dir, depth) = stack.Pop();
+            if (depth > 8) continue;
+            string[] subs, files;
+            try { subs = Directory.GetDirectories(dir); files = Directory.GetFiles(dir); } catch { continue; }
+            foreach (var f in files)
+            {
+                ct.ThrowIfCancellationRequested();
+                try
+                {
+                    var fi = new FileInfo(f);
+                    if (fi.Length > 2_000_000) continue;
+                    var text = File.ReadAllText(f);
+                    if (text.IndexOf('\0') >= 0) continue;                    // binary
+                    if (text.Contains(query, StringComparison.OrdinalIgnoreCase)) hits.Add(f);
+                }
+                catch { }
+            }
+            foreach (var sub in subs) if (!ShouldSkip(Path.GetFileName(sub))) stack.Push((sub, depth + 1));
+        }
+        return hits;
     }
 
     /// <summary>A directory node with NO children built yet; the expander appears because of the placeholder.</summary>
@@ -322,16 +449,56 @@ public sealed class RightPane : UserControl
         return new ScrollViewer { Content = list, VerticalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto };
     }
 
+    /// <summary>Extensions the editor offers, so the Edit button does not appear for a binary file.</summary>
+    static readonly HashSet<string> TextExts = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".md", ".txt", ".json", ".jsonl", ".yaml", ".yml", ".toml", ".ini", ".conf", ".cfg", ".env", ".properties",
+        ".cs", ".py", ".js", ".ts", ".tsx", ".jsx", ".sh", ".bash", ".zsh", ".ps1", ".bat", ".go", ".rs", ".java",
+        ".kt", ".rb", ".php", ".pl", ".lua", ".sql", ".tf", ".hcl", ".gradle", ".dockerfile", ".gitignore",
+        ".xml", ".html", ".htm", ".css", ".scss", ".csv", ".tsv", ".log", ".service", ".rules", ".mk", ".makefile",
+    };
+
+    /// <summary>
+    /// True when a file is safe to edit as text: a known text extension (or no extension at all), and no NUL byte in
+    /// the first block — the same sniff the Read tool uses to call something binary.
+    /// </summary>
+    public static bool LooksLikeText(string path)
+    {
+        try
+        {
+            var ext = Path.GetExtension(path);
+            bool byExt = ext.Length == 0 || TextExts.Contains(ext) || string.Equals(Path.GetFileName(path), "Dockerfile", StringComparison.OrdinalIgnoreCase);
+            var fi = new FileInfo(path);
+            if (fi.Length > 2_000_000) return false;                  // too large to edit comfortably
+            using var fs = File.OpenRead(path);
+            var buf = new byte[Math.Min(8192, (int)Math.Min(fi.Length, 8192))];
+            int n = fs.Read(buf, 0, buf.Length);
+            for (int i = 0; i < n; i++) if (buf[i] == 0) return false;
+            return byExt;
+        }
+        catch { return false; }
+    }
+
     public void EditTextFile(string title, string path, Action? onSaved = null)
     {
         _title.Text = title;
         var text = new TextBox { Text = File.Exists(path) ? File.ReadAllText(path) : "", AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, Classes = { "plain" }, FontFamily = (FontFamily)Application.Current!.FindResource("KvMono")!, FontSize = 12.5, MinHeight = 320, VerticalAlignment = VerticalAlignment.Stretch };
         var status = Ui.Muted("");
+        // The file may have changed on disk since this editor opened it (the agent writing, another editor). Saving
+        // blindly would silently drop that change, so a mismatch is reported instead of overwritten (§9, 2026-10-09).
+        DateTime opened = File.Exists(path) ? File.GetLastWriteTimeUtc(path) : DateTime.MinValue;
         var save = new Button { Content = "Save", Classes = { "accent" } };
         save.Click += (_, _) =>
         {
             try
             {
+                var now = File.Exists(path) ? File.GetLastWriteTimeUtc(path) : DateTime.MinValue;
+                if (now != opened)
+                {
+                    status.Text = "The file changed on disk since you opened it — press Save again to overwrite, or close and reopen to reload.";
+                    opened = now;                       // the second press writes, as the message says
+                    return;
+                }
                 // S11: this wrote raw text and bypassed marker handling. Expand known vault markers like Write does, and
                 // if the user typed an unknown one, say so and write it literally rather than refusing the whole save
                 // (this is the human editing their own file, not the model).
@@ -575,6 +742,15 @@ public sealed class RightPane : UserControl
         var reveal = new Button { Content = "Show in folder", Classes = { "outline" }, FontSize = 12, Padding = new Thickness(10, 4) };
         reveal.Click += (_, _) => Shell.Open(Path.GetDirectoryName(full) ?? full);
         actions.Children.Add(open); actions.Children.Add(reveal);
+        // §9: text files can be edited here (asked 2026-10-09). The same editor the skills/memory rows use, so marker
+        // expansion on save is included; a binary file is refused rather than mangled.
+        if (File.Exists(full) && LooksLikeText(full))
+        {
+            var edit = new Button { Name = "FileEdit", Content = "Edit", Classes = { "outline" }, FontSize = 12, Padding = new Thickness(10, 4) };
+            ToolTip.SetTip(edit, "Edit this file here (Ctrl+S unavailable: use the Save button)");
+            edit.Click += (_, _) => EditTextFile(Path.GetFileName(full), full, () => Activate("file"));
+            actions.Children.Add(edit);
+        }
         wrap.IsCheckedChanged += (_, _) =>
         {
             _fileWrap = wrap.IsChecked == true;

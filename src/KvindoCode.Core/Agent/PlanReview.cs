@@ -161,7 +161,8 @@ public static class PlanReviewer
         var model = string.IsNullOrWhiteSpace(settings.ReviewModel) ? session.Model : settings.ReviewModel;
         var request = session.FirstUserRequest();
         var sb = new StringBuilder();
-        sb.AppendLine(PlanReviewGate.ReviewPrompt).AppendLine();
+        // the prompt is configurable now (asked 2026-10-09); empty means the built-in one
+        sb.AppendLine(string.IsNullOrWhiteSpace(settings.PlanReviewPrompt) ? PlanReviewGate.ReviewPrompt : settings.PlanReviewPrompt).AppendLine();
         if (request.Length > 0) sb.AppendLine("The user's request:").AppendLine(Clip(request, 3000)).AppendLine();
         sb.AppendLine($"Project directory: {session.Project.Cwd}").AppendLine().AppendLine("The plan under review:").AppendLine("<plan>").AppendLine(plan).AppendLine("</plan>");
 

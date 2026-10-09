@@ -41,6 +41,7 @@ First run: *Settings* (bottom-left) → API key (`~/.kvindocode/settings.json`, 
 | **Rewind / fork** | Hover a user message: ↶ rewinds the conversation to before it (message + attachments go back into the composer; the transcript file keeps the old branch; file edits are not undone), ⑂ forks a new session from that point. |
 | **Side panel** | Right-hand pane beside the transcript: **Files** (the project tree — a directory is listed when you expand it, so it costs nothing to show and switching sessions stays instant), plans, tool details, file previews, subagents, and project context. Clicking a path in the transcript opens its preview and selects it in the tree; selecting a file in the tree opens it. Context rows open in this pane; skill and memory rows have context-menu editing with Save. |
 | **Hooks** | Claude Code hooks are honoured: `~/.claude/settings(.local).json`, `<project>/.claude/settings(.local).json`, `~/.kvindocode/hooks.json`, `<project>/.kvindocode/hooks.json` (UserPromptSubmit, PreToolUse, PostToolUse, Stop, Notification; exit 2 / `decision:block`). `plan_review_gate.py` is skipped while the native plan review is on. Toggle in Settings; listed in the Context window. |
+| **Bulk delete** | Hold **Shift**: every session row shows a ✕ (delete that one) and each project header offers *Delete all N listed…*, which names the sessions and asks once. Transcript files stay on disk. |
 | **Sidebar** | *Pinned* and project groups are collapsed by default; a dot shows a working session (pulsing) or one with running background tasks, also on collapsed group headers. A session that finished in the background gets a blue dot and an entry in **Needs attention**: clicking the dot acknowledges it (the light goes out, the entry stays), the block's ✓ clears the dot and its ✕ removes the entry, and the block header's ✕ removes all of them. Writing to a session never clears its entry on its own — only another finished turn makes it wait again. |
 | **Continue after a restart** | At startup KvindoCode offers to continue the sessions that were active when it last was alive (`LastRunEnded`, refreshed every 20 s; a session counts if its newest message is within 15 min of it — `AppSettings.WasActiveInPreviousRun`). Continuing sends that session a real user turn: *“The app was restarted, please continue where you left off. Note that background tasks and loops will not be autocontinued, so you have to restore them yourself.”* The dialog offers *Continue all / Choose individually / Skip all*. |
 | **UI** | Left-aligned transcript, collapsible tool cards with diffs, closable task list, light/dark theme. |
@@ -51,7 +52,7 @@ Keys: `Enter` send · `Shift+Enter` newline · `Shift+Tab` plan/regular · `Esc`
 
 ## Develop
 ```bash
-dotnet test tests/KvindoCode.Tests      # 723 tests
+dotnet test tests/KvindoCode.Tests      # 756 tests
 python3 tools/update_scores.py      # refresh src/KvindoCode.App/Assets/scores.json
 dotnet run --project src/KvindoCode.App -- /path/to/project
 ```

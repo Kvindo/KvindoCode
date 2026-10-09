@@ -41,6 +41,12 @@ public partial class MainWindow : Window
     // search
     readonly SessionSearch _search = new();
     readonly DispatcherTimer _debounce = new() { Interval = TimeSpan.FromMilliseconds(250) };
+    /// <summary>
+    /// Shift held: the sidebar then shows a delete button on every session (asked 2026-10-09). Read from the event's
+    /// modifiers and cleared when the window is deactivated or a KeyUp is missed, because a latched modifier would
+    /// leave destructive buttons on screen.
+    /// </summary>
+    bool _shiftDown;
     readonly DispatcherTimer _hitTimer = new() { Interval = TimeSpan.FromMilliseconds(250) };
     readonly object _hitLock = new();
     List<SearchHit> _hits = new();
@@ -164,6 +170,8 @@ public partial class MainWindow : Window
         Input.AddHandler(KeyDownEvent, OnInputKeyDown, RoutingStrategies.Tunnel);
         Input.AddHandler(KeyDownEvent, OnPasteKey, RoutingStrategies.Tunnel);
         AddHandler(KeyDownEvent, OnWindowKeyDown, RoutingStrategies.Tunnel);
+        AddHandler(KeyUpEvent, (_, e) => SetShift(e.KeyModifiers.HasFlag(KeyModifiers.Shift), e.Key is Key.LeftShift or Key.RightShift ? false : null), RoutingStrategies.Tunnel);
+        Deactivated += (_, _) => SetShift(false);
 
         SearchBox.TextChanged += (_, _) => { SearchClear.IsVisible = !string.IsNullOrEmpty(SearchBox.Text); _debounce.Stop(); _debounce.Start(); };
 
@@ -800,6 +808,10 @@ public partial class MainWindow : Window
             text = sb.ToString();
             if (!vision && sv.Attachments.Any(a => a.IsImage)) sv.Transcript.Handle(new NoticeEvent("The current model cannot see images — they were attached as file paths only. Pick a model with “image” input.", false));
         }
+        // §11: remember it for ↑ recall (newest last), bounded
+        sv.SentPrompts.Add(text);
+        if (sv.SentPrompts.Count > 100) sv.SentPrompts.RemoveAt(0);
+        sv.HistoryCursor = -1; sv.HistoryDraft = "";
         Input.Text = ""; sv.Draft = ""; sv.Attachments.Clear(); RefreshAttachStrip();
         if (sv.Running) { sv.Enqueue(new QueuedMessage(text, images)); UpdateQueue(); return; }
         Start(sv, text, images);
@@ -1313,11 +1325,57 @@ public partial class MainWindow : Window
         {
             e.Handled = true;
             Send();
+            return;
         }
+        // §11: ↑/↓ walk the prompts sent in this session, like [CC]. Only when the caret is on the first / last line,
+        // otherwise the arrows must keep moving inside a multi-line draft (asked 2026-10-09).
+        if (e.Key == Key.Up && e.KeyModifiers == KeyModifiers.None && CaretOnLine(Input, first: true)) { RecallPrompt(-1); e.Handled = true; }
+        else if (e.Key == Key.Down && e.KeyModifiers == KeyModifiers.None && CaretOnLine(Input, first: false)) { RecallPrompt(+1); e.Handled = true; }
+    }
+
+    /// <summary>True when the caret sits on the first (or last) line of the composer.</summary>
+    static bool CaretOnLine(TextBox box, bool first)
+    {
+        var text = box.Text ?? "";
+        int caret = Math.Clamp(box.CaretIndex, 0, text.Length);
+        // first line: no newline anywhere before the caret. last line: none after it.
+        return first
+            ? caret == 0 || text.LastIndexOf('\n', caret - 1) < 0
+            : text.IndexOf('\n', caret) < 0;
+    }
+
+    /// <summary>Move through the sent-prompt history. <paramref name="step"/> is -1 for older, +1 for newer.</summary>
+    void RecallPrompt(int step)
+    {
+        var sv = _current;
+        if (sv is null || sv.SentPrompts.Count == 0) return;
+        if (sv.HistoryCursor < 0)
+        {
+            if (step > 0) return;                       // nothing newer than the draft
+            sv.HistoryDraft = Input.Text ?? "";         // remember the draft to restore on the way back
+            sv.HistoryCursor = sv.SentPrompts.Count;    // one past the newest
+        }
+        int next = Math.Clamp(sv.HistoryCursor + step, 0, sv.SentPrompts.Count);
+        if (next == sv.HistoryCursor) return;
+        sv.HistoryCursor = next;
+        var text = next >= sv.SentPrompts.Count ? sv.HistoryDraft : sv.SentPrompts[next];
+        Input.Text = text;
+        Input.CaretIndex = text.Length;
+    }
+
+    /// <summary>Update the Shift state and rebuild the sidebar only when it really changed.</summary>
+    void SetShift(bool down, bool? force = null)
+    {
+        bool want = force ?? down;
+        if (want == _shiftDown) return;
+        _shiftDown = want;
+        RebuildSidebar();
     }
 
     void OnWindowKeyDown(object? sender, KeyEventArgs e)
     {
+        // §7: Shift reveals the per-session delete buttons
+        if (e.Key is Key.LeftShift or Key.RightShift) { SetShift(true, true); return; }
         if (e.Key == Key.Tab && e.KeyModifiers == KeyModifiers.Shift) { ToggleMode(); e.Handled = true; }
         else if (e.Key == Key.Escape && _current is { Running: true }) { Stop(); e.Handled = true; }
         else if (e.Key == Key.N && e.KeyModifiers == KeyModifiers.Control) { if (_project != null) NewSession(_project); e.Handled = true; }
@@ -2115,6 +2173,24 @@ public partial class MainWindow : Window
             if (_current != null && _current.Session.Project.Cwd == p && !_current.Session.Info.Exists && !sessions.Any(s => s.Id == _current.Id))
                 ProjectsPanel.Children.Add(SessionRow(new SessionInfo { Id = _current.Id, Title = "New session", Updated = DateTimeOffset.UtcNow, Cwd = p, Path = _current.Session.Info.Path }, true, null));
 
+            // §7: while Shift is held the header offers a delete for the whole listed project (the count is in the
+            // confirmation, and the rows are named there too — never a silent bulk removal)
+            if (_shiftDown && sessions.Count > 0)
+            {
+                var bulkList = sessions.ToList();
+                var bulk = new Button { Name = "ProjectBulkDelete", Content = $"Delete all {bulkList.Count} listed…", Classes = { "ghost" }, FontSize = 11.5, Padding = new Thickness(36, 4), HorizontalAlignment = HorizontalAlignment.Stretch, HorizontalContentAlignment = HorizontalAlignment.Left };
+                Ui.BindBrush(bulk, Button.ForegroundProperty, "KvErr");
+                bulk.Click += async (_, _) =>
+                {
+                    if (!await ConfirmAsync($"Delete {bulkList.Count} session(s) from “{Path.GetFileName(p.TrimEnd('/'))}”?\n\n" +
+                                            string.Join("\n", bulkList.Take(10).Select(x => "· " + x.Title)) +
+                                            (bulkList.Count > 10 ? $"\n… and {bulkList.Count - 10} more" : "") +
+                                            "\n\nThey leave the list; the transcript files stay on disk.")) return;
+                    foreach (var s in bulkList) await DeleteSessionAsync(s);
+                };
+                ProjectsPanel.Children.Add(bulk);
+            }
+
             int shown = _expandedAll.Contains(p) ? sessions.Count : Math.Min(20, sessions.Count);
             foreach (var s in sessions.Take(shown)) ProjectsPanel.Children.Add(SessionRow(s, false, null));
             if (sessions.Count > shown)
@@ -2156,6 +2232,23 @@ public partial class MainWindow : Window
     {
         if (!_settings.AttentionAcknowledged.Remove(sessionId)) _settings.AttentionAcknowledged.Add(sessionId);
         TrySaveSettings();
+        RebuildSidebar();
+    }
+
+    /// <summary>
+    /// Delete one session from the list (the transcript file stays on disk). Shared by the context menu and the
+    /// Shift-revealed delete buttons (§7, asked 2026-10-09), so both go through the same confirmation and cleanup.
+    /// </summary>
+    async Task DeleteSessionAsync(SessionInfo s)
+    {
+        if (!await ConfirmAsync($"Delete “{s.Title}”? It is removed from the session list (the transcript file is kept on disk).")) return;
+        if (_live.TryGetValue(s.Id, out var v))
+        {
+            v.Cts?.Cancel(); v.Session.Dispose(); _live.Remove(s.Id);
+            if (_current == v) { _current = null; if (_project != null) NewSession(_project); }
+        }
+        _storage.Delete(s);
+        await RefreshSessionsAsync();
         RebuildSidebar();
     }
 
@@ -2245,7 +2338,7 @@ public partial class MainWindow : Window
             ((Border)lead).Background = new SolidColorBrush(Color.Parse("#3B82F6"));
             ToolTip.SetTip(lead, "Finished — waiting for you. Click the dot to clear it; the session stays in “Needs attention” until you remove it there.");
             // clicking the dot only acknowledges: the entry (and therefore the block) stays until the ✕ removes it
-            lead.Cursor = new Cursor(StandardCursorType.Hand);
+            lead.Cursor = Ui.HandCursor();   // shared: a new Cursor per rebuild is what the flicker report traced to
             lead.PointerPressed += (_, e) =>
             {
                 AcknowledgeAttention(s.Id);
@@ -2265,6 +2358,17 @@ public partial class MainWindow : Window
             ToolTip.SetTip(dismiss, "Remove this session from “Needs attention” (the blue dot and the entry both go)");
             dismiss.Click += (_, e) => { DismissAttention(s.Id); e.Handled = true; };
             Grid.SetColumn(dismiss, 3); grid.Children.Add(dismiss);
+        }
+
+        // §7: while Shift is held every row offers a delete button (the user's request: "if shift is pressed, delete
+        // icon will be shown next to each session")
+        if (_shiftDown && !unsaved)
+        {
+            var bulkDel = new Button { Name = "SessionBulkDelete", Content = Ui.Icon("IconTrash", "KvErr", 12), Classes = { "ghost" }, Padding = new Thickness(4, 2), Margin = new Thickness(2, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center };
+            ToolTip.SetTip(bulkDel, $"Delete “{s.Title}”");
+            var target = s;
+            bulkDel.Click += async (_, e) => { e.Handled = true; await DeleteSessionAsync(target); };
+            Grid.SetColumn(bulkDel, 3); grid.Children.Add(bulkDel);
         }
 
         Control content = grid;
@@ -2294,14 +2398,7 @@ public partial class MainWindow : Window
             var regen = new MenuItem { Header = "Regenerate title with AI" };
             regen.Click += async (_, _) => await RegenerateAsync(s);
             var del = new MenuItem { Header = "Delete session" };
-            del.Click += async (_, _) =>
-            {
-                if (!await ConfirmAsync($"Delete “{s.Title}”? It is removed from the session list (the transcript file is kept on disk).")) return;
-                if (_live.TryGetValue(s.Id, out var v)) { v.Cts?.Cancel(); v.Session.Dispose(); _live.Remove(s.Id); if (_current == v) { _current = null; if (_project != null) NewSession(_project); } }
-                _storage.Delete(s);
-                await RefreshSessionsAsync();
-                RebuildSidebar();
-            };
+            del.Click += async (_, _) => await DeleteSessionAsync(s);
             menu.Items.Add(pin); menu.Items.Add(ren); menu.Items.Add(regen); menu.Items.Add(new Separator()); menu.Items.Add(del);
             btn.ContextMenu = menu;
         }

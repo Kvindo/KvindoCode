@@ -44,6 +44,36 @@ public sealed class SettingsWindow : Window
         var auditorUrl = T(s.AuditorUrl, SecretAuditor.DefaultUrl);
         var auditorModel = T(s.AuditorModel, SecretAuditor.DefaultModel);
 
+        // §1 plan review: the round timeout and an editable reviewer prompt
+        var reviewTimeout = new NumericUpDown { Value = s.PlanReviewTimeoutSeconds, Minimum = 30, Maximum = 7200, Increment = 30, FormatString = "0", Width = 130, HorizontalAlignment = HorizontalAlignment.Left };
+        var reviewPrompt = new TextBox { Text = s.PlanReviewPrompt, Watermark = "(built-in prompt)", AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, Classes = { "plain" }, FontSize = 12.5, MinHeight = 90 };
+        var subagentPrompt = new TextBox { Text = s.SubagentSystemPrompt, Watermark = "(no preamble)", AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, Classes = { "plain" }, FontSize = 12.5, MinHeight = 70 };
+
+        // §2 native beep
+        var nativeBeep = new CheckBox { Content = "Beep natively when a session needs me (no hook needed)", IsChecked = s.NativeBeep, FontSize = 13 };
+        var notifyCommand = T(s.NotificationCommand, "auto-detect: ~/.local/bin/beep, else paplay/pw-play");
+        var beepStatus = new TextBlock { Classes = { "muted" }, FontSize = 12, TextWrapping = TextWrapping.Wrap };
+        void RefreshBeep()
+        {
+            var tmp = new AppSettings { NotificationCommand = (notifyCommand.Text ?? "").Trim(), NativeBeep = nativeBeep.IsChecked == true };
+            beepStatus.Text = KvindoCode.Core.Notify.Notifier.Available(tmp)
+                ? "Will use: " + KvindoCode.Core.Notify.Notifier.Resolve(tmp).Why
+                : "Nothing to play with — " + KvindoCode.Core.Notify.Notifier.Resolve(tmp).Why;
+        }
+        nativeBeep.IsCheckedChanged += (_, _) => RefreshBeep();
+        notifyCommand.TextChanged += (_, _) => RefreshBeep();
+        RefreshBeep();
+        var beepTest = new Button { Content = "Test", Classes = { "outline" }, HorizontalAlignment = HorizontalAlignment.Left };
+        beepTest.Click += (_, _) =>
+        {
+            var tmp = new AppSettings { NotificationCommand = (notifyCommand.Text ?? "").Trim(), NativeBeep = true };
+            beepStatus.Text = KvindoCode.Core.Notify.Notifier.TryPlay(tmp) ? "Played via " + KvindoCode.Core.Notify.Notifier.Resolve(tmp).Why : "Could not play: " + KvindoCode.Core.Notify.Notifier.Resolve(tmp).Why;
+        };
+
+        // §3 prompt prefix / suffix
+        var promptPrefix = new TextBox { Text = s.PromptPrefix, Watermark = "(nothing)", AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, Classes = { "plain" }, FontSize = 12.5, MinHeight = 70 };
+        var promptSuffix = new TextBox { Text = s.PromptSuffix, Watermark = "(nothing)", AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, Classes = { "plain" }, FontSize = 12.5, MinHeight = 70 };
+
         // VPN bypass
         var bypass = new CheckBox { Content = "Bypass VPN for API traffic", IsChecked = s.BypassVpn, FontSize = 13 };
         var bypassIf = T(s.BypassInterface, "auto-detect (e.g. wlp4s0)");
@@ -127,6 +157,13 @@ public sealed class SettingsWindow : Window
             s.MaxIterations = (int)(maxIters.Value ?? 400);
             s.BypassVpn = bypass.IsChecked == true; s.BypassInterface = (bypassIf.Text ?? "").Trim();
             s.PlanReview = review.IsChecked == true; s.PlanReviewRounds = (int)(rounds.Value ?? 2); s.PlanReviewMaxAfterReject = (int)(afterReject.Value ?? 3);
+            s.PlanReviewTimeoutSeconds = (int)(reviewTimeout.Value ?? 900);
+            s.PlanReviewPrompt = (reviewPrompt.Text ?? "").Trim();
+            s.SubagentSystemPrompt = (subagentPrompt.Text ?? "").Trim();
+            s.NativeBeep = nativeBeep.IsChecked == true;
+            s.NotificationCommand = (notifyCommand.Text ?? "").Trim();
+            s.PromptPrefix = promptPrefix.Text ?? "";
+            s.PromptSuffix = promptSuffix.Text ?? "";
             s.ClaudeSessionsDir = (claudeDir.Text ?? "").Trim(); s.ClaudeProjectsDir = (claudeProj.Text ?? "").Trim();
             s.ChromePort = (int)(chromePort.Value ?? 9222); s.ChromePath = (chromePath.Text ?? "").Trim(); s.ChromeAutoLaunch = chromeAuto.IsChecked == true; s.ChromeUseMyProfile = chromeMine.IsChecked == true;
             try { s.Save(); Saved = true; Close(); }
@@ -143,51 +180,91 @@ public sealed class SettingsWindow : Window
         }
         TextBlock H(string t) => new() { Text = t, FontSize = 15, FontWeight = FontWeight.SemiBold, Margin = new Thickness(0, 10, 0, 0) };
 
-        var body = new StackPanel
+        // §6: grouped into tabs instead of one long column (asked 2026-10-09). Every field is the same control as
+        // before, and the single save handler below is unchanged, so nothing about the settings themselves changed.
+        StackPanel Page(params Control[] children)
         {
-            Margin = new Thickness(24, 20, 24, 8), Spacing = 14,
-            Children =
-            {
-                new TextBlock { Text = "Settings", FontSize = 18, FontWeight = FontWeight.SemiBold },
+            var sp = new StackPanel { Margin = new Thickness(20, 16, 20, 20), Spacing = 14 };
+            foreach (var c in children) sp.Children.Add(c);
+            return sp;
+        }
+
+        var tabs = new TabControl { Margin = new Thickness(8, 8, 8, 0) };
+        tabs.Items.Add(new TabItem
+        {
+            Header = "Connection",
+            Content = new ScrollViewer { Content = Page(
                 H("API"),
-                Field("API base URL", url, "OpenAI-compatible endpoint (plusvibeapi.ru)."),
+                Field("API base URL", url, "[OI]-compatible endpoint (plusvibeapi.ru)."),
                 Field("API key", new StackPanel { Spacing = 4, Children = { key, show } }, "Stored in " + Paths.SettingsFile + " (owner-only). The KVINDOCODE_API_KEY environment variable overrides it."),
                 bypass, bypassIf, bypassStatus,
-                new StackPanel { Orientation = Orientation.Horizontal, Spacing = 10, Children = { test, status } },
-                H("Models"),
+                new StackPanel { Orientation = Orientation.Horizontal, Spacing = 10, Children = { test, status } }) },
+        });
+        tabs.Items.Add(new TabItem
+        {
+            Header = "Models",
+            Content = new ScrollViewer { Content = Page(
                 Field("Default model", model),
                 Field("Default model tag", defaultModelTag, "New sessions randomly choose a model with this tag; use (none) for the fixed default model."),
                 Field("Default subagent model", subagentModel, "Overrides a parent's model for spawned agents; the parent remains unchanged."),
                 Field("Default subagent model tag", subagentTag, "Use (none) unless subagents should select randomly from a tagged set."),
+                Field("Subagent preamble", subagentPrompt, "Prepended to every subagent's task (empty = none)."),
                 Field("Default reasoning effort", effort, "Applied to new sessions; each session can change it from the composer. Ignored by models without effort levels."),
-                Field("Title model", titleModel, "Cheap model that names sessions."),
-                H("Plan review"),
+                Field("Title model", titleModel, "Cheap model that names sessions.")) },
+        });
+        tabs.Items.Add(new TabItem
+        {
+            Header = "Plan review",
+            Content = new ScrollViewer { Content = Page(
                 review,
-                new StackPanel { Orientation = Orientation.Horizontal, Spacing = 24, Children = { Field("Review rounds", rounds), Field("Max rounds after a rejection", afterReject) } },
+                new StackPanel { Orientation = Orientation.Horizontal, Spacing = 24, Children = { Field("Review rounds", rounds), Field("Max rounds after a rejection", afterReject), Field("Round timeout (s)", reviewTimeout) } },
                 Field("Reviewer model", reviewModel, "Reads the code (read-only) and attacks the plan; the agent must revise it before you see it."),
-                H("Sessions"),
-                Field("Claude session registry folder", claudeDir, "Shares sessions with the Claude desktop app (…/claude-code-sessions/<account>). Empty = KvindoCode's own store. Restart to apply."),
-                Field("Claude transcripts folder", claudeProj),
-                compat, hooksBox, notifyBox, autoTitle,
-                showSubagents,
-                H("Security"),
-                auditBox,
-                new StackPanel { Orientation = Orientation.Horizontal, Spacing = 24, Children = { Field("Auditor base URL", auditorUrl, "OpenAI-compatible endpoint of the local vLLM model."), Field("Auditor model", auditorModel) } },
-                new TextBlock { Text = "The auditor (Qwen, served on 127.0.0.1:8001 by secret-auditor.service) inspects text and images for leaked credentials and blocks the cloud call when it finds one, storing the value in the encrypted vault and telling the model to fetch it with the Secrets tool instead.", Classes = { "muted" }, FontSize = 12, TextWrapping = TextWrapping.Wrap },
-                H("Chrome (Browser tool)"),
+                Field("Reviewer prompt", reviewPrompt, "Empty = the built-in “you HATE this implementation” prompt.")) },
+        });
+        tabs.Items.Add(new TabItem
+        {
+            Header = "Notify & prompt",
+            Content = new ScrollViewer { Content = Page(
+                H("Sound"),
+                notifyBox, nativeBeep,
+                Field("Sound command", notifyCommand, "Played directly (no shell). Empty = auto-detect."),
+                new StackPanel { Orientation = Orientation.Horizontal, Spacing = 10, Children = { beepTest, beepStatus } },
+                H("Prompt"),
+                Field("Text before every prompt", promptPrefix),
+                Field("Text after every prompt", promptSuffix, "Both are added to what the model receives, not to what is shown or saved in the transcript.")) },
+        });
+        tabs.Items.Add(new TabItem
+        {
+            Header = "Chrome",
+            Content = new ScrollViewer { Content = Page(
                 chromeMine,
                 Field("Remote-debugging port", chromePort, "A running Chrome can only be attached if it was started with --remote-debugging-port. If yours was not, KvindoCode asks before closing it gracefully and reopening it with the flag on the same profile (tabs restored). Without “my profile” it uses a separate persistent profile (~/.kvindocode/chrome-profile) with no extensions."),
                 chromeLauncher, chromeLauncherStatus,
-                Field("Chrome executable", chromePath), chromeAuto,
-                H("Appearance & tools"),
+                Field("Chrome executable", chromePath), chromeAuto) },
+        });
+        tabs.Items.Add(new TabItem
+        {
+            Header = "Sessions",
+            Content = new ScrollViewer { Content = Page(
+                Field("Claude session registry folder", claudeDir, "Shares sessions with the Claude desktop app (…/claude-code-sessions/<account>). Empty = KvindoCode's own store. Restart to apply."),
+                Field("Claude transcripts folder", claudeProj),
+                compat, autoTitle, showSubagents, hooksBox) },
+        });
+        tabs.Items.Add(new TabItem
+        {
+            Header = "Security & advanced",
+            Content = new ScrollViewer { Content = Page(
+                auditBox,
+                new StackPanel { Orientation = Orientation.Horizontal, Spacing = 24, Children = { Field("Auditor base URL", auditorUrl, "[OI]-compatible endpoint of the local vLLM model."), Field("Auditor model", auditorModel) } },
+                new TextBlock { Text = "The auditor inspects text and images for leaked credentials and blocks the cloud call when it finds one, storing the value in the encrypted vault and telling the model to fetch it with the Secrets tool instead.", Classes = { "muted" }, FontSize = 12, TextWrapping = TextWrapping.Wrap },
                 new StackPanel { Orientation = Orientation.Horizontal, Spacing = 24, Children = { Field("Theme", theme), Field("Font size", font), Field("Bash timeout (s)", timeout), Field("Max model calls per turn", maxIters) } },
-                new TextBlock { Text = "A single turn normally ends when the agent stops calling tools. This is a safety cap: when it is reached the turn continues automatically for a few more batches, then stops and tells you — hitting it usually means the task is looping.", Classes = { "muted" }, FontSize = 12, TextWrapping = TextWrapping.Wrap },
-            },
-        };
+                new TextBlock { Text = "A single turn normally ends when the agent stops calling tools. This is a safety cap: when it is reached the turn continues automatically for a few more batches, then stops and tells you — hitting it usually means the task is looping.", Classes = { "muted" }, FontSize = 12, TextWrapping = TextWrapping.Wrap }) },
+        });
+
         var footer = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(24, 10, 24, 16), Children = { cancel, save } };
         var root = new DockPanel();
         DockPanel.SetDock(footer, Dock.Bottom); root.Children.Add(footer);
-        root.Children.Add(new ScrollViewer { Content = body, VerticalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Disabled });
+        root.Children.Add(tabs);
         Content = root;
     }
 }

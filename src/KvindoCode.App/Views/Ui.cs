@@ -1,6 +1,7 @@
 using Avalonia;
 using Avalonia.Animation;
 using Avalonia.Controls;
+using Avalonia.Input;
 using Avalonia.Controls.Shapes;
 using AvPath = Avalonia.Controls.Shapes.Path;
 using Avalonia.Media;
@@ -54,6 +55,20 @@ public static class Ui
         if (brushKey == "White") p.Stroke = Brushes.White;
         else p.Bind(Shape.StrokeProperty, p.GetResourceObservable(brushKey));
         return p;
+    }
+
+    static Cursor? _handCursor;
+    /// <summary>
+    /// The one Hand cursor, created on first use. Constructing a <see cref="Cursor"/> needs an Avalonia platform, and
+    /// creating one per call (the sidebar did it on every rebuild) round-trips to the window system — the documented
+    /// cause of the flickering pointer (2026-10-05/06, revisited 2026-10-09). Returns null when no platform exists
+    /// (a plain unit test), so callers just get no cursor rather than an exception.
+    /// </summary>
+    public static Cursor? HandCursor()
+    {
+        if (_handCursor is not null) return _handCursor;
+        try { _handCursor = new Cursor(StandardCursorType.Hand); } catch { }
+        return _handCursor;
     }
 
     public static void BindBrush(Control c, AvaloniaProperty prop, string key) => c.Bind(prop, c.GetResourceObservable(key));

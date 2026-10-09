@@ -4,6 +4,7 @@ using System.Text.Json.Nodes;
 using KvindoCode.Core.Browser;
 using KvindoCode.Core.Context;
 using KvindoCode.Core.Hooks;
+using KvindoCode.Core.Notify;
 using KvindoCode.Core.Llm;
 using KvindoCode.Core.Secrets;
 using KvindoCode.Core.Tasks;
@@ -77,7 +78,11 @@ public sealed class AgentSession : IDisposable
         if (!_settings.NotificationSounds) return;              // silenced in Settings
         if (IsChild) return;                                   // a subagent finishing is not the human's business
         if (IsForeground) return;                              // the window is showing this session: the result is already in front of the human
-        if (!Hooks.Any("Notification")) return;
+        // A sound no longer REQUIRES a hook: the app can beep natively (asked 2026-10-09). Hooks still run when
+        // enabled, and either path alone is enough.
+        bool hooks = Hooks.Any("Notification");
+        bool native = _settings.NativeBeep && Notifier.Available(_settings);
+        if (!hooks && !native) return;
         lock (_lock)
         {
             // the same message at most once per 15 s per session (a looping question must not become a siren)
@@ -96,7 +101,10 @@ public sealed class AgentSession : IDisposable
             ["session_id"] = Info.Id,
             ["project"] = _ctx.Cwd,
         });
-        _ = Task.Run(async () => { try { await Hooks.RunAsync("Notification", payload, null, CancellationToken.None); } catch { } });
+        // The hook wins when one is configured: a user who already has a Notification hook (their own beep/notify-send)
+        // must not get the native sound on TOP of it — that would double every alert (2026-10-09).
+        if (hooks) _ = Task.Run(async () => { try { await Hooks.RunAsync("Notification", payload, null, CancellationToken.None); } catch { } });
+        else Notifier.TryPlay(_settings);
     }
     PlanReviewGate? _gate;
     public PlanReviewGate PlanGate => _gate ??= new PlanReviewGate(_settings);
@@ -1176,6 +1184,14 @@ public sealed class AgentSession : IDisposable
                         content += "\n\n<system-reminder>\nUserPromptSubmit hook additional context:\n" + hookCtx + "\n</system-reminder>";
                         Emit(new NoticeEvent($"UserPromptSubmit hook added {hookCtx.Length:n0} characters of context", false));
                     }
+                }
+                // §3: text the user configured to go with every prompt. Added to the OUTBOUND content (like the
+                // UserPromptSubmit context above), so what is shown and titled stays the user's own words.
+                if ((_settings.PromptPrefix + _settings.PromptSuffix).Trim().Length > 0)
+                {
+                    content = (string.IsNullOrWhiteSpace(_settings.PromptPrefix) ? "" : _settings.PromptPrefix.Trim() + "\n\n")
+                            + content
+                            + (string.IsNullOrWhiteSpace(_settings.PromptSuffix) ? "" : "\n\n" + _settings.PromptSuffix.Trim());
                 }
                 Add(new ChatMessage { Role = "user", Content = content, Images = images is { Count: > 0 } ? images.ToList() : null });
                 Emit(new UserMessageEvent(userText, _history.Count - 1));

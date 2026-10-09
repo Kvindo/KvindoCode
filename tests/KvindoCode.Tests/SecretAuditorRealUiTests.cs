@@ -2576,11 +2576,19 @@ public sealed class SecretAuditorRealUiTests
         SettingsWindow settingsWindow = new SettingsWindow(appSettings, new ScriptedLlmClient(new JsonArray { Script.Text("x") }), new List<ModelInfo>());
         settingsWindow.Show();
         Dispatcher.UIThread.RunJobs();
-        CheckBox checkBox = settingsWindow.GetVisualDescendants().OfType<CheckBox>().FirstOrDefault((CheckBox c) => (c.Content?.ToString() ?? "").Contains("Notification sounds"));
+        // The window is tabbed now (2026-10-09): a TabControl realises only the SELECTED page's visuals, so this
+        // searches the LOGICAL tree, which holds every control the constructor built.
+        static IEnumerable<Control> Logical(Control c)
+        {
+            yield return c;
+            foreach (var child in ((Avalonia.LogicalTree.ILogical)c).LogicalChildren.OfType<Control>())
+                foreach (var d in Logical(child)) yield return d;
+        }
+        CheckBox checkBox = Logical(settingsWindow).OfType<CheckBox>().FirstOrDefault((CheckBox c) => (c.Content?.ToString() ?? "").Contains("Notification sounds"));
         Assert.NotNull(checkBox);
         Assert.True(checkBox.IsChecked);
         checkBox.IsChecked = false;
-        Button button = settingsWindow.GetVisualDescendants().OfType<Button>().First((Button b) => (b.Content?.ToString() ?? "") == "Save");
+        Button button = Logical(settingsWindow).OfType<Button>().First((Button b) => (b.Content?.ToString() ?? "") == "Save");
         button.RaiseEvent(new RoutedEventArgs(Avalonia.Controls.Button.ClickEvent));
         Dispatcher.UIThread.RunJobs();
         Assert.False(appSettings.NotificationSounds);

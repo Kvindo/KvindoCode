@@ -37,6 +37,9 @@ public sealed partial class MarkdownView : StackPanel
     /// <summary>Maps an inline-code token to an existing file (or null). When set, file paths become clickable.</summary>
     public Func<string, string?>? PathResolver { get; set; }
     public event Action<string, int?>? PathClicked;
+    /// <summary>Raised when a URL in this view is clicked. Defaults to <see cref="Shell.Open"/>; exposed so a test can
+    /// assert that a click really opens the URL instead of only that it was registered (2026-10-09).</summary>
+    public event Action<string>? UrlClicked;
 
     // Paths may contain spaces and non-Latin characters (e.g. ~/Downloads/Счет SKTaurus от 30.09.26.pdf).
     static readonly Regex PathRx = new(@"^(?<p>.+\.[A-Za-z0-9]{1,10})(?::(?<l>\d+))?(?::\d+)?$", RegexOptions.Compiled);
@@ -574,7 +577,7 @@ public sealed partial class MarkdownView : StackPanel
     void AddUrlRun(InlineCollection inlines, string shown, string url)
     {
         int at = PlainLength(inlines);
-        if (_inlineHost is { } host) UrlLinks.Add(host, at, shown.Length, url);
+        if (_inlineHost is { } host) UrlLinks.Add(host, at, shown.Length, url, u => (UrlClicked ?? Shell.Open)(u));
         var r = new Run(shown)
         {
             FontFamily = (FontFamily)(Application.Current!.FindResource("KvMono") ?? FontFamily.Default),

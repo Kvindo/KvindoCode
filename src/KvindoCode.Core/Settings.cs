@@ -47,6 +47,24 @@ public sealed class AppSettings
     /// </summary>
     public int PlanReviewTimeoutSeconds { get; set; } = 900;
     public string ReviewModel { get; set; } = "anthropic/claude-haiku-4.5";
+    /// <summary>
+    /// Override for the adversarial plan-reviewer prompt. Empty = the built-in one
+    /// (PlanReviewGate.ReviewPrompt). Asked for 2026-10-09 so the review can be tuned without editing code.
+    /// </summary>
+    public string PlanReviewPrompt { get; set; } = "";
+    /// <summary>Preamble prepended to every subagent's task (empty = none). Asked for 2026-10-09.</summary>
+    public string SubagentSystemPrompt { get; set; } = "";
+    /// <summary>Text prepended to every prompt you send (empty = none).</summary>
+    public string PromptPrefix { get; set; } = "";
+    /// <summary>Text appended after every prompt you send (empty = none).</summary>
+    public string PromptSuffix { get; set; } = "";
+    /// <summary>
+    /// Play a sound NATIVELY when a session needs attention, without a Notification hook. Until 2026-10-09 a sound
+    /// required a hook in settings.json, so a fresh install was silent.
+    /// </summary>
+    public bool NativeBeep { get; set; } = true;
+    /// <summary>Command used for the native beep (empty = auto-detect the user's beep, else paplay/pw-play).</summary>
+    public string NotificationCommand { get; set; } = "";
     public int ChromePort { get; set; } = 9222;
     public string ChromePath { get; set; } = "";
     public bool ChromeAutoLaunch { get; set; } = true;
