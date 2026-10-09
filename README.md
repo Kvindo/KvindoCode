@@ -1,6 +1,6 @@
 # KvindoCode
 
-A Claude Code–style coding agent as a native desktop app, built with [Avalonia UI](https://avaloniaui.net/) (.NET 9) and powered by the models of [plusvibeapi.ru](https://plusvibeapi.ru/) (OpenAI-compatible `/v1/chat/completions`).
+A Claude Code–style coding agent as a native desktop app, built with [Avalonia UI](https://avaloniaui.net/) (.NET 9) and powered by the models of [plusvibeapi.ru](https://plusvibeapi.ru/?ref=DQPPLBH2) (OpenAI-compatible `/v1/chat/completions`).
 
 > **Renamed from PvCode (2026-10-08).** The product, its assemblies (`kvindocode.dll`), its launcher (`kvindocode`),
 > its config directory (`~/.kvindocode`) and its environment variables (`KVINDOCODE_*`) all carry the new name. Your
@@ -54,7 +54,7 @@ Keys: `Enter` send · `Shift+Enter` newline · `Shift+Tab` plan/regular · `Esc`
 
 ## Develop
 ```bash
-dotnet test tests/KvindoCode.Tests      # 766 tests
+dotnet test tests/KvindoCode.Tests      # 783 tests
 python3 tools/update_scores.py      # refresh src/KvindoCode.App/Assets/scores.json
 dotnet run --project src/KvindoCode.App -- /path/to/project
 ```
