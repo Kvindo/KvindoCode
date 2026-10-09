@@ -12,7 +12,9 @@ dist/
 # local run artifacts
 *.log
 .pvcode/
-.kvindocode/
+.kvindocode/*
+# ...except the skills that ship with the repo
+!.kvindocode/skills/
 
 # OS
 .DS_Store

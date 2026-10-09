@@ -32,6 +32,7 @@ First run: *Settings* (bottom-left) → API key (`~/.kvindocode/settings.json`, 
 | **Titles** | The session actions sit **beside the title**: 📋 copy the name to the clipboard, ✎ rename (or right-click), ✨ regenerate with AI (title model, default Haiku), 📌 pin. New sessions are auto-titled after the first turn. |
 | **Background tasks** | `Monitor` (stream a command's output lines into the chat — e.g. "write hello every 10 seconds"), `Bash run_in_background`, `TaskOutput/TaskStop/TaskList`; Tasks panel with Stop; the model is woken when a task exits (or on output with `wake_on_output`). |
 | **Browser** | `Browser` tool drives Chrome over DevTools (tabs, navigate, read page with numbered elements, click/type/select/keys/scroll, screenshots shown inline, JS, dialogs). Attaches to a Chrome started with `--remote-debugging-port` (or finds its `DevToolsActivePort`); otherwise launches its own Chrome with a persistent profile (`~/.kvindocode/chrome-profile`) — Chrome cannot attach to an already-running instance started without the flag. |
+| **Telegram** | Native `Telegram` tool: a session can **read** what a bot received and **send** messages or files (`me`, `read`, `send`, `send_file`/`send_photo`/`send_document`, `edit`, `delete`, `chat`, `admins`). The bot token lives in the encrypted vault and only its **name** is a setting (Security & advanced → Telegram), so it is never a parameter and never printed; the token is scrubbed from error messages too. `read` long-polls (`wait`) and remembers the last update id, so it is incremental. A bot has no history — it only sees messages sent after it existed, and a private user must `/start` it. Setup recipe: the `telegram-setup` skill. |
 | **VPN bypass** | When a VPN interface (tun/wg/ppp…) is up, API sockets are pinned to the physical default-route interface (`SO_BINDTODEVICE`, no root, no route changes). Settings shows the live status. |
 | **Context** | Auto-compaction at 90 % of the window (works on huge imported sessions); usage + gateway cost in the top bar, with the last request's cache hit and the session average. |
 | **Read tool** | Text, images (shown to vision models), PDFs (`pages`), docx/xlsx/pptx, notebooks. |
@@ -49,7 +50,7 @@ First run: *Settings* (bottom-left) → API key (`~/.kvindocode/settings.json`, 
 
 The header has a **find-in-session** box (case-insensitive regexp, literal if invalid): Enter / Shift+Enter step through the matches, which are real selections and can be copied; Esc clears it. The **Notification** hook payload carries `session_title`, `session_id` and `project`, so a desktop notification can name the session.
 
-Keys: `Enter` send · `Shift+Enter` newline · `Shift+Tab` plan/regular · `Esc` stop · `Ctrl+N` new session · `Ctrl+O` open folder · `Ctrl+F` search · `Ctrl+,` settings.
+Keys: `Enter` send · `Shift+Enter` newline · `Shift+Tab` plan/regular · `Esc` stop · `Ctrl+N` new session · `Ctrl+O` open folder · `Ctrl+F` search · `Ctrl+,` settings · hold `Alt` in the sidebar to reveal delete on every row (the per-project button lists the sessions and asks once; a row's trash deletes at once).
 
 ## Develop
 ```bash

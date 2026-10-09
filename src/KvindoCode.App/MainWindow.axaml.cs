@@ -520,13 +520,60 @@ public partial class MainWindow : Window
     TranscriptView MakeTranscript(SessionView sv)
     {
         var tv = new TranscriptView { BodyFontSize = _settings.FontSize, ProjectCwd = sv.Session.Project.Cwd };
-        tv.ToolDetailRequested += d => { if (sv == _current) { OpenPane(); _pane.ShowTool(d, sv.Session.Project.Cwd); } };
+        tv.ToolDetailRequested += d => { if (sv == _current) OpenToolDetail(d, sv); };
         tv.FileRequested += (p, l) => { if (sv == _current) { OpenPane(); _pane.SetProject(sv.Session.Project.Cwd); _pane.ShowFile(p, l); } };
         tv.PlanAwaiting += plan => { if (sv == _current) { OpenPane(); _pane.ShowPlan(plan, _settings.FontSize); } };
         tv.PlanOpened += plan => { if (sv == _current) { OpenPane(); _pane.ShowPlan(plan, _settings.FontSize); } };
         tv.RewindRequested += (i, t) => _ = RewindAsync(sv, i, t);
         tv.ForkRequested += (i, t) => _ = ForkAsync(sv, i, t);
         return tv;
+    }
+
+    /// <summary>
+    /// A clicked tool card opens the tool-detail pane — except an <c>Agent</c>/<c>AgentOutput</c> card, which opens
+    /// that subagent's own transcript. The card's text is the child's flattened output (tool calls appear as bare
+    /// "[Bash]", "[Read]" lines), so reading it there showed a wall of text instead of the real tool cards, notices and
+    /// markdown (reported 2026-10-09). The subagent transcript renders those from the same event stream a session uses.
+    /// </summary>
+    void OpenToolDetail(ToolDetail d, SessionView sv)
+    {
+        OpenPane();
+        if (SubagentFor(d, sv.Session) is { } agent)
+        {
+            _pane.SetAgentCwd(sv.Session.Project.Cwd);
+            _pane.ShowAgent(agent);
+            return;
+        }
+        _pane.ShowTool(d, sv.Session.Project.Cwd);
+    }
+
+    /// <summary>The subagent a card refers to: <c>AgentOutput</c>/<c>AgentStop</c> carry <c>agent_id</c>, and the
+    /// <c>Agent</c> spawn card names it in its result ("Subagent #3 started").</summary>
+    static SubagentHandle? SubagentFor(ToolDetail d, AgentSession session)
+    {
+        var id = d.Name switch
+        {
+            "AgentOutput" or "AgentStop" => ParseId(d.Input?["agent_id"]?.ToString()),
+            "Agent" => SubagentIdFromText(d.Output),
+            _ => null,
+        };
+        return id is { } n ? session.Subagents.Get(n) : null;
+    }
+
+    static int? ParseId(string? s) => int.TryParse(s?.Trim(), out var n) ? n : null;
+
+    /// <summary>The first "<c>#123</c>" in a tool result, which is how the Agent family names a child.</summary>
+    static int? SubagentIdFromText(string text)
+    {
+        int i = text.IndexOf('#');
+        while (i >= 0)
+        {
+            int j = i + 1;
+            while (j < text.Length && char.IsAsciiDigit(text[j])) j++;
+            if (j > i + 1 && int.TryParse(text.AsSpan(i + 1, j - i - 1), out var n)) return n;
+            i = text.IndexOf('#', i + 1);
+        }
+        return null;
     }
 
     SessionView Attach(AgentSession session, UiInteraction inter, bool replay)
@@ -2168,7 +2215,7 @@ public partial class MainWindow : Window
                     var trash = new Button { Name = "AttentionDelete", Content = Ui.Icon("IconTrash", "KvErr", 12), Classes = { "ghost" }, Padding = new Thickness(6, 2), Margin = new Thickness(2, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center };
                     ToolTip.SetTip(trash, $"Delete “{s.Title}” (these icons appear while Alt is held)");
                     var target = s;
-                    trash.Click += async (_, _) => await DeleteSessionAsync(target);
+                    trash.Click += async (_, _) => await DeleteSessionAsync(target, confirm: false);
                     Grid.SetColumn(trash, 3); wrap.Children.Add(trash);
                 }
                 ProjectsPanel.Children.Add(wrap);
@@ -2222,7 +2269,8 @@ public partial class MainWindow : Window
                                             string.Join("\n", bulkList.Take(10).Select(x => "· " + x.Title)) +
                                             (bulkList.Count > 10 ? $"\n… and {bulkList.Count - 10} more" : "") +
                                             "\n\nThey leave the list; the transcript files stay on disk.")) return;
-                    foreach (var s in bulkList) await DeleteSessionAsync(s);
+                    // the one confirmation above covers the whole batch — no dialog per session (asked 2026-10-09)
+                    foreach (var s in bulkList) await DeleteSessionAsync(s, confirm: false);
                 };
                 ProjectsPanel.Children.Add(bulk);
             }
@@ -2272,12 +2320,15 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
-    /// Delete one session from the list (the transcript file stays on disk). Shared by the context menu and the
-    /// Alt-revealed delete buttons (§7, asked 2026-10-09), so both go through the same confirmation and cleanup.
+    /// Delete one session from the list (the transcript file stays on disk). Shared by the context menu (which asks
+    /// first) and the Alt-revealed delete buttons (which do not — see the comment inside).
     /// </summary>
-    async Task DeleteSessionAsync(SessionInfo s)
+    async Task DeleteSessionAsync(SessionInfo s, bool confirm = true)
     {
-        if (!await ConfirmAsync($"Delete “{s.Title}”? It is removed from the session list (the transcript file is kept on disk).")) return;
+        // The Alt-revealed trash deletes immediately (asked 2026-10-09: trying to remove many sessions made every one
+        // of them a dialog). Holding Alt is itself the deliberate act, and the transcript file is kept on disk, so the
+        // conversation can still be found and reopened — the row just leaves the list.
+        if (confirm && !await ConfirmAsync($"Delete “{s.Title}”? It is removed from the session list (the transcript file is kept on disk).")) return;
         if (_live.TryGetValue(s.Id, out var v))
         {
             v.Cts?.Cancel(); v.Session.Dispose(); _live.Remove(s.Id);
@@ -2403,9 +2454,9 @@ public partial class MainWindow : Window
         if (_altDown && showBulkDelete && !unsaved)
         {
             var bulkDel = new Button { Name = "SessionBulkDelete", Content = Ui.Icon("IconTrash", "KvErr", 12), Classes = { "ghost" }, Padding = new Thickness(4, 2), Margin = new Thickness(2, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center };
-            ToolTip.SetTip(bulkDel, $"Delete “{s.Title}” (these icons appear while Alt is held)");
+            ToolTip.SetTip(bulkDel, $"Delete “{s.Title}” now (the transcript file stays on disk)");
             var target = s;
-            bulkDel.Click += async (_, e) => { e.Handled = true; await DeleteSessionAsync(target); };
+            bulkDel.Click += async (_, e) => { e.Handled = true; await DeleteSessionAsync(target, confirm: false); };
             Grid.SetColumn(bulkDel, 4); grid.Children.Add(bulkDel);
         }
 

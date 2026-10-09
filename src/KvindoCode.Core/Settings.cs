@@ -72,6 +72,15 @@ public sealed class AppSettings
     public bool NotificationDesktop { get; set; } = true;
     /// <summary>Override for the desktop-notification command (empty = auto-detect notify-send, else kdialog).</summary>
     public string NotificationDesktopCommand { get; set; } = "";
+    /// <summary>
+    /// Name of the vault entry that holds the Telegram bot token the <c>Telegram</c> tool uses. The name is a setting;
+    /// the value never leaves the encrypted vault (asked 2026-10-09). Empty = the tool is unavailable.
+    /// </summary>
+    public string TelegramTokenSecret { get; set; } = "telegram-bot-token";
+    /// <summary>Bot API server. Only change it for a self-hosted local Bot API server; empty = https://api.telegram.org.</summary>
+    public string TelegramApiBase { get; set; } = "";
+    /// <summary>Chat the <c>Telegram</c> tool sends to when no chat_id is given (a numeric id or an @channelusername).</summary>
+    public string TelegramDefaultChat { get; set; } = "";
     public int ChromePort { get; set; } = 9222;
     public string ChromePath { get; set; } = "";
     public bool ChromeAutoLaunch { get; set; } = true;

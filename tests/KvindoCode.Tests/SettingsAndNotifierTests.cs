@@ -254,6 +254,7 @@ public sealed class SettingsAndNotifierTests
     [Theory]
     [InlineData("local-model-docker")]
     [InlineData("chrome-integration")]
+    [InlineData("telegram-setup")]
     public void The_repo_ships_the_skill(string name)
     {
         var dir = new DirectoryInfo(AppContext.BaseDirectory);

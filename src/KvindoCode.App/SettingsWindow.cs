@@ -91,6 +91,24 @@ public sealed class SettingsWindow : Window
                 ? "Sent." : "Could not send: " + KvindoCode.Core.Notify.Notifier.ResolveNotify(tmp).Why;
         };
 
+        // §2c Telegram: the token value stays in the vault, only the entry NAME is a setting
+        var tgSecret = T(s.TelegramTokenSecret, "telegram-bot-token"); tgSecret.Name = "TelegramTokenSecret";
+        var tgChat = T(s.TelegramDefaultChat, "@channelusername or -1001234567890"); tgChat.Name = "TelegramDefaultChat";
+        var tgApi = T(s.TelegramApiBase, "https://api.telegram.org"); tgApi.Name = "TelegramApiBase";
+        var tgStatus = new TextBlock { Classes = { "muted" }, FontSize = 12, TextWrapping = TextWrapping.Wrap };
+        void RefreshTelegram()
+        {
+            var tmp = new AppSettings { TelegramTokenSecret = (tgSecret.Text ?? "").Trim() };
+            var name = tmp.TelegramTokenSecret;
+            if (name.Length == 0) { tgStatus.Text = "No vault entry named — the Telegram tool cannot run."; return; }
+            var vault = KvindoCode.Core.Secrets.SecretVault.Default;
+            tgStatus.Text = vault.Get(name) is { } rec
+                ? $"Will use the vault entry “{rec.Name}” (sha256 {rec.ShaShort}…) — the token itself is never shown or sent to the model."
+                : $"There is no vault entry named “{name}” yet. Create one (sidebar → Secrets, or the `telegram-setup` skill).";
+        }
+        tgSecret.TextChanged += (_, _) => RefreshTelegram();
+        RefreshTelegram();
+
         // §3 prompt prefix / suffix
         var promptPrefix = new TextBox { Text = s.PromptPrefix, Watermark = "(nothing)", AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, Classes = { "plain" }, FontSize = 12.5, MinHeight = 70 };
         var promptSuffix = new TextBox { Text = s.PromptSuffix, Watermark = "(nothing)", AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, Classes = { "plain" }, FontSize = 12.5, MinHeight = 70 };
@@ -187,6 +205,9 @@ public sealed class SettingsWindow : Window
             s.NotificationDesktopCommand = (desktopCommand.Text ?? "").Trim();
             s.PromptPrefix = promptPrefix.Text ?? "";
             s.PromptSuffix = promptSuffix.Text ?? "";
+            s.TelegramTokenSecret = (tgSecret.Text ?? "").Trim();
+            s.TelegramDefaultChat = (tgChat.Text ?? "").Trim();
+            s.TelegramApiBase = (tgApi.Text ?? "").Trim();
             s.ClaudeSessionsDir = (claudeDir.Text ?? "").Trim(); s.ClaudeProjectsDir = (claudeProj.Text ?? "").Trim();
             s.ChromePort = (int)(chromePort.Value ?? 9222); s.ChromePath = (chromePath.Text ?? "").Trim(); s.ChromeAutoLaunch = chromeAuto.IsChecked == true; s.ChromeUseMyProfile = chromeMine.IsChecked == true;
             try { s.Save(); Saved = true; Close(); }
@@ -285,7 +306,11 @@ public sealed class SettingsWindow : Window
                 new StackPanel { Orientation = Orientation.Horizontal, Spacing = 24, Children = { Field("Auditor base URL", auditorUrl, "[OI]-compatible endpoint of the local vLLM model."), Field("Auditor model", auditorModel) } },
                 new TextBlock { Text = "The auditor inspects text and images for leaked credentials and blocks the cloud call when it finds one, storing the value in the encrypted vault and telling the model to fetch it with the Secrets tool instead.", Classes = { "muted" }, FontSize = 12, TextWrapping = TextWrapping.Wrap },
                 new StackPanel { Orientation = Orientation.Horizontal, Spacing = 24, Children = { Field("Theme", theme), Field("Font size", font), Field("Bash timeout (s)", timeout), Field("Max model calls per turn", maxIters) } },
-                new TextBlock { Text = "A single turn normally ends when the agent stops calling tools. This is a safety cap: when it is reached the turn continues automatically for a few more batches, then stops and tells you — hitting it usually means the task is looping.", Classes = { "muted" }, FontSize = 12, TextWrapping = TextWrapping.Wrap }) },
+                new TextBlock { Text = "A single turn normally ends when the agent stops calling tools. This is a safety cap: when it is reached the turn continues automatically for a few more batches, then stops and tells you — hitting it usually means the task is looping.", Classes = { "muted" }, FontSize = 12, TextWrapping = TextWrapping.Wrap },
+                H("Telegram"),
+                Field("Vault entry holding the bot token", tgSecret, "The NAME of a secret, never the token itself. Create the bot with @BotFather, then store the token in the vault (sidebar → Secrets, or the `telegram-setup` skill)."),
+                tgStatus,
+                new StackPanel { Orientation = Orientation.Horizontal, Spacing = 24, Children = { Field("Default chat", tgChat, "Used when a call passes no chat_id."), Field("Bot API base", tgApi, "Empty = https://api.telegram.org. Only for a self-hosted local Bot API server.") } }) },
         });
 
         var footer = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(24, 10, 24, 16), Children = { cancel, save } };

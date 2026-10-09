@@ -30,8 +30,32 @@ public sealed class BatchOctober9UiTests(ITestOutputHelper o)
         var s = (AppSettings)typeof(MainWindow).GetField("_settings", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(w)!;
         s.ApiKey = "test-key-mock"; s.AutoTitle = false; s.PlanReview = false; s.AuditSecrets = false;
         w.Show();
-        Dispatcher.UIThread.RunJobs();
+        Settle(w);
         return w;
+    }
+
+    /// <summary>
+    /// Wait for the window's initial load to land.
+    /// </summary>
+    /// <remarks>
+    /// <c>OnOpenedAsync</c> begins with <c>_all = await Task.Run(() =&gt; SafeList())</c>: that CONTINUATION reassigns the
+    /// field, so a session a test has just added to <c>_all</c> is silently wiped if the load finishes afterwards — the
+    /// sidebar then renders nothing at all. It only showed up in a full run, where the thread pool is busy enough for
+    /// the continuation to land late (the bulk-delete test failed with "row trashes=0", 2026-10-09). The field is
+    /// replaced exactly once at startup, so wait for that replacement (the reference the constructor created is the
+    /// one to watch) and stop immediately when it has already happened.
+    /// </remarks>
+    static void Settle(MainWindow w)
+    {
+        var field = typeof(MainWindow).GetField("_all", BindingFlags.NonPublic | BindingFlags.Instance)!;
+        var initial = field.GetValue(w);
+        for (int i = 0; i < 300; i++)
+        {
+            Dispatcher.UIThread.RunJobs();
+            if (!ReferenceEquals(field.GetValue(w), initial)) break;
+            Thread.Sleep(10);
+        }
+        Dispatcher.UIThread.RunJobs();
     }
 
     // ---------------------------------------------------------------- §6 settings tabs
@@ -109,6 +133,44 @@ public sealed class BatchOctober9UiTests(ITestOutputHelper o)
 
     static void Invoke(object o, string method) =>
         o.GetType().GetMethod(method, BindingFlags.NonPublic | BindingFlags.Instance)!.Invoke(o, null);
+
+    /// <summary>
+    /// The Telegram settings are saved: the vault entry NAME, the default chat and the API base. The token value itself
+    /// has no control anywhere — only a name — which is what keeps it out of settings.json (2026-10-09).
+    /// </summary>
+    [AvaloniaFact]
+    public void The_telegram_settings_are_editable_and_saved()
+    {
+        var w = Window();
+        var settings = (AppSettings)typeof(MainWindow).GetField("_settings", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(w)!;
+        var sw = new SettingsWindow(settings, new ScriptedLlm(), new(), null);
+        sw.Show();
+        Dispatcher.UIThread.RunJobs();
+
+        static IEnumerable<Control> Logical(Control c)
+        {
+            yield return c;
+            foreach (var child in ((ILogical)c).LogicalChildren.OfType<Control>())
+                foreach (var d in Logical(child)) yield return d;
+        }
+        var all = Logical(sw).OfType<TextBox>().ToList();
+        var secret = all.First(t => t.Name == "TelegramTokenSecret");
+        var chat = all.First(t => t.Name == "TelegramDefaultChat");
+        o.WriteLine($"secret default = {secret.Text}, chat default = {chat.Text}");
+        secret.Text = "my-bot-token";
+        chat.Text = "@ops_channel";
+        var save = Logical(sw).OfType<Button>().First(b => (b.Content?.ToString() ?? "") == "Save");
+        save.RaiseEvent(new RoutedEventArgs(Avalonia.Controls.Button.ClickEvent));
+        Dispatcher.UIThread.RunJobs();
+
+        Assert.Equal("my-bot-token", settings.TelegramTokenSecret);
+        Assert.Equal("@ops_channel", settings.TelegramDefaultChat);
+        // no control anywhere holds a token value: the setting is a name, nothing else
+        Assert.DoesNotContain(Logical(sw).OfType<TextBox>(), t => t.Name is not null && t.Name.Contains("TelegramToken")
+                                                                                  && t.Name.Contains("Value"));
+        sw.Close();
+        w.Close();
+    }
 
     sealed class ScriptedLlm : KvindoCode.Core.Llm.ILlmClient
     {
@@ -241,6 +303,33 @@ public sealed class BatchOctober9UiTests(ITestOutputHelper o)
                     Assert.NotEqual(Grid.GetColumn(t), Grid.GetColumn(sib));
         // the Needs-attention block has its own trash, and the rows inside it carry none
         Assert.NotEmpty(attentionTrash);
+        w.Close();
+    }
+
+    /// <summary>
+    /// Clicking the Alt trash deletes at once (asked 2026-10-09: "Alt delete should not ask confirmation"). The proof
+    /// is that the list is refreshed straight away: a confirmation would await a dialog nobody answers, so the row
+    /// would still be in <c>_all</c>.
+    /// </summary>
+    [AvaloniaFact]
+    public async Task The_alt_trash_deletes_without_a_confirmation_dialog()
+    {
+        var w = Window();
+        List<SessionInfo> All() => (List<SessionInfo>)typeof(MainWindow).GetField("_all", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(w)!;
+        var info = new SessionInfo { Id = "gone1", Title = "GONE", Cwd = "/tmp", Updated = DateTimeOffset.UtcNow, Created = DateTimeOffset.UtcNow, Path = "/tmp/gone1.jsonl" };
+        All().Add(info);
+        ((AppSettings)typeof(MainWindow).GetField("_settings", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(w)!).ExpandedGroups.Add("/tmp");
+        typeof(MainWindow).GetMethod("SetAlt", BindingFlags.NonPublic | BindingFlags.Instance)!.Invoke(w, new object[] { true, true });
+        Invoke(w, "RebuildSidebar");
+        Dispatcher.UIThread.RunJobs();
+
+        var trash = w.GetVisualDescendants().OfType<Button>().FirstOrDefault(b => b.Name == "SessionBulkDelete");
+        Assert.NotNull(trash);
+        trash.RaiseEvent(new RoutedEventArgs(Avalonia.Controls.Button.ClickEvent));
+        // the list is rebuilt from disk, which only happens if the delete ran through — a dialog would still be awaited
+        for (int i = 0; i < 60 && All().Any(x => x.Id == "gone1"); i++) { await Task.Delay(50); Dispatcher.UIThread.RunJobs(); }
+
+        Assert.DoesNotContain(All(), x => x.Id == "gone1");
         w.Close();
     }
 }
