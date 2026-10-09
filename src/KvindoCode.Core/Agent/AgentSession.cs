@@ -81,8 +81,9 @@ public sealed class AgentSession : IDisposable
         // A sound no longer REQUIRES a hook: the app can beep natively (asked 2026-10-09). Hooks still run when
         // enabled, and either path alone is enough.
         bool hooks = Hooks.Any("Notification");
-        bool native = _settings.NativeBeep && Notifier.Available(_settings);
-        if (!hooks && !native) return;
+        bool nativeSound = _settings.NativeBeep && Notifier.Available(_settings);
+        bool nativePopup = _settings.NotificationDesktop && Notifier.NotifyAvailable(_settings);
+        if (!hooks && !nativeSound && !nativePopup) return;
         lock (_lock)
         {
             // the same message at most once per 15 s per session (a looping question must not become a siren)
@@ -103,8 +104,13 @@ public sealed class AgentSession : IDisposable
         });
         // The hook wins when one is configured: a user who already has a Notification hook (their own beep/notify-send)
         // must not get the native sound on TOP of it — that would double every alert (2026-10-09).
-        if (hooks) _ = Task.Run(async () => { try { await Hooks.RunAsync("Notification", payload, null, CancellationToken.None); } catch { } });
-        else Notifier.TryPlay(_settings);
+        if (hooks) { _ = Task.Run(async () => { try { await Hooks.RunAsync("Notification", payload, null, CancellationToken.None); } catch { } }); return; }
+        // native path: a sound and/or a desktop popup, the equivalent of what the hook did (asked 2026-10-09). The
+        // title is the app name; the body names the session, as the user's own hook did.
+        var title = "KvindoCode";
+        var body = $"{Info.Title} — {message}";
+        if (nativeSound) Notifier.TryPlay(_settings);
+        if (nativePopup) _ = Task.Run(() => Notifier.TryNotify(_settings, title, body));
     }
     PlanReviewGate? _gate;
     public PlanReviewGate PlanGate => _gate ??= new PlanReviewGate(_settings);
@@ -145,6 +151,12 @@ public sealed class AgentSession : IDisposable
     /// <summary>low | medium | high | xhigh | max, or null for the provider default.</summary>
     public string? Effort { get; private set; }
     public Func<string, ModelInfo?>? ModelLookup { get; set; }
+    /// <summary>
+    /// Resolves a model by its DISPLAY name (what the picker shows, e.g. "DeepSeek V4.1 Flash") to its API id.
+    /// Needed because a model asked to "spawn these models as agents" passes the names it can see: the tag field
+    /// matched nothing, so every subagent silently ran the parent's model (reported 2026-10-09).
+    /// </summary>
+    public Func<string, string?>? ModelNameLookup { get; set; }
     /// <summary>How `Secrets get to=clipboard` hands a value to the human (the UI wires this to the system clipboard).</summary>
     public Func<string, Task<bool>>? ClipboardSetter { get; set; }
     /// <summary>The local secret auditor — scans tool results for leaked secrets before they reach the transcript.</summary>

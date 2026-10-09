@@ -65,6 +65,13 @@ public sealed class AppSettings
     public bool NativeBeep { get; set; } = true;
     /// <summary>Command used for the native beep (empty = auto-detect the user's beep, else paplay/pw-play).</summary>
     public string NotificationCommand { get; set; } = "";
+    /// <summary>
+    /// Show a desktop notification (notify-send) when a session needs attention — the native equivalent of what the
+    /// Notification hook used to do, so no hook is needed (asked 2026-10-09).
+    /// </summary>
+    public bool NotificationDesktop { get; set; } = true;
+    /// <summary>Override for the desktop-notification command (empty = auto-detect notify-send, else kdialog).</summary>
+    public string NotificationDesktopCommand { get; set; } = "";
     public int ChromePort { get; set; } = 9222;
     public string ChromePath { get; set; } = "";
     public bool ChromeAutoLaunch { get; set; } = true;

@@ -82,6 +82,12 @@ public sealed class SubagentManager : IDisposable
                     : !string.IsNullOrWhiteSpace(_parent.Settings.DefaultSubagentModel) ? _parent.Settings.DefaultSubagentModel : _parent.Model;
                 var selectedTag = !string.IsNullOrWhiteSpace(h.ModelTag) ? h.ModelTag
                     : !string.IsNullOrWhiteSpace(_parent.Settings.DefaultSubagentModelTag) ? _parent.Settings.DefaultSubagentModelTag : _parent.ModelTag;
+                // a "tag" that is really a model's display name selects that model (see AgentSession.ModelNameLookup);
+                // otherwise TaggedModels() matches nothing and the child silently runs the parent's model
+                if (!string.IsNullOrWhiteSpace(selectedTag) && _parent.ModelNameLookup?.Invoke(selectedTag) is { } namedModel)
+                {
+                    selectedModel = namedModel; selectedTag = null;
+                }
                 if (!string.IsNullOrWhiteSpace(selectedModel)) child.SetModel(selectedModel);
                 if (!string.IsNullOrWhiteSpace(selectedTag)) child.SetModelTag(selectedTag);
                 h.EffectiveModel = child.Model;

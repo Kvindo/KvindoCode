@@ -60,6 +60,55 @@ public static class Notifier
         catch { return false; }
     }
 
+    /// <summary>Desktop-notification programs, in order of preference.</summary>
+    static readonly string[] Notifiers = { "notify-send", "kdialog" };
+
+    /// <summary>What a desktop notification would use, or empty when none is installed.</summary>
+    public static (string Exe, string Why) ResolveNotify(AppSettings s)
+    {
+        if (!string.IsNullOrWhiteSpace(s.NotificationDesktopCommand))
+        {
+            var parts = ArgSplit(s.NotificationDesktopCommand.Trim());
+            return parts.Length == 0 ? ("", "no command") : (parts[0], "the command set in Settings");
+        }
+        foreach (var n in Notifiers)
+            if (Which(n) is { } path) return (path, n);
+        return ("", "notify-send is not installed");
+    }
+
+    public static bool NotifyAvailable(AppSettings s) => ResolveNotify(s).Exe.Length > 0;
+
+    /// <summary>
+    /// Show a desktop notification — the native equivalent of what the Notification hook did with notify-send, so a
+    /// fresh install gets a popup naming the session without installing a hook (asked 2026-10-09). The program is
+    /// started directly with an argument list, never through a shell, so a session title cannot inject a command.
+    /// </summary>
+    public static bool TryNotify(AppSettings s, string title, string body)
+    {
+        try
+        {
+            var (exe, _) = ResolveNotify(s);
+            if (exe.Length == 0) return false;
+            var psi = new ProcessStartInfo(exe) { UseShellExecute = false, RedirectStandardError = true, RedirectStandardOutput = true };
+            if (Path.GetFileNameWithoutExtension(exe).Equals("kdialog", StringComparison.OrdinalIgnoreCase))
+            {
+                psi.ArgumentList.Add("--title"); psi.ArgumentList.Add(title);
+                psi.ArgumentList.Add("--passivepopup"); psi.ArgumentList.Add(body);
+            }
+            else
+            {
+                // -a sets the app name shown by the notification daemon (the user's hook used "PvCode")
+                psi.ArgumentList.Add("-a"); psi.ArgumentList.Add(title);
+                psi.ArgumentList.Add("-u"); psi.ArgumentList.Add("normal");
+                psi.ArgumentList.Add(title);
+                psi.ArgumentList.Add(body);
+            }
+            using var p = Process.Start(psi);
+            return p is not null;
+        }
+        catch { return false; }
+    }
+
     static string[] ArgSplit(string args) =>
         args.Length == 0 ? Array.Empty<string>() : args.Split(' ', StringSplitOptions.RemoveEmptyEntries);
 

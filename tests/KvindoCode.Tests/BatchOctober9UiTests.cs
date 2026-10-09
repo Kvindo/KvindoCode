@@ -80,7 +80,7 @@ public sealed class BatchOctober9UiTests(ITestOutputHelper o)
     // ---------------------------------------------------------------- §7 bulk delete
 
     [AvaloniaFact]
-    public void Shift_reveals_a_delete_button_on_every_session_row()
+    public void Alt_reveals_a_delete_button_on_every_session_row()
     {
         var w = Window();
         var info = new SessionInfo { Id = "s1", Title = "DELETEME", Cwd = "/tmp", Updated = DateTimeOffset.UtcNow, Created = DateTimeOffset.UtcNow, Path = "/tmp/x.jsonl" };
@@ -93,15 +93,15 @@ public sealed class BatchOctober9UiTests(ITestOutputHelper o)
         Assert.Empty(w.GetVisualDescendants().OfType<Button>().Where(b => b.Name == "SessionBulkDelete"));
         Assert.Empty(w.GetVisualDescendants().OfType<Button>().Where(b => b.Name == "ProjectBulkDelete"));
 
-        // Shift held, as the window reads it
-        typeof(MainWindow).GetMethod("SetShift", BindingFlags.NonPublic | BindingFlags.Instance)!.Invoke(w, new object[] { true, true });
+        // Alt held, as the window reads it
+        typeof(MainWindow).GetMethod("SetAlt", BindingFlags.NonPublic | BindingFlags.Instance)!.Invoke(w, new object[] { true, true });
         Dispatcher.UIThread.RunJobs();
 
         Assert.NotEmpty(w.GetVisualDescendants().OfType<Button>().Where(b => b.Name == "SessionBulkDelete"));
         Assert.NotEmpty(w.GetVisualDescendants().OfType<Button>().Where(b => b.Name == "ProjectBulkDelete"));
 
-        // and it goes away again when Shift is released
-        typeof(MainWindow).GetMethod("SetShift", BindingFlags.NonPublic | BindingFlags.Instance)!.Invoke(w, new object[] { false, false });
+        // and it goes away again when Alt is released
+        typeof(MainWindow).GetMethod("SetAlt", BindingFlags.NonPublic | BindingFlags.Instance)!.Invoke(w, new object[] { false, false });
         Dispatcher.UIThread.RunJobs();
         Assert.Empty(w.GetVisualDescendants().OfType<Button>().Where(b => b.Name == "SessionBulkDelete"));
         w.Close();
@@ -207,6 +207,40 @@ public sealed class BatchOctober9UiTests(ITestOutputHelper o)
         typeof(MainWindow).GetMethod("RecallPrompt", BindingFlags.NonPublic | BindingFlags.Instance)!.Invoke(w, new object[] { +1 });
         typeof(MainWindow).GetMethod("RecallPrompt", BindingFlags.NonPublic | BindingFlags.Instance)!.Invoke(w, new object[] { +1 });
         Assert.Equal("a draft", input.Text);
+        w.Close();
+    }
+
+    /// <summary>
+    /// The Alt-revealed trash must not share a cell with the Needs-attention ✕. Both were placed in column 3 of the
+    /// same grid, so they drew on top of each other (reported 2026-10-09: "Need attention overlaps with Shift delete").
+    /// </summary>
+    [AvaloniaFact]
+    public void The_bulk_delete_icon_does_not_overlap_the_needs_attention_buttons()
+    {
+        var w = Window();
+        var settings = (AppSettings)typeof(MainWindow).GetField("_settings", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(w)!;
+        // a session that is finished-and-waiting (so it has the row's own ✕) AND in the Needs-attention block
+        var info = new SessionInfo { Id = "att1", Title = "WAITING", Cwd = "/tmp", Updated = DateTimeOffset.UtcNow, Created = DateTimeOffset.UtcNow, Path = "/tmp/att1.jsonl" };
+        ((List<SessionInfo>)typeof(MainWindow).GetField("_all", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(w)!).Add(info);
+        settings.AttentionSessions.Add("att1");
+        settings.AttentionAcknowledged.Clear();
+        settings.ExpandedGroups.Add("/tmp");
+        typeof(MainWindow).GetMethod("SetAlt", BindingFlags.NonPublic | BindingFlags.Instance)!.Invoke(w, new object[] { true, true });
+        Invoke(w, "RebuildSidebar");
+        Dispatcher.UIThread.RunJobs();
+
+        var trash = w.GetVisualDescendants().OfType<Button>().Where(b => b.Name == "SessionBulkDelete").ToList();
+        var dismiss = w.GetVisualDescendants().OfType<Button>().Where(b => b.Name == "SessionDismiss").ToList();
+        var attentionTrash = w.GetVisualDescendants().OfType<Button>().Where(b => b.Name == "AttentionDelete").ToList();
+        o.WriteLine($"row trashes={trash.Count} dismiss={dismiss.Count} attention trashes={attentionTrash.Count}");
+        Assert.NotEmpty(trash);
+        // the row's own trash (project list) and its ✕ live in different columns of the same grid
+        foreach (var t in trash)
+            if (t.Parent is Grid g)
+                foreach (var sib in g.Children.OfType<Button>().Where(b => b.Name == "SessionDismiss"))
+                    Assert.NotEqual(Grid.GetColumn(t), Grid.GetColumn(sib));
+        // the Needs-attention block has its own trash, and the rows inside it carry none
+        Assert.NotEmpty(attentionTrash);
         w.Close();
     }
 }

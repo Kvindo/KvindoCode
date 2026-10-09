@@ -33,9 +33,28 @@ public sealed class AgentTool : Tool
                 "a nickname such as \"haiku\" is not a valid API model and the request fails with HTTP 404. " +
                 "Omit `model` to inherit this session's model."));
 
+        // A `model_tag` that is really a model's DISPLAY name must select that model, and one that is neither a tag
+        // nor a model name must fail here: it used to match nothing and the subagent fell back to the parent's model,
+        // so five agents "each on a different model" all ran the same one (reported 2026-10-09).
+        var tags = ctx.Session.Settings;
+        if (!string.IsNullOrWhiteSpace(tag) && !IsRealTag(tags, tag))
+        {
+            var byName = ctx.Session.ModelNameLookup?.Invoke(tag.Trim());
+            if (byName is null)
+                return Task.FromResult(ToolResult.Err(
+                    $"'{tag}' is not a model tag and not a model name. Tags are the ones you set in the model picker" +
+                    (tags.ModelTags.Count > 0 ? $" (currently: {string.Join(", ", tags.ModelTags.Keys)})" : " (you have none set)") +
+                    ". Pass the exact model id in `model` instead (as listed in the picker), or a real tag."));
+            model = byName; tag = null;                       // name resolved: run that model
+        }
+
         var h = ctx.Session.Subagents.Spawn(prompt, Str(input, "description"), model, tag, ct);
         return Task.FromResult(ToolResult.Ok($"Subagent #{h.Id} started: {h.Description}. Use AgentOutput with agent_id={h.Id} to read its result."));
     }
+
+    /// <summary>True when at least one model carries this tag (tag matching is case-insensitive, as elsewhere).</summary>
+    internal static bool IsRealTag(AppSettings settings, string tag) =>
+        settings.ModelTags.Any(kv => kv.Value.Contains(tag.Trim(), StringComparer.OrdinalIgnoreCase));
 }
 
 public sealed class AgentOutputTool : Tool

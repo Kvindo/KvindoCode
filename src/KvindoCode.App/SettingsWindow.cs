@@ -37,7 +37,7 @@ public sealed class SettingsWindow : Window
         var maxIters = new NumericUpDown { Value = (decimal)s.MaxIterations, Minimum = 50, Maximum = 2000, Increment = 50, FormatString = "0", Width = 120, HorizontalAlignment = HorizontalAlignment.Left };
         var compat = new CheckBox { Content = "Also read ~/.claude and <project>/.claude (CLAUDE.md files, skills) — read-only", IsChecked = s.ReadClaudeCodeFiles, FontSize = 13 };
         var hooksBox = new CheckBox { Content = "Run Claude Code–style hooks (UserPromptSubmit, PreToolUse, PostToolUse, Stop, Notification) from settings.json / hooks.json", IsChecked = s.RunHooks, FontSize = 13 };
-        var notifyBox = new CheckBox { Content = "Notification sounds / alerts (the Notification hook) when a session needs attention", IsChecked = s.NotificationSounds, FontSize = 13 };
+        var notifyBox = new CheckBox { Name = "NotificationSounds", Content = "Alert me when a session needs attention (the master switch for every alert below and for a Notification hook)", IsChecked = s.NotificationSounds, FontSize = 13 };
         var autoTitle = new CheckBox { Content = "Name new sessions automatically with AI after the first turn", IsChecked = s.AutoTitle, FontSize = 13 };
         var showSubagents = new CheckBox { Content = "Show subagent transcripts in the session list (they are not your conversations)", IsChecked = s.ShowSubagentSessions, FontSize = 13 };
         var auditBox = new CheckBox { Content = "Audit every outbound request with the local secret-auditor model before sending it to the cloud", IsChecked = s.AuditSecrets, FontSize = 13 };
@@ -68,6 +68,27 @@ public sealed class SettingsWindow : Window
         {
             var tmp = new AppSettings { NotificationCommand = (notifyCommand.Text ?? "").Trim(), NativeBeep = true };
             beepStatus.Text = KvindoCode.Core.Notify.Notifier.TryPlay(tmp) ? "Played via " + KvindoCode.Core.Notify.Notifier.Resolve(tmp).Why : "Could not play: " + KvindoCode.Core.Notify.Notifier.Resolve(tmp).Why;
+        };
+
+        // §2b native desktop notification (notify-send), the hook's other half
+        var desktopNotify = new CheckBox { Name = "NotificationDesktop", Content = "Show a desktop notification (notify-send) when a session needs me", IsChecked = s.NotificationDesktop, FontSize = 13 };
+        var desktopCommand = T(s.NotificationDesktopCommand, "auto-detect: notify-send, else kdialog");
+        var desktopStatus = new TextBlock { Classes = { "muted" }, FontSize = 12, TextWrapping = TextWrapping.Wrap };
+        void RefreshDesktop()
+        {
+            var tmp = new AppSettings { NotificationDesktopCommand = (desktopCommand.Text ?? "").Trim() };
+            var (exe, why) = KvindoCode.Core.Notify.Notifier.ResolveNotify(tmp);
+            desktopStatus.Text = exe.Length > 0 ? "Will use: " + why : "No notifier — " + why;
+        }
+        desktopNotify.IsCheckedChanged += (_, _) => RefreshDesktop();
+        desktopCommand.TextChanged += (_, _) => RefreshDesktop();
+        RefreshDesktop();
+        var desktopTest = new Button { Content = "Test notification", Classes = { "outline" }, HorizontalAlignment = HorizontalAlignment.Left };
+        desktopTest.Click += (_, _) =>
+        {
+            var tmp = new AppSettings { NotificationDesktopCommand = (desktopCommand.Text ?? "").Trim() };
+            desktopStatus.Text = KvindoCode.Core.Notify.Notifier.TryNotify(tmp, "KvindoCode", "Test — this is what an alert looks like.")
+                ? "Sent." : "Could not send: " + KvindoCode.Core.Notify.Notifier.ResolveNotify(tmp).Why;
         };
 
         // §3 prompt prefix / suffix
@@ -162,6 +183,8 @@ public sealed class SettingsWindow : Window
             s.SubagentSystemPrompt = (subagentPrompt.Text ?? "").Trim();
             s.NativeBeep = nativeBeep.IsChecked == true;
             s.NotificationCommand = (notifyCommand.Text ?? "").Trim();
+            s.NotificationDesktop = desktopNotify.IsChecked == true;
+            s.NotificationDesktopCommand = (desktopCommand.Text ?? "").Trim();
             s.PromptPrefix = promptPrefix.Text ?? "";
             s.PromptSuffix = promptSuffix.Text ?? "";
             s.ClaudeSessionsDir = (claudeDir.Text ?? "").Trim(); s.ClaudeProjectsDir = (claudeProj.Text ?? "").Trim();
@@ -225,10 +248,14 @@ public sealed class SettingsWindow : Window
         {
             Header = "Notify & prompt",
             Content = new ScrollViewer { Content = Page(
-                H("Sound"),
-                notifyBox, nativeBeep,
+                H("Alerts"),
+                notifyBox,
+                nativeBeep,
                 Field("Sound command", notifyCommand, "Played directly (no shell). Empty = auto-detect."),
                 new StackPanel { Orientation = Orientation.Horizontal, Spacing = 10, Children = { beepTest, beepStatus } },
+                desktopNotify,
+                Field("Desktop-notification command", desktopCommand, "Run directly (no shell). Empty = auto-detect."),
+                new StackPanel { Orientation = Orientation.Horizontal, Spacing = 10, Children = { desktopTest, desktopStatus } },
                 H("Prompt"),
                 Field("Text before every prompt", promptPrefix),
                 Field("Text after every prompt", promptSuffix, "Both are added to what the model receives, not to what is shown or saved in the transcript.")) },

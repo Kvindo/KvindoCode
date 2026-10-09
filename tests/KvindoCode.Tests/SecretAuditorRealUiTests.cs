@@ -2584,14 +2584,21 @@ public sealed class SecretAuditorRealUiTests
             foreach (var child in ((Avalonia.LogicalTree.ILogical)c).LogicalChildren.OfType<Control>())
                 foreach (var d in Logical(child)) yield return d;
         }
-        CheckBox checkBox = Logical(settingsWindow).OfType<CheckBox>().FirstOrDefault((CheckBox c) => (c.Content?.ToString() ?? "").Contains("Notification sounds"));
+        // found by Name, not by label: the label was reworded when the alert controls moved into one group (2026-10-09)
+        CheckBox checkBox = Logical(settingsWindow).OfType<CheckBox>().FirstOrDefault((CheckBox c) => c.Name == "NotificationSounds");
         Assert.NotNull(checkBox);
         Assert.True(checkBox.IsChecked);
         checkBox.IsChecked = false;
+        // the native desktop-notification switch (notify-send) is saved by the same window
+        CheckBox desktop = Logical(settingsWindow).OfType<CheckBox>().FirstOrDefault((CheckBox c) => c.Name == "NotificationDesktop");
+        Assert.NotNull(desktop);
+        Assert.True(desktop.IsChecked);
+        desktop.IsChecked = false;
         Button button = Logical(settingsWindow).OfType<Button>().First((Button b) => (b.Content?.ToString() ?? "") == "Save");
         button.RaiseEvent(new RoutedEventArgs(Avalonia.Controls.Button.ClickEvent));
         Dispatcher.UIThread.RunJobs();
         Assert.False(appSettings.NotificationSounds);
+        Assert.False(appSettings.NotificationDesktop);
         settingsWindow.Close();
     }
 

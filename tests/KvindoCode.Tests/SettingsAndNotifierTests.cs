@@ -114,6 +114,90 @@ public sealed class SettingsAndNotifierTests
         Assert.True(File.Exists(ran), "the configured Notification hook must still run");
     }
 
+    // ---------------------------------------------------------------- §2b native desktop notification (notify-send)
+
+    [Fact]
+    public void The_desktop_notifier_is_reported_and_never_assumed()
+    {
+        var s = new AppSettings();
+        var (exe, why) = Notifier.ResolveNotify(s);
+        Assert.False(string.IsNullOrWhiteSpace(why));
+        Assert.Equal(exe.Length > 0, Notifier.NotifyAvailable(s));
+    }
+
+    [Fact]
+    public void A_configured_desktop_command_wins_and_is_split_without_a_shell()
+    {
+        var s = new AppSettings { NotificationDesktopCommand = "/usr/bin/printf pop" };
+        var (exe, why) = Notifier.ResolveNotify(s);
+        Assert.Equal("/usr/bin/printf", exe);
+        Assert.Contains("Settings", why);
+    }
+
+    [Fact]
+    public void The_native_popup_runs_when_there_is_no_hook()
+    {
+        using var sb = new Sandbox();
+        var marker = Path.Combine(sb.Root, "popped");
+        var script = MakeNotifier(sb, marker);
+        var s = sb.Settings(x => { x.NotificationSounds = true; x.NativeBeep = false; x.NotificationDesktop = true; x.NotificationDesktopCommand = script; });
+        var session = new AgentSession(s, Script.Client(Script.Text("x")), sb.Project, new FakeInteraction());
+
+        session.Notify("please look");
+
+        Assert.True(WaitFile(marker), "the native desktop notification did not run");
+    }
+
+    [Fact]
+    public void With_a_hook_configured_the_native_popup_is_not_shown()
+    {
+        // The hook wins: a user who already gets a popup from their own Notification hook must not get ours on top.
+        using var sb = new Sandbox();
+        var hookRan = Path.Combine(sb.Root, "hook-ran");
+        var popped = Path.Combine(sb.Root, "popped");
+        var script = MakeNotifier(sb, popped);
+        var s = sb.Settings(x => { x.NotificationSounds = true; x.NativeBeep = false; x.NotificationDesktop = true; x.NotificationDesktopCommand = script; });
+        File.WriteAllText(Path.Combine(sb.Home, "hooks.json"),
+            "{\"hooks\":{\"Notification\":[{\"matcher\":\"\",\"hooks\":[{\"type\":\"command\",\"command\":\"touch " + hookRan.Replace("\\", "/") + "\"}]}]}}");
+        var session = new AgentSession(s, Script.Client(Script.Text("x")), sb.Project, new FakeInteraction());
+
+        session.Notify("please look");
+
+        Assert.True(WaitFile(hookRan), "the configured Notification hook must still run");
+        Thread.Sleep(300);
+        Assert.False(File.Exists(popped), "the native popup fired on top of the hook — every alert would be doubled");
+    }
+
+    [Fact]
+    public void The_desktop_popup_is_silent_when_the_switch_is_off()
+    {
+        using var sb = new Sandbox();
+        var marker = Path.Combine(sb.Root, "popped");
+        var script = MakeNotifier(sb, marker);
+        var s = sb.Settings(x => { x.NotificationSounds = true; x.NativeBeep = false; x.NotificationDesktop = false; x.NotificationDesktopCommand = script; });
+        var session = new AgentSession(s, Script.Client(Script.Text("x")), sb.Project, new FakeInteraction());
+
+        session.Notify("please look");
+        Thread.Sleep(300);
+
+        Assert.False(File.Exists(marker), "the desktop notification fired although it is switched off");
+    }
+
+    /// <summary>A stand-in notifier: running it in a real process is the only proof TryNotify actually starts one.</summary>
+    static string MakeNotifier(Sandbox sb, string marker)
+    {
+        var path = Path.Combine(sb.Root, "notify.sh");
+        File.WriteAllText(path, "#!/bin/sh\ntouch \"" + marker + "\"\n");
+        File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        return path;
+    }
+
+    static bool WaitFile(string file, int ms = 2000)
+    {
+        for (int i = 0; i < ms / 50 && !File.Exists(file); i++) Thread.Sleep(50);
+        return File.Exists(file);
+    }
+
     // ---------------------------------------------------------------- §3 prompt prefix / suffix
 
     [Fact]

@@ -42,11 +42,11 @@ public partial class MainWindow : Window
     readonly SessionSearch _search = new();
     readonly DispatcherTimer _debounce = new() { Interval = TimeSpan.FromMilliseconds(250) };
     /// <summary>
-    /// Shift held: the sidebar then shows a delete button on every session (asked 2026-10-09). Read from the event's
-    /// modifiers and cleared when the window is deactivated or a KeyUp is missed, because a latched modifier would
-    /// leave destructive buttons on screen.
+    /// Alt held: the sidebar then shows a delete button on every session (asked 2026-10-09; the user moved it off
+    /// Shift, which collided with other uses). Read from the event's modifiers and cleared when the window is
+    /// deactivated or a KeyUp is missed, because a latched modifier would leave destructive buttons on screen.
     /// </summary>
-    bool _shiftDown;
+    bool _altDown;
     readonly DispatcherTimer _hitTimer = new() { Interval = TimeSpan.FromMilliseconds(250) };
     readonly object _hitLock = new();
     List<SearchHit> _hits = new();
@@ -170,8 +170,10 @@ public partial class MainWindow : Window
         Input.AddHandler(KeyDownEvent, OnInputKeyDown, RoutingStrategies.Tunnel);
         Input.AddHandler(KeyDownEvent, OnPasteKey, RoutingStrategies.Tunnel);
         AddHandler(KeyDownEvent, OnWindowKeyDown, RoutingStrategies.Tunnel);
-        AddHandler(KeyUpEvent, (_, e) => SetShift(e.KeyModifiers.HasFlag(KeyModifiers.Shift), e.Key is Key.LeftShift or Key.RightShift ? false : null), RoutingStrategies.Tunnel);
-        Deactivated += (_, _) => SetShift(false);
+        AddHandler(KeyUpEvent, (_, e) => SetAlt(e.KeyModifiers.HasFlag(KeyModifiers.Alt), e.Key is Key.LeftAlt or Key.RightAlt ? false : null), RoutingStrategies.Tunnel);
+        // a lost KeyUp (focus change, WM gesture) must not leave the trash icons on screen
+        Deactivated += (_, _) => SetAlt(false);
+        AddHandler(PointerMovedEvent, (_, e) => SetAlt(e.KeyModifiers.HasFlag(KeyModifiers.Alt)), RoutingStrategies.Tunnel, handledEventsToo: true);
 
         SearchBox.TextChanged += (_, _) => { SearchClear.IsVisible = !string.IsNullOrEmpty(SearchBox.Text); _debounce.Stop(); _debounce.Start(); };
 
@@ -443,6 +445,22 @@ public partial class MainWindow : Window
 
     ModelDetails? DetailsOf(string id) => _catalog.FirstOrDefault(d => d.Id == id || d.Variants.Any(v => v.Address == id));
 
+    /// <summary>
+    /// A model's DISPLAY name (what the picker shows) to its API id. A model that was told to "spawn these models"
+    /// naturally passes the names it can see; without this they matched no tag and every subagent ran the parent's
+    /// model (reported 2026-10-09).
+    /// </summary>
+    string? LookupModelByName(string name)
+    {
+        name = name.Trim();
+        var exact = _catalog.FirstOrDefault(d => string.Equals(d.Display, name, StringComparison.OrdinalIgnoreCase));
+        if (exact is not null) return exact.Id;
+        // "DeepSeek V4.1 Flash" vs "DeepSeek V4.1 flash", or with the provider suffix the picker sometimes adds
+        var loose = _catalog.FirstOrDefault(d => d.Display.Replace(" ", "").Equals(name.Replace(" ", ""), StringComparison.OrdinalIgnoreCase));
+        if (loose is not null) return loose.Id;
+        return _models.Any(m => string.Equals(m.Id, name, StringComparison.OrdinalIgnoreCase)) ? name : null;
+    }
+
     string? ResolveModel(SessionInfo info)
     {
         if (!string.IsNullOrEmpty(info.KvModel)) return info.KvModel;
@@ -469,7 +487,7 @@ public partial class MainWindow : Window
         if (_current != null && _current.Session.Project.Cwd == project && !_current.Running && _current.Transcript.ItemCount == 0 && !_current.Session.Info.Exists)
         { Show(_current); RebuildSidebar(); return; }
         var inter = new UiInteraction();
-        var session = new AgentSession(_settings, _llm, project, inter, null, _storage) { ModelLookup = LookupModel, AutoTitle = _settings.AutoTitle };
+        var session = new AgentSession(_settings, _llm, project, inter, null, _storage) { ModelLookup = LookupModel, ModelNameLookup = LookupModelByName, AutoTitle = _settings.AutoTitle };
         var sv = Attach(session, inter, replay: false);
         Show(sv);
         RebuildSidebar();
@@ -486,7 +504,7 @@ public partial class MainWindow : Window
         {
             var inter = new UiInteraction();
             var session = await Task.Run(() => AgentSession.Resume(_settings, _llm, info, inter, _storage, ResolveModel));
-            session.ModelLookup = LookupModel; session.AutoTitle = _settings.AutoTitle;
+            session.ModelLookup = LookupModel; session.ModelNameLookup = LookupModelByName; session.AutoTitle = _settings.AutoTitle;
             var sv = Attach(session, inter, replay: true);
             _project = sv.Session.Project.Cwd;
             _settings.RememberProject(_project); try { _settings.Save(); } catch { }
@@ -713,7 +731,7 @@ public partial class MainWindow : Window
             AgentSession session;
             try { session = await Task.Run(() => AgentSession.Resume(_settings, _llm, target, inter, _storage, ResolveModel)); }
             catch (Exception e) { return $"Could not open session \"{title}\": {e.Message}"; }
-            session.ModelLookup = LookupModel; session.AutoTitle = _settings.AutoTitle;
+            session.ModelLookup = LookupModel; session.ModelNameLookup = LookupModelByName; session.AutoTitle = _settings.AutoTitle;
             sv = Attach(session, inter, replay: true);
             RebuildSidebar();
         }
@@ -1363,19 +1381,20 @@ public partial class MainWindow : Window
         Input.CaretIndex = text.Length;
     }
 
-    /// <summary>Update the Shift state and rebuild the sidebar only when it really changed.</summary>
-    void SetShift(bool down, bool? force = null)
+    /// <summary>Update the Alt state and rebuild the sidebar only when it really changed (a rebuild per pointer move
+    /// would be a flicker).</summary>
+    void SetAlt(bool down, bool? force = null)
     {
         bool want = force ?? down;
-        if (want == _shiftDown) return;
-        _shiftDown = want;
+        if (want == _altDown) return;
+        _altDown = want;
         RebuildSidebar();
     }
 
     void OnWindowKeyDown(object? sender, KeyEventArgs e)
     {
-        // §7: Shift reveals the per-session delete buttons
-        if (e.Key is Key.LeftShift or Key.RightShift) { SetShift(true, true); return; }
+        // §7: Alt reveals the per-session delete buttons
+        if (e.Key is Key.LeftAlt or Key.RightAlt) { SetAlt(true, true); return; }
         if (e.Key == Key.Tab && e.KeyModifiers == KeyModifiers.Shift) { ToggleMode(); e.Handled = true; }
         else if (e.Key == Key.Escape && _current is { Running: true }) { Stop(); e.Handled = true; }
         else if (e.Key == Key.N && e.KeyModifiers == KeyModifiers.Control) { if (_project != null) NewSession(_project); e.Handled = true; }
@@ -2090,9 +2109,17 @@ public partial class MainWindow : Window
         ProjectsPanel.Children.Clear();
         if (_query.Length > 0) { RebuildSearchResults(); return; }
 
-        // sessions started in this window are not in the cached list until the next refresh — show them anyway
+        // sessions started in this window are not in the cached list until the next refresh — show them anyway.
+        // The subagent filter must apply HERE too: SafeList() hides a subagent transcript, but this injection re-added
+        // every open session, so a subagent that had been opened kept appearing in the list even with the setting off
+        // (reported 2026-10-09).
         var all = _all.ToList();
-        foreach (var lv in _live.Values) if (lv.Session.Info.Exists && !all.Any(x => x.Id == lv.Id)) all.Add(lv.Session.Info);
+        foreach (var lv in _live.Values)
+        {
+            if (!lv.Session.Info.Exists) continue;
+            if (lv.Session.Info.Subagent && !_settings.ShowSubagentSessions) continue;
+            if (!all.Any(x => x.Id == lv.Id)) all.Add(lv.Session.Info);
+        }
 
         // ---- "needs attention" section: entries persist until explicitly dismissed by the user
         var attention = all.Where(x => !x.Archived && !IsPinned(x) && _settings.AttentionSessions.Contains(x.Id)).OrderByDescending(x => x.Updated).ToList();
@@ -2119,7 +2146,7 @@ public partial class MainWindow : Window
                 // two controls per row, because they do different things:
                 //   ✓  clear the blue dot only — the session stays in the block
                 //   ✕  remove the session from the block entirely
-                var row = SessionRow(s, false, null, showDismiss: false);
+                var row = SessionRow(s, false, null, showDismiss: false, showBulkDelete: false);
                 bool lit = !_settings.AttentionAcknowledged.Contains(s.Id);
                 // A real, explained toggle: ✓ clears the dot, and the same button marks it as waiting again.
                 // It used to disable itself once cleared, so the only way back was to wait for another turn — which
@@ -2132,9 +2159,18 @@ public partial class MainWindow : Window
                 var remove = new Button { Name = "AttentionRemove", Content = "✕", Classes = { "ghost" }, Padding = new Thickness(6, 2), Margin = new Thickness(2, 0, 0, 0), FontSize = 11, VerticalAlignment = VerticalAlignment.Center };
                 ToolTip.SetTip(remove, "Remove from “Needs attention” (the entry goes as well)");
                 remove.Click += (_, _) => { DismissAttention(s.Id); };
-                var wrap = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto,Auto") };
+                var wrap = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto,Auto,Auto") };
                 wrap.Children.Add(row); Grid.SetColumn(clear, 1); Grid.SetColumn(remove, 2);
                 wrap.Children.Add(clear); wrap.Children.Add(remove);
+                // Alt-revealed delete, in its own column so it never overlaps ✓ / ✕ above
+                if (_altDown)
+                {
+                    var trash = new Button { Name = "AttentionDelete", Content = Ui.Icon("IconTrash", "KvErr", 12), Classes = { "ghost" }, Padding = new Thickness(6, 2), Margin = new Thickness(2, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center };
+                    ToolTip.SetTip(trash, $"Delete “{s.Title}” (these icons appear while Alt is held)");
+                    var target = s;
+                    trash.Click += async (_, _) => await DeleteSessionAsync(target);
+                    Grid.SetColumn(trash, 3); wrap.Children.Add(trash);
+                }
                 ProjectsPanel.Children.Add(wrap);
             }
         }
@@ -2173,9 +2209,9 @@ public partial class MainWindow : Window
             if (_current != null && _current.Session.Project.Cwd == p && !_current.Session.Info.Exists && !sessions.Any(s => s.Id == _current.Id))
                 ProjectsPanel.Children.Add(SessionRow(new SessionInfo { Id = _current.Id, Title = "New session", Updated = DateTimeOffset.UtcNow, Cwd = p, Path = _current.Session.Info.Path }, true, null));
 
-            // §7: while Shift is held the header offers a delete for the whole listed project (the count is in the
+            // §7: while Alt is held the header offers a delete for the whole listed project (the count is in the
             // confirmation, and the rows are named there too — never a silent bulk removal)
-            if (_shiftDown && sessions.Count > 0)
+            if (_altDown && sessions.Count > 0)
             {
                 var bulkList = sessions.ToList();
                 var bulk = new Button { Name = "ProjectBulkDelete", Content = $"Delete all {bulkList.Count} listed…", Classes = { "ghost" }, FontSize = 11.5, Padding = new Thickness(36, 4), HorizontalAlignment = HorizontalAlignment.Stretch, HorizontalContentAlignment = HorizontalAlignment.Left };
@@ -2237,7 +2273,7 @@ public partial class MainWindow : Window
 
     /// <summary>
     /// Delete one session from the list (the transcript file stays on disk). Shared by the context menu and the
-    /// Shift-revealed delete buttons (§7, asked 2026-10-09), so both go through the same confirmation and cleanup.
+    /// Alt-revealed delete buttons (§7, asked 2026-10-09), so both go through the same confirmation and cleanup.
     /// </summary>
     async Task DeleteSessionAsync(SessionInfo s)
     {
@@ -2318,7 +2354,7 @@ public partial class MainWindow : Window
         return g;
     }
 
-    Control SessionRow(SessionInfo s, bool unsaved, SearchHit? hit, bool showDismiss = true)
+    Control SessionRow(SessionInfo s, bool unsaved, SearchHit? hit, bool showDismiss = true, bool showBulkDelete = true)
     {
         bool selected = _current != null && _current.Id == s.Id;
         bool running = _live.TryGetValue(s.Id, out var lv) && lv.Running;
@@ -2326,7 +2362,9 @@ public partial class MainWindow : Window
         if (lv is { WaitingForUser: true }) running = false;
         int bgTasks = lv?.Session.Tasks.Running.Count ?? 0;
 
-        var grid = new Grid { ColumnDefinitions = new ColumnDefinitions("Auto,*,Auto,Auto") };
+        // FIVE columns: lead, title, age, dismiss(✕), bulk-delete(the Alt-revealed trash). The trash used to share
+        // column 3 with the Needs-attention ✕ and the two drew over each other (reported 2026-10-09).
+        var grid = new Grid { ColumnDefinitions = new ColumnDefinitions("Auto,*,Auto,Auto,Auto") };
         bool marked = running || bgTasks > 0;
         // the dot is cleared by acknowledging, but the session stays in the Needs-attention block until it is removed
         bool finished = !running && _settings.AttentionSessions.Contains(s.Id) && !_settings.AttentionAcknowledged.Contains(s.Id);
@@ -2360,15 +2398,15 @@ public partial class MainWindow : Window
             Grid.SetColumn(dismiss, 3); grid.Children.Add(dismiss);
         }
 
-        // §7: while Shift is held every row offers a delete button (the user's request: "if shift is pressed, delete
-        // icon will be shown next to each session")
-        if (_shiftDown && !unsaved)
+        // §7: while Alt is held every row offers a delete button (the user's request, moved from Shift to Alt on
+        // 2026-10-09 because Shift collided with the Needs-attention buttons)
+        if (_altDown && showBulkDelete && !unsaved)
         {
             var bulkDel = new Button { Name = "SessionBulkDelete", Content = Ui.Icon("IconTrash", "KvErr", 12), Classes = { "ghost" }, Padding = new Thickness(4, 2), Margin = new Thickness(2, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center };
-            ToolTip.SetTip(bulkDel, $"Delete “{s.Title}”");
+            ToolTip.SetTip(bulkDel, $"Delete “{s.Title}” (these icons appear while Alt is held)");
             var target = s;
             bulkDel.Click += async (_, e) => { e.Handled = true; await DeleteSessionAsync(target); };
-            Grid.SetColumn(bulkDel, 3); grid.Children.Add(bulkDel);
+            Grid.SetColumn(bulkDel, 4); grid.Children.Add(bulkDel);
         }
 
         Control content = grid;
