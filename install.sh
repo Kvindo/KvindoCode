@@ -53,7 +53,8 @@ else
   rm -rf "$HERE/dist"
   kvindocode_build_lock
   trap 'kvindocode_build_unlock; cleanup' EXIT
-  kvindocode_publish "$HERE/src/KvindoCode.App" linux-x64 false "$HERE/dist"
+  SELF="${KVINDOCODE_SELF_CONTAINED:-true}"
+  kvindocode_publish "$HERE/src/KvindoCode.App" linux-x64 "$SELF" "$HERE/dist"
   kvindocode_build_unlock
   SRC="$HERE/dist"
   echo "→ installing to $APP"
