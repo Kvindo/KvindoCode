@@ -94,48 +94,34 @@ public sealed class SettingsWindow : Window
                 ? "Sent." : "Could not send: " + KvindoCode.Core.Notify.Notifier.ResolveNotify(tmp).Why;
         };
 
-        // §2c Telegram: the token value stays in the vault, only the entry NAME is a setting
-        var tgSecret = T(s.TelegramTokenSecret, "telegram-bot-token"); tgSecret.Name = "TelegramTokenSecret";
-        var tgChat = T(s.TelegramDefaultChat, "@channelusername or -1001234567890"); tgChat.Name = "TelegramDefaultChat";
-        var tgApi = T(s.TelegramApiBase, "https://api.telegram.org"); tgApi.Name = "TelegramApiBase";
+        // §2c Telegram: the tool acts AS YOU over an MTProto session. There is no bot mode any more (2026-10-11): a bot
+        // has no history, so `read` could only ever return what arrived after the bot itself. Only entry NAMES are
+        // settings — the api_id/api_hash values stay in the vault and are never shown.
+        var tgChat = T(s.TelegramDefaultChat, "@username, a chat id, or me"); tgChat.Name = "TelegramDefaultChat";
+        var tgApiId = T(s.TelegramApiIdSecret, "telegram-api-id"); tgApiId.Name = "TelegramApiIdSecret";
+        var tgApiHash = T(s.TelegramApiHashSecret, "telegram-api-hash"); tgApiHash.Name = "TelegramApiHashSecret";
         var tgStatus = new TextBlock { Classes = { "muted" }, FontSize = 12, TextWrapping = TextWrapping.Wrap };
         void RefreshTelegram()
         {
-            var tmp = new AppSettings { TelegramTokenSecret = (tgSecret.Text ?? "").Trim() };
-            var name = tmp.TelegramTokenSecret;
-            if (name.Length == 0) { tgStatus.Text = "No vault entry named — the Telegram tool cannot run."; return; }
             var vault = KvindoCode.Core.Secrets.SecretVault.Default;
-            tgStatus.Text = vault.Get(name) is { } rec
-                ? $"Will use the vault entry “{rec.Name}” (sha256 {rec.ShaShort}…) — the token itself is never shown or sent to the model."
-                : $"There is no vault entry named “{name}” yet. Create one (sidebar → Secrets, or the `telegram-setup` skill).";
+            string Which(string field, string name)
+            {
+                if (name.Length == 0) return $"“{field}” has no vault entry named — the tool cannot run.";
+                return vault.Get(name) is { } rec
+                    ? $"“{field}” → vault entry “{rec.Name}” (sha256 {rec.ShaShort}…)"
+                    : $"“{field}” points at “{name}”, which is not in the vault yet.";
+            }
+            var session = Path.Combine(KvindoCode.Core.Paths.ConfigDir, "telegram-user.session");
+            var hasSession = File.Exists(session) && new FileInfo(session).Length > 0;
+            tgStatus.Text = Which("api_id", (tgApiId.Text ?? "").Trim()) + "\n"
+                          + Which("api_hash", (tgApiHash.Text ?? "").Trim()) + "\n"
+                          + (hasSession
+                              ? "A login session is stored, so the tool works without asking anything. Remove the session file to log in again."
+                              : "No login session yet — run `kvindocode --telegram-login` once (it asks for the phone code and, if set, the 2FA password).");
         }
-        tgSecret.TextChanged += (_, _) => RefreshTelegram();
+        tgApiId.TextChanged += (_, _) => RefreshTelegram();
+        tgApiHash.TextChanged += (_, _) => RefreshTelegram();
         RefreshTelegram();
-
-        // §2d Telegram USER session (MTProto): acts AS you — reads history, sends as you. Opt-in, because automating a
-        // user account can get it limited or banned by Telegram (asked 2026-10-10).
-        var tgMode = new ComboBox
-        {
-            Name = "TelegramMode",
-            HorizontalAlignment = HorizontalAlignment.Left, Width = 200,
-            ItemsSource = new[] { "bot", "user" },
-            SelectedItem = s.TelegramMode == "user" ? "user" : "bot",
-        };
-        var tgApiId = T(s.TelegramApiIdSecret, "telegram-api-id"); tgApiId.Name = "TelegramApiIdSecret";
-        var tgApiHash = T(s.TelegramApiHashSecret, "telegram-api-hash"); tgApiHash.Name = "TelegramApiHashSecret";
-        var tgModeNote = new TextBlock { Classes = { "muted" }, FontSize = 12, TextWrapping = TextWrapping.Wrap };
-        void RefreshTelegramMode()
-        {
-            var user = (tgMode.SelectedItem as string) == "user";
-            tgApiId.IsVisible = tgApiHash.IsVisible = user;
-            tgModeNote.Text = user
-                ? "USER mode acts as your own account (reads chat history, sends as you). It needs api_id + api_hash from " +
-                  "my.telegram.org, stored in the vault, then a one-time interactive login: run `kvindocode --telegram-login`. " +
-                  "Be aware Telegram can limit or ban an account that automates — the bot mode carries no such risk."
-                : "BOT mode: a bot token from @BotFather. A bot cannot read a chat's history and only sees messages sent to it after it was created.";
-        }
-        tgMode.SelectionChanged += (_, _) => RefreshTelegramMode();
-        RefreshTelegramMode();
 
         // §3 prompt prefix / suffix
         var promptPrefix = new TextBox { Text = s.PromptPrefix, Watermark = "(nothing)", AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, Classes = { "plain" }, FontSize = 12.5, MinHeight = 70 };
@@ -234,12 +220,9 @@ public sealed class SettingsWindow : Window
             s.NotificationDesktopCommand = (desktopCommand.Text ?? "").Trim();
             s.PromptPrefix = promptPrefix.Text ?? "";
             s.PromptSuffix = promptSuffix.Text ?? "";
-            s.TelegramTokenSecret = (tgSecret.Text ?? "").Trim();
-            s.TelegramMode = (tgMode.SelectedItem as string) == "user" ? "user" : "bot";
             s.TelegramApiIdSecret = (tgApiId.Text ?? "").Trim();
             s.TelegramApiHashSecret = (tgApiHash.Text ?? "").Trim();
             s.TelegramDefaultChat = (tgChat.Text ?? "").Trim();
-            s.TelegramApiBase = (tgApi.Text ?? "").Trim();
             s.ClaudeSessionsDir = (claudeDir.Text ?? "").Trim(); s.ClaudeProjectsDir = (claudeProj.Text ?? "").Trim();
             s.ChromePort = (int)(chromePort.Value ?? 9222); s.ChromePath = (chromePath.Text ?? "").Trim(); s.ChromeAutoLaunch = chromeAuto.IsChecked == true; s.ChromeUseMyProfile = chromeMine.IsChecked == true;
             try { s.Save(); Saved = true; Close(); }
@@ -345,11 +328,10 @@ public sealed class SettingsWindow : Window
                 new StackPanel { Orientation = Orientation.Horizontal, Spacing = 24, Children = { Field("Theme", theme), Field("Font size", font), Field("Bash timeout (s)", timeout), Field("Max model calls per turn", maxIters) } },
                 new TextBlock { Text = "A single turn normally ends when the agent stops calling tools. This is a safety cap: when it is reached the turn continues automatically for a few more batches, then stops and tells you — hitting it usually means the task is looping.", Classes = { "muted" }, FontSize = 12, TextWrapping = TextWrapping.Wrap },
                 H("Telegram"),
-                new StackPanel { Orientation = Orientation.Horizontal, Spacing = 24, Children = { Field("API", tgMode, "bot = a bot token; user = your own account (MTProto)."), Field("Vault entry holding the bot token", tgSecret, "Only for bot mode. The NAME of a secret, never the token itself.") } },
-                tgStatus,
-                tgModeNote,
-                new StackPanel { Orientation = Orientation.Horizontal, Spacing = 24, Children = { Field("api_id vault entry", tgApiId, "Only for user mode."), Field("api_hash vault entry", tgApiHash, "Only for user mode.") } },
-                new StackPanel { Orientation = Orientation.Horizontal, Spacing = 24, Children = { Field("Default chat", tgChat, "Used when a call passes no chat_id."), Field("Bot API base", tgApi, "Empty = https://api.telegram.org. Only for a self-hosted local Bot API server.") } }) },
+                new TextBlock { Text = "The Telegram tool acts AS YOU over a user session (MTProto): it reads a chat's history and sends as you. There is no bot mode — a bot cannot read history at all.", Classes = { "muted" }, FontSize = 12, TextWrapping = TextWrapping.Wrap },
+                new StackPanel { Orientation = Orientation.Horizontal, Spacing = 24, Children = { Field("api_id vault entry", tgApiId, "The NAME of a secret, from my.telegram.org."), Field("api_hash vault entry", tgApiHash, "The NAME of a secret, from my.telegram.org.") } },
+                new StackPanel { Orientation = Orientation.Horizontal, Spacing = 24, Children = { Field("Default chat", tgChat, "Used when a call passes no chat.") } },
+                tgStatus) },
         });
 
         var footer = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(24, 10, 24, 16), Children = { cancel, save } };

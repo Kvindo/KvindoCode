@@ -135,8 +135,9 @@ public sealed class BatchOctober9UiTests(ITestOutputHelper o)
         o.GetType().GetMethod(method, BindingFlags.NonPublic | BindingFlags.Instance)!.Invoke(o, null);
 
     /// <summary>
-    /// The Telegram settings are saved: the vault entry NAME, the default chat and the API base. The token value itself
-    /// has no control anywhere — only a name — which is what keeps it out of settings.json (2026-10-09).
+    /// The Telegram settings are saved: the vault entry NAMES and the default chat. The values themselves have no
+    /// control anywhere — only names — which is what keeps them out of settings.json. The bot-token control is gone
+    /// with the bot path (2026-10-11).
     /// </summary>
     [AvaloniaFact]
     public void The_telegram_settings_are_editable_and_saved()
@@ -154,20 +155,23 @@ public sealed class BatchOctober9UiTests(ITestOutputHelper o)
                 foreach (var d in Logical(child)) yield return d;
         }
         var all = Logical(sw).OfType<TextBox>().ToList();
-        var secret = all.First(t => t.Name == "TelegramTokenSecret");
+        var apiId = all.First(t => t.Name == "TelegramApiIdSecret");
+        var apiHash = all.First(t => t.Name == "TelegramApiHashSecret");
         var chat = all.First(t => t.Name == "TelegramDefaultChat");
-        o.WriteLine($"secret default = {secret.Text}, chat default = {chat.Text}");
-        secret.Text = "my-bot-token";
+        o.WriteLine($"api_id default = {apiId.Text}, chat default = {chat.Text}");
+        apiId.Text = "my-tg-app-id";
+        apiHash.Text = "my-tg-app-hash";
         chat.Text = "@ops_channel";
         var save = Logical(sw).OfType<Button>().First(b => (b.Content?.ToString() ?? "") == "Save");
         save.RaiseEvent(new RoutedEventArgs(Avalonia.Controls.Button.ClickEvent));
         Dispatcher.UIThread.RunJobs();
 
-        Assert.Equal("my-bot-token", settings.TelegramTokenSecret);
+        Assert.Equal("my-tg-app-id", settings.TelegramApiIdSecret);
+        Assert.Equal("my-tg-app-hash", settings.TelegramApiHashSecret);
         Assert.Equal("@ops_channel", settings.TelegramDefaultChat);
-        // no control anywhere holds a token value: the setting is a name, nothing else
-        Assert.DoesNotContain(Logical(sw).OfType<TextBox>(), t => t.Name is not null && t.Name.Contains("TelegramToken")
-                                                                                  && t.Name.Contains("Value"));
+        // no control anywhere holds a credential VALUE: every Telegram setting is a vault entry NAME
+        Assert.DoesNotContain(Logical(sw).OfType<TextBox>(), t => t.Name is not null && t.Name.Contains("Telegram")
+                                                                                  && t.Name.EndsWith("Value"));
         sw.Close();
         w.Close();
     }

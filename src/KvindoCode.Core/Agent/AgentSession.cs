@@ -209,7 +209,12 @@ public sealed class AgentSession : IDisposable
     /// only a second opinion — its findings are never applied silently, they go through the confirmation dialog.
     /// Anything the user confirms is then masked by span, so a <c>token:</c> label survives and only the value goes.
     /// </summary>
-    async Task<SecretAuditOutcome> DetectSecretsAsync(string text, string source, CancellationToken ct)
+    /// <param name="interactive">True when the text came from a TOOL and an uncertain candidate is worth a dialog.
+    /// False for the human's own message: they typed it, so asking "is this a secret?" about their own words would
+    /// interrupt them for nothing, and a dialog raised between the composer and the model call could stall the turn.
+    /// What is DETERMINISTIC is still stored and masked in both cases, which is the part that keeps a typed credential
+    /// out of the transcript and off the wire.</param>
+    async Task<SecretAuditOutcome> DetectSecretsAsync(string text, string source, CancellationToken ct, bool interactive = true)
     {
         var vault = Secrets.SecretVault.Default;
         var spans = DeterministicSecretDetector.Detect(text);
@@ -249,6 +254,9 @@ public sealed class AgentSession : IDisposable
 
         spans = Merge(spans.Concat(confirmed));
         uncertain = Strip(spans, uncertain);
+
+        // The human's own message: store and mask what the PATTERNS are sure about, never ask. See `interactive`.
+        if (!interactive) uncertain.Clear();
 
         if (uncertain.Count > 0 || spans.Count == 0)
             return await ConfirmAsync(text, source, spans, uncertain, ct);
@@ -614,6 +622,22 @@ public sealed class AgentSession : IDisposable
     public Func<bool>? DequeueQueuedTurnPending { get; set; }
     bool _activeTaskInterrupted;
     bool _servicingQueuedTurn;
+    /// <summary>When the first chunk of the current request arrived. Token speed is measured from here, because the
+    /// wait before the first chunk is queueing and prefill, not generation (asked 2026-10-11).</summary>
+    DateTime? _firstChunkAt;
+
+    /// <summary>Completion tokens per second for the last request, or 0 when it cannot be computed honestly.</summary>
+    /// <remarks>
+    /// Counted from the FIRST STREAMED CHUNK to the end of the stream: including the pre-first-token wait would fold
+    /// queueing and prompt prefill into "generation speed", which is the number a model comparison is not about. Zero
+    /// when nothing was streamed (a non-streaming answer or a tool-only round) or the window is under a millisecond.
+    /// </remarks>
+    double TokPerSecond(int completionTokens)
+    {
+        if (_firstChunkAt is not { } start || completionTokens <= 0) return 0;
+        var seconds = (DateTime.UtcNow - start).TotalSeconds;
+        return seconds < 0.001 ? 0 : completionTokens / seconds;
+    }
 
     public AgentSession(AppSettings settings, ILlmClient llm, string projectCwd, IUserInteraction interaction,
                         SessionInfo? info = null, ISessionStorage? storage = null, string? workDirOverride = null)
@@ -712,14 +736,16 @@ public sealed class AgentSession : IDisposable
                 {
                     await Task.Delay(interval, cts.Token);
                     if (cts.Token.IsCancellationRequested) break;
-                    var turn = new QueuedTurn(prompt);
+                    var turn = new QueuedTurn(prompt, null, Scheduled: true);
                     if (!IsRunning)
                     {
                         // `!IsRunning` then RunTurnAsync is a TOCTOU against the UI's send path: if a turn starts
                         // in between, RunInternalAsync throws InvalidOperationException("A turn is already running.")
                         // and the tick used to die with an unhandled error, killing the whole schedule (audit H-4).
                         // Treat the race as "the session is busy" and queue the prompt instead.
-                        try { await RunTurnAsync(prompt, cts.Token); }
+                        // scheduled: true — the tick is driven by the timer, so it must not raise the "waiting for your
+                        // input" alert when it returns (2026-10-10: a LOOP beeped on every tick).
+                        try { await RunTurnAsync(prompt, cts.Token, null, scheduled: true); }
                         catch (InvalidOperationException) { _scheduledTurns.Enqueue(turn); }
                     }
                     else _scheduledTurns.Enqueue(turn); // injected between tool rounds, like a user-queued message
@@ -1011,6 +1037,10 @@ public sealed class AgentSession : IDisposable
     void Emit(AgentEvent e) => EmitRaw(Mask(e));
 
     void EmitRaw(AgentEvent e) => Event?.Invoke(e);
+
+    /// <summary>Show a plain note in this session's transcript. Used by a tool that changes something the human must
+    /// notice (e.g. EnterPlanMode switching the session into plan mode on the model's own initiative).</summary>
+    public void AddNotice(string text, bool isError = false) => EmitRaw(new NoticeEvent(text, isError));
 
     /// <summary>Re-emit the stored conversation so a fresh UI can rebuild its transcript (only the last <paramref name="maxMessages"/>).</summary>
     public void Replay(int maxMessages = 500) => ReplayWindow(maxMessages, 0);
@@ -1338,9 +1368,12 @@ public sealed class AgentSession : IDisposable
 
     // ---------------------------------------------------------------- the loop
 
-    public Task RunTurnAsync(string userText, CancellationToken ct, IReadOnlyList<string>? imagesBase64 = null) => RunInternalAsync(userText, ct, imagesBase64);
+    public Task RunTurnAsync(string userText, CancellationToken ct, IReadOnlyList<string>? imagesBase64 = null, bool scheduled = false) => RunInternalAsync(userText, ct, imagesBase64, scheduled);
 
-    async Task RunInternalAsync(string? userText, CancellationToken ct, IReadOnlyList<string>? images = null)
+    /// <param name="scheduled">The turn came from a recurring <c>SchedulePrompt</c>: the session is not waiting for the
+    /// human when it ends — a timer is going to start the next one — so no "finished" alert is raised (see
+    /// <see cref="Notify"/>'s caller below).</param>
+    async Task RunInternalAsync(string? userText, CancellationToken ct, IReadOnlyList<string>? images = null, bool scheduled = false)
     {
         if (IsRunning) throw new InvalidOperationException("A turn is already running.");
         IsRunning = true;
@@ -1395,6 +1428,13 @@ public sealed class AgentSession : IDisposable
                             + content
                             + (string.IsNullOrWhiteSpace(_settings.PromptSuffix) ? "" : "\n\n" + _settings.PromptSuffix.Trim());
                 }
+                // A secret the HUMAN types was never detected at all: this path only ran `Mask` (replacement of values
+                // the vault already knows), so a password pasted into the composer travelled to the provider in
+                // plaintext and was caught — if at all — by the outbound rescan on the way out. Detect it here, at
+                // append, exactly like tool output does, and AWAIT it: a value stored by the time Add runs is masked
+                // by the same call, so it never reaches the transcript or the model (asked 2026-10-11). interactive:
+                // false — the human typed it, so nothing asks them to classify their own words.
+                if (AuditSecretsEnabled) await DetectSecretsAsync(content, "your message", ct, interactive: false);
                 Add(new ChatMessage { Role = "user", Content = content, Images = images is { Count: > 0 } ? images.ToList() : null });
                 Emit(new UserMessageEvent(userText, _history.Count - 1));
             }
@@ -1412,9 +1452,14 @@ public sealed class AgentSession : IDisposable
             if (reason == "done")
             {
                 Info.CompletedTurns++;
-                // only a turn the human started and that leaves nothing queued is "waiting for your input";
-                // wake-ups from background tasks and turns that continue into a queued message are not
-                if (userText is not null && DequeueQueuedTurnPending?.Invoke() != true && _scheduledTurns.IsEmpty)
+                // "Waiting for your input" must be literally true: the human started this turn, nothing is queued, and no
+                // recurring prompt (a LOOP) is going to drive the session on by itself. The last part was missing: every
+                // tick of a SchedulePrompt ran as a user turn and beeped "finished and is waiting for your input" as it
+                // returned, while the timer was already counting down to the next tick — the reported "dozens of beeps a
+                // minute although no session finished working" (2026-10-10).
+                bool recurring;
+                lock (_promptScheduleLock) recurring = _promptSchedules.Count > 0;
+                if (userText is not null && !scheduled && !recurring && DequeueQueuedTurnPending?.Invoke() != true && _scheduledTurns.IsEmpty)
                     Notify("KvindoCode finished and is waiting for your input");
             }
         }
@@ -1487,6 +1532,7 @@ public sealed class AgentSession : IDisposable
             void StreamText(string t)
             {
                 LastProgressTime = DateTime.UtcNow;
+                _firstChunkAt ??= DateTime.UtcNow;      // tok/s is measured from here (see TokPerSecond)
                 partial.Append(t);
                 var safe = textStream.Feed(t);
                 if (safe.Length > 0) EmitRaw(new TextDeltaEvent(safe));
@@ -1494,6 +1540,7 @@ public sealed class AgentSession : IDisposable
             void StreamThink(string t)
             {
                 LastProgressTime = DateTime.UtcNow;
+                _firstChunkAt ??= DateTime.UtcNow;
                 var safe = thinkStream.Feed(t);
                 if (safe.Length > 0) EmitRaw(new ThinkingDeltaEvent(safe));
             }
@@ -1518,6 +1565,11 @@ public sealed class AgentSession : IDisposable
             LlmResult res;
             string resModel;
             LastProgressTime = DateTime.UtcNow;       // includes auditor/network wait for this specific request
+            // Generation speed is measured from the first streamed chunk, not from the request start: the time to
+            // first token is a different number (queueing, prefill) and mixing them makes tok/s meaningless
+            // (asked 2026-10-11). `_firstChunkAt` is set by the stream callbacks below.
+            _firstChunkAt = null;
+            var requestWatch = System.Diagnostics.Stopwatch.StartNew();
             try
             {
                 var streamed = await StreamWithModelFailoverAsync(req, cb, requestModel, () => partial.Length > 0, ct);
@@ -1532,6 +1584,7 @@ public sealed class AgentSession : IDisposable
                 throw;
             }
             FlushStreams();
+            requestWatch.Stop();
             EmitRaw(new AssistantMessageEndEvent());
 
             if (res.CostRub is { } cr)
@@ -1548,7 +1601,7 @@ public sealed class AgentSession : IDisposable
                 // turned one transient read error into a permanent overwrite of settings.json (S7). Persisted at turn end.
                 _settingsDirty = true;
                 LifetimePromptTokens += u.PromptTokens; LifetimeCachedTokens += u.CachedTokens;
-                EmitRaw(new UsageEvent(u.PromptTokens, u.CompletionTokens, ContextWindow, CostRub, u.CachedTokens, (int)Math.Min(int.MaxValue, LifetimePromptTokens), (int)Math.Min(int.MaxValue, LifetimeCachedTokens)));
+                EmitRaw(new UsageEvent(u.PromptTokens, u.CompletionTokens, ContextWindow, CostRub, u.CachedTokens, (int)Math.Min(int.MaxValue, LifetimePromptTokens), (int)Math.Min(int.MaxValue, LifetimeCachedTokens), TokPerSecond(u.CompletionTokens)));
             }
 
             // The gateway sometimes returns a diagnostic as ORDINARY content with 0/0 tokens ("[error: console_blocked]"),
@@ -1955,6 +2008,9 @@ public sealed class AgentSession : IDisposable
             _history.Add(e);
             Persist(e);
         }
+        // Compaction replaces the whole context, so the outbound scan's memo describes text that is no longer sent —
+        // and, worse, the summary is new text that has never been scanned. Drop it (asked 2026-10-11).
+        Secrets.OutboundScanCache.Bump();
         LastPromptTokens = 0;
         Emit(new CompactedEvent(summary));
     }

@@ -361,11 +361,24 @@ public sealed class ModelPickerWindow : Window
         {
             using var cts = new System.Threading.CancellationTokenSource(TimeSpan.FromSeconds(30));
             var req = new LlmRequest { Model = r.Id, System = "You are a test. Reply with the single word: ok", Messages = new[] { new ChatMessage { Role = "user", Content = "Reply with just: ok" } }, MaxTokens = 10 };
+            // Measured so the test reports numbers comparable BETWEEN models: time-to-first-token and generation
+            // speed, the latter counted from the first streamed chunk (asked 2026-10-11). Without a callback the only
+            // figure available was total wall-clock, which folds queueing, prompt prefill and generation together.
+            DateTime? firstChunk = null;
+            var started = DateTime.UtcNow;
             var sw = System.Diagnostics.Stopwatch.StartNew();
-            var res = await _llm.StreamAsync(req, null, cts.Token);
+            var cb = new LlmCallbacks { OnText = _ => firstChunk ??= DateTime.UtcNow, OnReasoning = _ => firstChunk ??= DateTime.UtcNow };
+            var res = await _llm.StreamAsync(req, cb, cts.Token);
             sw.Stop();
-            var ok = res.Content?.Trim().Equals("ok", StringComparison.OrdinalIgnoreCase) == true || res.Content?.Trim().Length > 0;
-            _testStatus.Text = ok ? $"✓ {r.Name} works — replied “{res.Content?.Trim()[..Math.Min(50, res.Content.Trim().Length)]}” in {sw.ElapsedMilliseconds} ms" : $"✗ {r.Name} returned no content";
+            var ttft = firstChunk is { } f ? (f - started).TotalMilliseconds : sw.Elapsed.TotalMilliseconds;
+            var gen = firstChunk is { } g ? (DateTime.UtcNow - g).TotalSeconds : 0;
+            var completion = res.Usage?.CompletionTokens ?? 0;
+            var speed = gen > 0.05 && completion > 0 ? completion / gen : 0;
+            var metrics = $"  ·  ttft {ttft:0} ms" + (speed > 0 ? $"  ·  {speed:0.#} tok/s ({completion} tok in {gen:0.0}s)" : "");
+            var content = res.Content?.Trim() ?? "";
+            _testStatus.Text = content.Length > 0
+                ? $"✓ {r.Name} works — replied “{content[..Math.Min(50, content.Length)]}” in {sw.ElapsedMilliseconds} ms{metrics}"
+                : $"✗ {r.Name} returned no content{metrics}";
         }
         catch (Exception e) { _testStatus.Text = $"✗ {r.Name} failed: {e.Message}"; }
         finally { _testBtn.IsEnabled = true; }

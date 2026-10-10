@@ -4,6 +4,9 @@ using KvindoCode.Core.Secrets;
 
 namespace KvindoCode.Core.Llm;
 
+/// <summary>Where a per-request finding should be reported: <c>sessionId</c> first, then the message.</summary>
+public delegate void SessionNotice(string sessionId, string message);
+
 /// <summary>
 /// Wraps the cloud LLM so that every outbound request is first audited by the local secret-auditor model.
 /// When a secret is found it is added to the encrypted vault (the plaintext is extracted from the request text by the
@@ -17,6 +20,11 @@ public sealed class AuditingLlmClient : ILlmClient
     readonly SecretVault _vault;
     readonly Action<string>? _onNotice;
     readonly Func<bool> _globalEnabled;
+    /// <summary>A notice that belongs to ONE session (the request's <c>SessionId</c>), not to whatever the window
+    /// happens to be showing. Reporting a request-time finding through the window-global notice put "an image was
+    /// dropped from the request" into an unrelated transcript — typically a session that had already finished, so the
+    /// message read as if IT had just sent the image (reported 2026-10-11).</summary>
+    public Action<string, string>? OnSessionNotice { get; set; }
 
     public AuditingLlmClient(ILlmClient inner, SecretAuditor? auditor, SecretVault? vault, Action<string>? onNotice = null, Func<bool>? globalEnabled = null)
     {
@@ -25,6 +33,12 @@ public sealed class AuditingLlmClient : ILlmClient
         _vault = vault ?? SecretVault.Default;
         _onNotice = onNotice;
         _globalEnabled = globalEnabled ?? (() => true);
+    }
+
+    void Notice(LlmRequest r, string message)
+    {
+        if (OnSessionNotice is not null && r.SessionId is { Length: > 0 }) OnSessionNotice(r.SessionId, message);
+        else _onNotice?.Invoke(message);
     }
 
     public Task<List<ModelInfo>> ListModelsAsync(CancellationToken ct) => _inner.ListModelsAsync(ct);
@@ -38,8 +52,8 @@ public sealed class AuditingLlmClient : ILlmClient
         var (text, images) = Collect(request);
         if (text.Length == 0 && images.Count == 0) return await _inner.StreamAsync(request, callbacks, ct);
 
-        // A picture cannot be matched by a pattern, so images stay with the local model — the only thing here
-        // that can look at them. Only images the auditor flags are dropped; a failure fails closed.
+        // A picture cannot be matched by a pattern, so images stay with the local model — the only thing here that can
+        // look at them. Only images the auditor flags are dropped; a failure fails closed.
         var unsafeImages = new HashSet<(ChatMessage Message, int Index)>();
         foreach (var image in _auditor.Enabled ? images : new List<AuditedImage>())
         {
@@ -49,7 +63,15 @@ public sealed class AuditingLlmClient : ILlmClient
             if (im.HasSecret)
             {
                 unsafeImages.Add((image.Message, image.Index));
-                _onNotice?.Invoke("The secret auditor found a secret in an image that was about to be sent to the model. That image will be dropped from the request.");
+                // Said plainly, and in the session the picture belongs to. It used to be a window-global "The secret
+                // auditor found a secret in an image…", which landed in whatever transcript was on screen — including
+                // one that had already finished, where it read as an alarm about a picture it never sent (reported
+                // 2026-10-11). The kinds come from the auditor's own findings; the VALUE is never included.
+                var kinds = im.Findings.Select(f => f.Type).Where(t => !string.IsNullOrWhiteSpace(t)).Distinct().ToList();
+                Notice(request, "The secret scan flagged an image in this request" +
+                    (kinds.Count > 0 ? $" ({string.Join(", ", kinds)})" : "") +
+                    ", so it was left out of the request — the model sees the text but not that picture. " +
+                    "The file is untouched on disk: remove or blank the secret in it (or ask me to crop that part) and attach it again to send it deliberately.");
             }
         }
         if (unsafeImages.Count > 0) request = WithImagesStripped(request, unsafeImages);
@@ -64,7 +86,11 @@ public sealed class AuditingLlmClient : ILlmClient
         var detected = new List<(string Value, string Type)>();
         var unstorable = new List<string>();                            // values that must still not leave in plaintext
         foreach (var piece in EveryOutboundString(request))
-            foreach (var span in DeterministicSecretDetector.Detect(piece))
+            // Memoised: history is append-only until compaction, so the same message text was scanned on every call —
+            // 1.8 s per request in steady state, the single largest cost in the whole pre-send path (measured
+            // 2026-10-11). A verdict is only cached when the scan was COMPLETE, and the cache is dropped whenever the
+            // text it describes can no longer be the same (vault change, compaction) or the rules change.
+            foreach (var span in Secrets.OutboundScanCache.Spans(piece, out _))
             {
                 if (span.End > piece.Length) continue;
                 var value = piece.Substring(span.Start, span.Length).Trim('"', '\'', '`', ';', ',');
@@ -124,10 +150,17 @@ public sealed class AuditingLlmClient : ILlmClient
         // (a short or unusual value the human stored earlier).
         if (detected.Count == 0 && !_vault.Unlock(out var knownUnlockError))
             return AuditUnavailable("Could not unlock the secret vault: " + knownUnlockError);
+        // ONE read of the targets for the whole request, and ONE automaton pass over the text instead of 392 linear
+        // `Contains` scans. The old shape re-read the targets inside every message (552 locked vault reads) and then
+        // walked the joined 800 KB string once per stored value: ~139 ms of the request, measured 2026-10-11. The
+        // per-value loop still runs, but only when the single-pass automaton says a value really is in there.
+        var targets = _vault.RedactionTargets();
         var everything = string.Join("\n", EveryOutboundString(request));
-        foreach (var (name, value) in _vault.RedactionTargets())
-            if (value.Length > 0 && everything.Contains(value, StringComparison.Ordinal) && !names.Contains(name))
-                names.Add(name);
+        bool anyKnown = new SecretRedactor(targets).Contains(everything);
+        if (anyKnown)
+            foreach (var (name, value) in targets)
+                if (value.Length > 0 && everything.Contains(value, StringComparison.Ordinal) && !names.Contains(name))
+                    names.Add(name);
 
         // A value that could not be stored cannot be masked by a marker, so it gets the generic irreversible text —
         // and only then is the request allowed to leave. If the substitution did not actually remove the value from
@@ -153,7 +186,7 @@ public sealed class AuditingLlmClient : ILlmClient
         // Said once per value: a secret the vault already holds is masked silently on every later request.
         if (newlyStored.Count > 0)
             _onNotice?.Invoke($"Found {newlyStored.Count} new secret(s) in the conversation and replaced them with placeholders ({string.Join(", ", newlyStored)}). Use Write/Edit or Bash to put them back where they belong.");
-        return await _inner.StreamAsync(ProtectRequest(request), callbacks, ct);
+        return await _inner.StreamAsync(ProtectRequest(request, targets), callbacks, ct);
     }
 
     /// <summary>Replace a value that could not be turned into a marker with the irreversible redaction text.</summary>
@@ -289,18 +322,21 @@ public sealed class AuditingLlmClient : ILlmClient
         return SecretRedactor.Serialize(redactor.RedactJson(node)!);
     }
 
-    LlmRequest ProtectRequest(LlmRequest r)
+    /// <param name="targets">The vault's redaction targets, read ONCE for the request. Passing them in is the fix for
+    /// 552 locked vault reads per request (one per message, each re-decrypting the whole vault) — measured 119 ms,
+    /// against ~10 ms when hoisted (2026-10-11).</param>
+    LlmRequest ProtectRequest(LlmRequest r, IReadOnlyList<(string Name, string Value)> targets)
     {
         var msgs = r.Messages.Select(m => new ChatMessage
         {
             Role = m.Role,
-            Content = SecretPlaceholders.Protect(m.Content ?? "", _vault),
-            Reasoning = SecretPlaceholders.Protect(m.Reasoning ?? "", _vault),
+            Content = SecretPlaceholders.Protect(m.Content ?? "", targets),
+            Reasoning = SecretPlaceholders.Protect(m.Reasoning ?? "", targets),
             ToolCalls = m.ToolCalls?.Select(c => new ToolCall { Id = c.Id, Name = c.Name, Arguments = ProtectArguments(c.Arguments) }).ToList(),
             ToolCallId = m.ToolCallId, IsError = m.IsError, IsSummary = m.IsSummary, IsNotification = m.IsNotification, IsInternal = m.IsInternal,
             Model = m.Model, Ts = m.Ts, DurationMs = m.DurationMs, Images = m.Images?.ToList(),
         }).ToList();
-        return new LlmRequest { SessionId = r.SessionId, AuditSecrets = r.AuditSecrets, Model = r.Model, System = SecretPlaceholders.Protect(r.System, _vault), Messages = msgs, Tools = r.Tools, MaxTokens = r.MaxTokens, ReasoningEffort = r.ReasoningEffort };
+        return new LlmRequest { SessionId = r.SessionId, AuditSecrets = r.AuditSecrets, Model = r.Model, System = SecretPlaceholders.Protect(r.System, targets), Messages = msgs, Tools = r.Tools, MaxTokens = r.MaxTokens, ReasoningEffort = r.ReasoningEffort };
     }
 
 }

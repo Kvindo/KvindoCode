@@ -1113,13 +1113,17 @@ public sealed class SecretAuditorRealUiTests
         await app.WaitForTurnAsync();
         Assert.DoesNotContain<string>(from m in app.Cloud.Requests.SelectMany((LlmRequest r) => r.Messages)
             select m.Content ?? "", (Predicate<string>)((string c) => c.Contains("N2E2YWVmN_WI4738877")));
+        // Turning the OUTBOUND audit off must not put a credential the human already typed back on the wire. This used
+        // to be the opposite assertion: the value was stored only by the outbound scan, so it was masked solely on the
+        // way out and the raw text sat in the transcript. Detection now happens when the message is APPENDED
+        // (2026-10-11), so the transcript holds the marker from the start and the switch cannot expose it.
         settings.AuditSecrets = false;
         int before = app.Cloud.Requests.Count;
         app.TypeAndSend("and again sshpass -p 'N2E2YWVmN_WI4738877' ssh host");
         await app.WaitForTurnAsync();
         List<string> collection = (from m in app.Cloud.Requests.Skip(before).SelectMany((LlmRequest r) => r.Messages)
             select m.Content ?? "").ToList();
-        Assert.Contains((IEnumerable<string>)collection, (Predicate<string>)((string c) => c.Contains("N2E2YWVmN_WI4738877")));
+        Assert.DoesNotContain((IEnumerable<string>)collection, (Predicate<string>)((string c) => c.Contains("N2E2YWVmN_WI4738877")));
         settings.AuditSecrets = true;
         before = app.Cloud.Requests.Count;
         app.TypeAndSend("third sshpass -p 'Zq81Xk92LpWmN4vB7tYe' ssh host");

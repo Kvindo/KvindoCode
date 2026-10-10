@@ -405,15 +405,33 @@ public sealed class TaskNoticeCard : Border
         TaskId = id;
         Classes.Add("card");
         Padding = new Thickness(12, 8);
-        var head = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
-        head.Children.Add(Ui.Icon("IconClock", isExit ? "KvMuted" : "KvAccent", 14));
-        head.Children.Add(new SelectableTextBlock { Text = id > 0 ? $"Background #{id} · {description}" : "Background tasks", FontSize = 12.5, FontWeight = FontWeight.Medium, Classes = { "muted" }, VerticalAlignment = VerticalAlignment.Center });
+        // The header is a GRID, not a horizontal StackPanel: a StackPanel measures its children at their full
+        // desired width, so a long task description ("PC watcher v2: raised thresholds (load>32, cpu-PSI>40, …)")
+        // never wrapped and pushed the Stop button and the state text out of the card (reported 2026-10-11).
+        // The title now owns only the space the buttons do not need and trims with an ellipsis; the full text
+        // stays one hover away.
+        var head = new Grid { ColumnDefinitions = new ColumnDefinitions("Auto,*,Auto,Auto"), ColumnSpacing = 8 };
+        var icon = Ui.Icon("IconClock", isExit ? "KvMuted" : "KvAccent", 14);
+        icon.VerticalAlignment = VerticalAlignment.Center;
+        head.Children.Add(icon);
+        var title = new SelectableTextBlock
+        {
+            Text = id > 0 ? $"Background #{id} · {description}" : "Background tasks",
+            FontSize = 12.5, FontWeight = FontWeight.Medium, Classes = { "muted" },
+            VerticalAlignment = VerticalAlignment.Center,
+            TextWrapping = TextWrapping.NoWrap, TextTrimming = TextTrimming.CharacterEllipsis,
+        };
+        ToolTip.SetTip(title, id > 0 ? $"Background #{id} · {description}" : "Background tasks");
+        Grid.SetColumn(title, 1);
+        head.Children.Add(title);
         // A RUNNING task can be stopped from the transcript, not only from the Tasks panel (asked 2026-10-10). The
         // button is hidden as soon as the task has ended: there is nothing left to cancel.
         ToolTip.SetTip(_stop, "Stop this background task");
         _stop.Click += (_, _) => { StopRequested?.Invoke(); _stop.IsVisible = false; _state.Text = "stopping…"; };
         _stop.IsVisible = id > 0 && !isExit;
+        Grid.SetColumn(_stop, 2);
         head.Children.Add(_stop);
+        Grid.SetColumn(_state, 3);
         head.Children.Add(_state);
         Child = new StackPanel { Spacing = 4, Children = { head, _text } };
         if (isExit) { text = "— " + text; _stop.IsVisible = false; }

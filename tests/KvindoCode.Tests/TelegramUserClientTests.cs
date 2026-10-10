@@ -101,11 +101,13 @@ public sealed class TelegramUserClientTests(ITestOutputHelper o)
         Assert.Contains("login", described, StringComparison.OrdinalIgnoreCase);
     }
 
-    /// <summary>The bot path must stay the default: automating a user account carries a ban risk.</summary>
+    /// <summary>
+    /// There is no mode switch any more: the tool is the user session, unconditionally (2026-10-11). Nothing in
+    /// settings can select a bot path, so this pins that the setting which used to switch it is gone.
+    /// </summary>
     [Fact]
-    public void The_bot_path_is_still_the_default()
+    public void There_is_no_bot_mode_switch_left()
     {
-        using var sb = new Sandbox();
-        Assert.Equal("bot", sb.Settings().TelegramMode);
+        Assert.Null(typeof(AppSettings).GetProperty("TelegramMode"));
     }
 }

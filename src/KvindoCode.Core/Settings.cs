@@ -73,23 +73,23 @@ public sealed class AppSettings
     /// <summary>Override for the desktop-notification command (empty = auto-detect notify-send, else kdialog).</summary>
     public string NotificationDesktopCommand { get; set; } = "";
     /// <summary>
-    /// Name of the vault entry that holds the Telegram bot token the <c>Telegram</c> tool uses. The name is a setting;
-    /// the value never leaves the encrypted vault (asked 2026-10-09). Empty = the tool is unavailable.
+    /// Name of the vault entry that held the Telegram <c>bot</c> token — kept so an older settings.json still loads.
     /// </summary>
+    /// <remarks>
+    /// The Telegram tool is USER-session only since 2026-10-11 (asked for): a bot has no history at all, so "read the
+    /// reply" was impossible by construction and the token/bot bookkeeping bought nothing. The property and its file
+    /// value stay so an existing settings.json round-trips untouched; nothing reads it any more.
+    /// </remarks>
+    [Obsolete("The Telegram tool uses the MTProto user session; a bot token is no longer read. Kept for settings compatibility.")]
     public string TelegramTokenSecret { get; set; } = "telegram-bot-token";
-    /// <summary>Bot API server. Only change it for a self-hosted local Bot API server; empty = https://api.telegram.org.</summary>
+    /// <summary>Unused since the Bot API path was removed (2026-10-11). Kept so an existing settings.json round-trips.</summary>
+    [Obsolete("The Telegram tool uses the MTProto user session; the Bot API base URL is no longer read. Kept for settings compatibility.")]
     public string TelegramApiBase { get; set; } = "";
-    /// <summary>Chat the <c>Telegram</c> tool sends to when no chat_id is given (a numeric id or an @channelusername).</summary>
+    /// <summary>Chat the <c>Telegram</c> tool uses when no chat is given (a numeric id, @username, or "me").</summary>
     public string TelegramDefaultChat { get; set; } = "";
-    /// <summary>
-    /// Which Telegram API a session uses: "user" (an MTProto session that acts AS you — reads history, sends as you) or
-    /// "bot" (the Bot API). Bot is the DEFAULT because automating a user account can get that account limited or banned
-    /// by Telegram; the user session is opt-in (asked 2026-10-10).
-    /// </summary>
-    public string TelegramMode { get; set; } = "bot";
-    /// <summary>Vault entry NAME holding the api_id from my.telegram.org (user mode).</summary>
+    /// <summary>Vault entry NAME holding the api_id from my.telegram.org.</summary>
     public string TelegramApiIdSecret { get; set; } = "telegram-api-id";
-    /// <summary>Vault entry NAME holding the api_hash (user mode).</summary>
+    /// <summary>Vault entry NAME holding the api_hash.</summary>
     public string TelegramApiHashSecret { get; set; } = "telegram-api-hash";
     public int ChromePort { get; set; } = 9222;
     public string ChromePath { get; set; } = "";

@@ -64,7 +64,16 @@ public partial class MainWindow : Window
         InitializeComponent();
         var inner = Environment.GetEnvironmentVariable("KVINDOCODE_SCRIPT") is { Length: > 0 } script ? (ILlmClient)new ScriptedLlmClient(script) : new LlmClient(_settings);
         _auditor = new SecretAuditor(() => (_settings.AuditorUrl, _settings.AuditorModel, _settings.AuditSecrets));
-        _llm = new AuditingLlmClient(inner, _auditor, SecretVault.Default, msg => ShowInfo(msg), () => _settings.AuditSecrets);
+        _llm = new AuditingLlmClient(inner, _auditor, SecretVault.Default, msg => ShowInfo(msg), () => _settings.AuditSecrets)
+        {
+            // A request-time finding belongs to the session that made the request — not to whatever the window shows.
+            // Routed through ShowInfo it appeared in an unrelated (often already-finished) transcript (reported 2026-10-11).
+            OnSessionNotice = (sessionId, msg) => Dispatcher.UIThread.Post(() =>
+            {
+                if (_live.TryGetValue(sessionId, out var sv)) { sv.Transcript.Handle(new NoticeEvent(msg, false)); if (sv == _current) RebuildSidebar(); }
+                else ShowInfo(msg);   // no open view for it: the old behaviour is still better than dropping it
+            }),
+        };
         _storage = CreateStorage();
         SessionStorage.Default = _storage;
         ApplyTheme();
@@ -819,6 +828,12 @@ public partial class MainWindow : Window
         {
             case UsageEvent u: sv.PromptTokens = u.PromptTokens; sv.ContextWindow = u.ContextWindow; sv.CostRub = u.TotalCostRub; sv.CachedTokens = u.CachedTokens;
                 if (u.LifetimePromptTokens > 0) { sv.LifetimePromptTokens = u.LifetimePromptTokens; sv.LifetimeCachedTokens = u.LifetimeCachedTokens; }
+                // keep the measurable part of this call for the 5-minute speed figure
+                if (u.TokensPerSecond > 0 && u.CompletionTokens > 0)
+                {
+                    sv.Throughput.Add((DateTime.UtcNow, u.CompletionTokens, u.CompletionTokens / u.TokensPerSecond));
+                    if (sv.Throughput.Count > 200) sv.Throughput.RemoveAt(0);
+                }
                 if (cur) UpdateUsage(); break;
             case CompactedEvent: sv.PromptTokens = 0; if (cur) UpdateUsage(); break;
             case UserMessageEvent um: if (cur) EmptyState.IsVisible = false; sv.WaitingForUser = false; if (!um.Replayed) NoteActivity(sv.Id); if (!_all.Any(x => x.Id == sv.Id)) _ = RefreshSessionsAsync(); break;
@@ -1023,19 +1038,21 @@ public partial class MainWindow : Window
     }
 
     /// <summary>text == null starts a "wake" turn (a background task reported something).</summary>
-    void Start(SessionView sv, string? text, List<string>? images)
+    /// <param name="scheduled">The turn came from a recurring SchedulePrompt (a LOOP): the session is not waiting for the
+    /// human when it ends (the timer starts the next tick), so it must not alert — see AgentSession.RunInternalAsync.</param>
+    void Start(SessionView sv, string? text, List<string>? images, bool scheduled = false)
     {
         if (sv.Running) return;
         if (sv == _current) EmptyState.IsVisible = false;
         sv.Cts = new CancellationTokenSource();
         sv.Transcript.ScrollToEnd();
-        _ = RunAsync(sv, text, images, sv.Cts);
+        _ = RunAsync(sv, text, images, sv.Cts, scheduled);
         UpdateSendButton();
     }
 
-    async Task RunAsync(SessionView sv, string? text, List<string>? images, CancellationTokenSource cts)
+    async Task RunAsync(SessionView sv, string? text, List<string>? images, CancellationTokenSource cts, bool scheduled = false)
     {
-        try { await Task.Run(() => text is null ? sv.Session.RunWakeAsync(cts.Token) : sv.Session.RunTurnAsync(text, cts.Token, images)); }
+        try { await Task.Run(() => text is null ? sv.Session.RunWakeAsync(cts.Token) : sv.Session.RunTurnAsync(text, cts.Token, images, scheduled)); }
         catch (Exception e) { sv.Transcript.Handle(new NoticeEvent("Internal error: " + e.Message, true)); }
         finally { if (sv.Cts == cts) sv.Cts = null; }
 
@@ -1045,7 +1062,7 @@ public partial class MainWindow : Window
             if (sv.SnapshotQueue().Count > 0) QueueToComposer(sv);
             else { UpdateQueue(); UpdateSendButton(); }
         }
-        else if (sv.Session.DequeueScheduledTurn() is { } scheduled) { Start(sv, scheduled.Text, scheduled.Images?.ToList()); if (sv == _current) UpdateQueue(); }
+        else if (sv.Session.DequeueScheduledTurn() is { } scheduledTurn) { Start(sv, scheduledTurn.Text, scheduledTurn.Images?.ToList(), scheduledTurn.Scheduled); if (sv == _current) UpdateQueue(); }
         else if (sv.Dequeue() is { } next) { Start(sv, next.Text, next.Images); if (sv == _current) UpdateQueue(); }
         else if (sv == _current) { UpdateQueue(); UpdateSendButton(); }
     }
@@ -2281,6 +2298,20 @@ public partial class MainWindow : Window
         UpdateQueue(); UpdateSendButton();
     }
 
+    /// <summary>
+    /// Completion tokens per second over the last 5 minutes of this session's calls — a weighted average over the
+    /// generation time actually spent, so a burst of tiny fast calls cannot outvote one long one.
+    /// </summary>
+    double CurrentSpeed()
+    {
+        if (_current is null) return 0;
+        var cutoff = DateTime.UtcNow.AddMinutes(-5);
+        double tokens = 0, seconds = 0;
+        foreach (var (at, t, s) in _current.Throughput)
+            if (at >= cutoff) { tokens += t; seconds += s; }
+        return seconds > 0.05 ? tokens / seconds : 0;
+    }
+
     void UpdateUsage()
     {
         if (_current is null || _current.PromptTokens <= 0)
@@ -2297,10 +2328,15 @@ public partial class MainWindow : Window
         // ONLY the session average is shown (asked 2026-10-10). A single request is either a full hit or a miss, so the
         // last-request figure swings between 0% and ~99% and says nothing; the average is the honest number.
         if (life > 0) text += $"  ·  ↓{lifePct}% avg";
+        // Generation speed right beside the cache figure (asked 2026-10-11): a 5-minute weighted average over the
+        // session's completed calls, so it says what the provider is actually delivering now, not what one call did.
+        var speed = CurrentSpeed();
+        if (speed > 0) text += $"  ·  {speed:0.#} tok/s avg5m";
         if (_current.CostRub > 0) text += $"  ·  ₽{_current.CostRub:0.00}";
         if (UsageText.Text != text) UsageText.Text = text;          // ditto: only when the figure really changed
         var tip = $"Context used by the last request (older messages are summarised automatically at {KvindoCode.Core.Agent.AgentSession.CompactionThreshold * 100:0}%) · session cost reported by the gateway";
         if (life > 0) tip += $"\nPrompt cache, whole session: {Ui.Tokens(_current.LifetimeCachedTokens)} of {Ui.Tokens(life)} tokens ({lifePct}%). A single request is either a full hit or a miss, so the per-request figure jumps — the session average is the one to watch.";
+        if (speed > 0) tip += $"\nGeneration speed: {speed:0.#} completion tokens/second, weighted over the calls of the last 5 minutes (measured from the first streamed chunk, so queueing and prompt prefill are not counted as generation).";
         ToolTip.SetTip(UsageText, tip);
         SetClass(UsageText, "err", pct >= KvindoCode.Core.Agent.AgentSession.CompactionThreshold * 100);   // the warning colour matches the real threshold
     }

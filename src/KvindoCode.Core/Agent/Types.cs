@@ -41,7 +41,9 @@ public sealed record SecretReview(SecretConfirmation Decision, int Start = 0, in
 public sealed record SecretPart(int Start, int Length, string? Name = null);
 
 /// <summary>A user message submitted while a turn is running; injected between model/tool rounds.</summary>
-public sealed record QueuedTurn(string Text, IReadOnlyList<string>? Images = null);
+/// <param name="Scheduled">True when the turn came from a recurring <c>SchedulePrompt</c> (a LOOP), so finishing it must
+/// NOT raise the "finished, waiting for your input" alert: the timer, not the human, drives the session on.</param>
+public sealed record QueuedTurn(string Text, IReadOnlyList<string>? Images = null, bool Scheduled = false);
 
 /// <summary>Things the agent must ask the human for. Implemented by the UI (and by a console shim in headless mode).</summary>
 public interface IUserInteraction
@@ -73,7 +75,7 @@ public sealed record ModeChangedEvent(PermissionMode Mode) : AgentEvent;
 public sealed record WorkModeChangedEvent(SessionMode Mode) : AgentEvent;
 public sealed record TodosChangedEvent(IReadOnlyList<TodoItem> Todos) : AgentEvent;
 public sealed record UsageEvent(int PromptTokens, int CompletionTokens, int ContextWindow, double TotalCostRub = 0, int CachedTokens = 0,
-                                int LifetimePromptTokens = 0, int LifetimeCachedTokens = 0) : AgentEvent;
+                                int LifetimePromptTokens = 0, int LifetimeCachedTokens = 0, double TokensPerSecond = 0) : AgentEvent;
 public sealed record TaskNoticeEvent(int TaskId, string Description, string Text, bool IsExit) : AgentEvent;
 public sealed record TasksChangedEvent : AgentEvent;
 /// <summary>Round = 1-based review round; Running=true while the reviewer works; Text = critique (or a note).</summary>

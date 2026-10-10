@@ -59,6 +59,12 @@ public sealed class SessionView
     public int CachedTokens { get; set; }
     public int LifetimePromptTokens { get; set; }
     public int LifetimeCachedTokens { get; set; }
+    /// <summary>
+    /// One entry per completed model call: when it finished, how many completion tokens it produced, and how long the
+    /// generation itself took. Raw counts, not a pre-computed rate, so the 5-minute figure is a true weighted average —
+    /// averaging per-call rates would let one tiny fast call outvote a long slow one (asked 2026-10-11).
+    /// </summary>
+    public List<(DateTime At, int Tokens, double Seconds)> Throughput { get; } = new();
     public double CostRub { get; set; }
     public int ContextWindow { get; set; } = 200_000;
     public bool Running => Session.IsRunning;

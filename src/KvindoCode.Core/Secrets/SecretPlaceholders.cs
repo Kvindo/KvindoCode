@@ -15,10 +15,20 @@ public static partial class SecretPlaceholders
 
     /// <summary>Replace every known vault value with its marker (longest value first).</summary>
     public static string Protect(string text, SecretVault? vault = null)
+        => Protect(text, (vault ?? SecretVault.Default).RedactionTargets());
+
+    /// <summary>
+    /// Replace every value of <paramref name="targets"/> with its marker, longest first.
+    /// </summary>
+    /// <remarks>
+    /// Split out so a caller that masks a whole REQUEST reads the vault once instead of once per message: this method
+    /// used to call <c>RedactionTargets()</c> itself, and the audit path calls it for every message, so a 552-message
+    /// history did 552 locked vault reads (measured 2026-10-11). Contents are unchanged — the sort is the same one.
+    /// </remarks>
+    public static string Protect(string text, IReadOnlyList<(string Name, string Value)> targets)
     {
-        vault ??= SecretVault.Default;
         var result = text;
-        foreach (var (name, value) in vault.RedactionTargets().OrderByDescending(x => x.Value.Length))
+        foreach (var (name, value) in targets.OrderByDescending(x => x.Value.Length))
             if (value.Length > 0) result = result.Replace(value, Marker(name), StringComparison.Ordinal);
         return result;
     }

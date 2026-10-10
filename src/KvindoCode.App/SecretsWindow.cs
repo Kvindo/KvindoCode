@@ -479,7 +479,13 @@ public sealed class SecretsWindow : Window
             return;
         }
 
-        foreach (var s in all)
+        // Windowing: the vault holds ~400 entries and EVERY card is a StackPanel with six buttons, a reveal box and a
+        // tooltip — built for all of them on the UI thread, which is what made this tab slow to open (reported
+        // 2026-10-11). Only the first page is built; "Show more" grows it. Search/filter still sees every entry
+        // (it runs on the records, not on the controls), so behaviour is unchanged apart from the rendering.
+        int shown = Math.Min(all.Count, Math.Max(SecretsPageSize, _secretsShown));
+        _secretsShown = shown;
+        foreach (var s in all.Take(shown))
         {
             var sp = new StackPanel { Spacing = 6 };
             var title = new TextBlock { Text = s.Name, FontWeight = FontWeight.SemiBold, FontSize = 13.5, TextWrapping = TextWrapping.Wrap, VerticalAlignment = VerticalAlignment.Center };
@@ -610,7 +616,24 @@ public sealed class SecretsWindow : Window
 
             _list.Children.Add(new Border { Classes = { "card" }, Padding = new Thickness(12, 10), Child = sp });
         }
+
+        if (all.Count > shown)
+        {
+            var more = new Button
+            {
+                Name = "SecretsShowMore",
+                Content = $"Show {Math.Min(SecretsPageSize, all.Count - shown)} more of {all.Count - shown}",
+                Classes = { "outline" }, FontSize = 12.5, Padding = new Thickness(12, 5), HorizontalAlignment = HorizontalAlignment.Left,
+            };
+            ToolTip.SetTip(more, "Building every entry's controls at once is what made this window slow to open; the list grows on demand");
+            more.Click += (_, _) => { _secretsShown += SecretsPageSize; Refresh(); };
+            _list.Children.Add(more);
+        }
     }
+
+    /// <summary>How many secret cards the list builds per page.</summary>
+    const int SecretsPageSize = 60;
+    int _secretsShown = SecretsPageSize;
 
     static string Safe(string n)
     {

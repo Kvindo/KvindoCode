@@ -347,6 +347,13 @@ public sealed class LlmClient : ILlmClient
                 if (c.Name.Length == 0) continue;
                 result.ToolCalls.Add(c); n++;
             }
+            // A COMPLETED stream that carries nothing at all ("stop", no text, no tool call, no reasoning) is a gateway
+            // hiccup, not an answer: it used to surface as "The model returned an empty response." with the turn over,
+            // leaving the human to press Send again. Throwing it as retryable puts it through the existing backoff
+            // (1/3/8/15 s). The `length` finish reason is deliberately NOT retried — that one is a real truncation, and
+            // retrying would truncate the same way (asked 2026-10-11).
+            if (n == 0 && result.Content.Length == 0 && result.Reasoning.Length == 0 && result.FinishReason is "stop" or "")
+                throw new LlmException("Empty response from API", null, true);
             if (result.FinishReason.Length == 0) result.FinishReason = n > 0 ? "tool_calls" : "stop";
             return result;
         }

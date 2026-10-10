@@ -60,12 +60,23 @@ public static class GitleaksRules
     }
 
     /// <summary>Secrets the gitleaks rules find in <paramref name="text"/> (span = the secret itself, not the whole match).</summary>
-    public static List<SecretSpan> Detect(string text)
+    public static List<SecretSpan> Detect(string text) => Detect(text, out _);
+
+    /// <summary>
+    /// As <see cref="Detect(string)"/>, but tells the caller whether every rule actually finished.
+    /// </summary>
+    /// <param name="gaveUp">True when at least one rule hit its 2-second regex timeout (or an allowlist check did) and
+    /// therefore contributed NO spans. A caller that caches the verdict MUST refuse to cache it: "clean" and "a rule
+    /// gave up" are indistinguishable in the returned list, and a timeout gets MORE likely under load, so caching it
+    /// would turn one slow moment into a permanent blind spot (asked 2026-10-11).</param>
+    public static List<SecretSpan> Detect(string text, out bool gaveUp)
     {
         var found = new List<SecretSpan>();
+        gaveUp = false;
         if (string.IsNullOrEmpty(text)) return found;
         var (rules, global, _) = Loaded.Value;
         var lower = text.ToLowerInvariant();
+        var gaveUpFlag = new[] { false };                      // shared with the allowlist checks below
 
         foreach (var rule in rules)
         {
@@ -83,12 +94,13 @@ public static class GitleaksRules
                     if (grp.Length == 0) continue;
                     var secret = grp.Value;
                     if (rule.Entropy > 0 && Entropy(secret) <= rule.Entropy) continue;
-                    if (IsAllowed(global, text, m, secret) || rule.Allows.Any(a => IsAllowed(a, text, m, secret))) continue;
+                    if (IsAllowed(global, text, m, secret, gaveUpFlag) || rule.Allows.Any(a => IsAllowed(a, text, m, secret, gaveUpFlag))) continue;
                     found.Add(new SecretSpan(grp.Index, grp.Length, TypeOf(rule.Id), 0.9));
                 }
             }
-            catch (RegexMatchTimeoutException) { /* this rule gave up on this text; the others still run */ }
+            catch (RegexMatchTimeoutException) { gaveUpFlag[0] = true; /* this rule gave up on this text; the others still run */ }
         }
+        gaveUp = gaveUpFlag[0];
         return found;
     }
 
@@ -100,7 +112,7 @@ public static class GitleaksRules
         return m.Groups[0];
     }
 
-    static bool IsAllowed(Allow? a, string text, Match m, string secret)
+    static bool IsAllowed(Allow? a, string text, Match m, string secret, bool[] gaveUp)
     {
         if (a is null) return false;
         string Target() => a.Target switch
@@ -110,16 +122,16 @@ public static class GitleaksRules
             _ => secret,
         };
         var t = Target();
-        var rxHit = a.Regexes.Length > 0 && Hit(a.Regexes, t);
+        var rxHit = a.Regexes.Length > 0 && Hit(a.Regexes, t, gaveUp);
         var stopHit = a.Stopwords.Length > 0 && a.Stopwords.Any(w => secret.Contains(w, StringComparison.OrdinalIgnoreCase));
         if (!a.And) return rxHit || stopHit;
         return (a.Regexes.Length == 0 || rxHit) && (a.Stopwords.Length == 0 || stopHit);
     }
 
-    static bool Hit(Regex[] rxs, string target)
+    static bool Hit(Regex[] rxs, string target, bool[] gaveUp)
     {
         foreach (var r in rxs)
-            try { if (r.IsMatch(target)) return true; } catch (RegexMatchTimeoutException) { }
+            try { if (r.IsMatch(target)) return true; } catch (RegexMatchTimeoutException) { gaveUp[0] = true; }
         return false;
     }
 

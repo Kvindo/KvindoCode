@@ -307,11 +307,22 @@ public static partial class DeterministicSecretDetector
     }
 
     /// <summary>Every secret span in <paramref name="text"/>, sorted by position, without overlaps.</summary>
-    public static List<SecretSpan> Detect(string? text)
+    public static List<SecretSpan> Detect(string? text) => Detect(text, out _);
+
+    /// <summary>
+    /// As <see cref="Detect(string?)"/>, but reports whether the answer covers the WHOLE input.
+    /// </summary>
+    /// <param name="complete">False when the scan was not exhaustive — the text is longer than
+    /// <see cref="MaxScanLength"/> (only its head was scanned) or a gitleaks rule hit its regex timeout. A memo over
+    /// these verdicts MUST NOT store an incomplete one: "nothing found" there can mean "not looked at"
+    /// (asked 2026-10-11).</param>
+    public static List<SecretSpan> Detect(string? text, out bool complete)
     {
         var result = new List<SecretSpan>();
+        complete = true;
         if (string.IsNullOrEmpty(text)) return result;
-        var s = text.Length > MaxScanLength ? text[..MaxScanLength] : text;
+        var s = text;
+        if (text.Length > MaxScanLength) { s = text[..MaxScanLength]; complete = false; }
 
         foreach (Match m in PemPrivateKeyRx().Matches(s))
             Add(result, m.Index, m.Length, "private_key", 1.0);
@@ -378,7 +389,11 @@ public static partial class DeterministicSecretDetector
         // The gitleaks default rules (MIT): ~220 vendor token formats + a generic key/secret/password rule with entropy and
         // allowlists. Our own rules above stay because they cover shapes gitleaks does not (sshpass -p, "token: word", ...).
         var markers = MarkerRx().Matches(s).Select(m => (m.Index, End: m.Index + m.Length)).ToList();
-        foreach (var g in GitleaksRules.Detect(s))
+        var gitleaks = GitleaksRules.Detect(s, out var ruleGaveUp);
+        // Checked OUTSIDE the loop on purpose: a rule that timed out normally returns no span at all, so testing this
+        // inside the body would miss exactly the case it exists for.
+        if (ruleGaveUp) complete = false;
+        foreach (var g in gitleaks)
         {
             if (markers.Any(m => g.Start < m.End && g.End > m.Index)) continue;       // our own placeholder, already protected
             // our rules mask the bare value; a wider gitleaks match around it (user:pass) must not win - except key blocks, where wider is safer

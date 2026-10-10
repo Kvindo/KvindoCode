@@ -203,12 +203,43 @@ public sealed class ExitPlanModeTool : Tool
     }
 }
 
+public sealed class EnterPlanModeTool : Tool
+{
+    public override SessionToolRole SessionRole => SessionToolRole.Always;
+    public override string Name => "EnterPlanMode";
+    public override string Description =>
+        "Switches this session into PLAN MODE: a read-only research mode where only non-mutating tools are allowed " +
+        "(reads, search, safe shell commands) and the composer offers ExitPlanMode for approval. " +
+        "Use it when a task is large or ambiguous enough that you want to investigate and agree on an approach before " +
+        "touching anything — you cannot write, edit or run a mutating command until the plan is approved. " +
+        "Do NOT use it for a small, clearly-specified change; just do the work. The human can also toggle it with Shift+Tab.";
+    public override JsonNode Schema => JsonNode.Parse("""
+    {"type":"object","properties":{
+      "reason":{"type":"string","description":"One short sentence for the user: what you want to investigate and plan (shown as a notice)"}},
+     "required":["reason"]}
+    """)!;
+    public override bool AllowedInPlan(JsonObject input, ToolContext ctx) => false;      // already in plan mode: nothing to switch
+
+    public override Task<ToolResult> RunAsync(JsonObject input, ToolContext ctx, CancellationToken ct)
+    {
+        var reason = Str(input, "reason").Trim();
+        ctx.Session.SetMode(PermissionMode.Plan);
+        // The human must see that the mode changed on the model's own initiative; SetMode alone only moves the header
+        // toggle. Emitted through the session so it lands in the transcript that asked (and is masked like anything else).
+        ctx.Session.AddNotice("Plan mode is on — the model asked for it" + (reason.Length > 0 ? ": " + reason : "") +
+                              ". Only read-only work is possible now; the plan comes back through ExitPlanMode for your approval.");
+        return Task.FromResult(ToolResult.Ok(
+            "Plan mode is now ON. Investigate read-only, then call ExitPlanMode with the full plan for approval. " +
+            "Write, Edit and mutating Bash calls will be refused until the plan is approved."));
+    }
+}
+
 public static class ToolRegistry
 {
     public static List<Tool> CreateAll() => new()
     {
         new ReadTool(), new WriteTool(), new EditTool(), new GlobTool(), new GrepTool(), new BashTool(),
-        new WebFetchTool(), new TodoWriteTool(), new SkillTool(), new AskUserQuestionTool(), new ExitPlanModeTool(),
+        new WebFetchTool(), new TodoWriteTool(), new SkillTool(), new AskUserQuestionTool(), new ExitPlanModeTool(), new EnterPlanModeTool(),
         new MonitorTool(), new SchedulePromptTool(), new TaskOutputTool(), new TaskStopTool(), new TaskListTool(), new BrowserTool(),
         new AgentTool(), new AgentOutputTool(), new AgentListTool(), new AgentStopTool(), new SecretsTool(), new GeneratePasswordTool(), new LeakedCredentialsTool(), new SessionsTool(),
         new TelegramTool(),

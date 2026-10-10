@@ -166,17 +166,46 @@ public sealed class SecretVault
     }
 
     /// <summary>Load the master key and decrypt the values used for masking.</summary>
+    /// <remarks>
+    /// In the steady state this is called on EVERY outbound request (the audit path needs the masker), and it used to
+    /// re-read the key file and re-decrypt all 400+ AES-GCM blobs each time — 1.6 ms under the process-wide lock, so it
+    /// also serialised every concurrent session (measured 2026-10-11). It is now a no-op while the file has not changed;
+    /// a rotation or an external edit is still noticed, because the file's length and mtime are checked.
+    /// </remarks>
     public bool Unlock(out string? error)
     {
         error = null;
         lock (_lock)
         {
+            if (_key is not null && !KeyFileChanged()) return true;    // already have the current key: nothing to re-read
             try { _key = ReadOrCreateKey(KeyPath); }
             catch (Exception e) { error = e.Message; return false; }
+            _values.Clear();
+            _keyStamp = KeyStamp();
             DecryptAll();
             return true;
         }
     }
+
+    /// <summary>The identity of the key file: a replaced/regenerated key must invalidate the in-memory one.</summary>
+    (long Length, long Ticks)? KeyStamp()
+    {
+        try { return File.Exists(KeyPath) ? (new FileInfo(KeyPath).Length, File.GetLastWriteTimeUtc(KeyPath).Ticks) : null; }
+        catch { return null; }
+    }
+
+    bool KeyFileChanged()
+    {
+        try
+        {
+            if (!File.Exists(KeyPath)) return _keyStamp is not null;              // the file went away: re-derive (and recreate)
+            var fi = new FileInfo(KeyPath);
+            return _keyStamp is not { } s || s.Length != fi.Length || s.Ticks != fi.LastWriteTimeUtc.Ticks;
+        }
+        catch { return true; }                                                   // cannot tell: be safe and re-read
+    }
+
+    (long Length, long Ticks)? _keyStamp;
 
     public bool Unlock() => Unlock(out _);
 
@@ -186,6 +215,7 @@ public sealed class SecretVault
         {
             if (_key is not null) CryptographicOperations.ZeroMemory(_key);
             _key = null;
+            _keyStamp = null;
             _values.Clear();
         }
     }
@@ -457,6 +487,11 @@ public sealed class SecretVault
         if (File.Exists(FilePath)) { try { File.Copy(FilePath, FilePath + ".bak", true); OwnerOnly(FilePath + ".bak"); } catch { } }
         File.Move(tmp, FilePath, true);
         _version++;
+        // Storing a value REWRITES already-sent text into a marker, so the outbound scan's memo can no longer be
+        // trusted for those strings (verified 2026-10-11: a 150-byte line became 130 bytes). Invalidate it here — one
+        // place, every mutation — because a stale "already scanned, nothing there" verdict is exactly how a secret
+        // would slip through unmasked.
+        OutboundScanCache.Bump();
     }
 
     /// <summary>Re-read the file (someone else may have written) and drop the decrypted cache.</summary>
@@ -468,6 +503,7 @@ public sealed class SecretVault
             DecryptAll();
             _version++;
         }
+        OutboundScanCache.Bump();          // someone else may have stored a value: the memo must not outlive it
         Changed?.Invoke();
     }
 
@@ -586,6 +622,12 @@ public sealed class SecretVault
     }
 
     /// <summary>Decrypt one value. Use it only to hand the value to a process or the clipboard — never to print it.</summary>
+    /// <remarks>
+    /// The plaintext of every redactable secret is already in memory for masking (<see cref="DecryptAll"/>), so this
+    /// serves it from there instead of running AES-GCM again. The Secrets window asks for each entry several times per
+    /// rebuild, and 400+ decrypts on the UI thread is what made that tab slow to open (reported 2026-10-11). A value
+    /// that is NOT in the cache is still decrypted on demand — an entry with redaction off is readable here.
+    /// </remarks>
     public string? Reveal(string nameOrId, out string? error)
     {
         error = null;
@@ -594,6 +636,7 @@ public sealed class SecretVault
             if (_key is null) { error = "The secret vault is locked."; return null; }
             var r = Find(nameOrId);
             if (r is null) { error = $"No secret named '{nameOrId}'."; return null; }
+            if (_values.TryGetValue(r.Id, out var cached)) return cached;
             if (!TryDecrypt(r, out var v)) { error = $"Could not decrypt '{r.Name}' (wrong key, or the record was tampered with)."; return null; }
             return v;
         }
