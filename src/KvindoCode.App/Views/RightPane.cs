@@ -207,10 +207,14 @@ public sealed class RightPane : UserControl
             var cts = _filesSearchCts = new CancellationTokenSource();
             // the content mode searches the selected folder (the tree's own selection), else the project root
             var from = _filesTree?.SelectedItem is TreeViewItem { Tag: string t } && Directory.Exists(t) ? t : root;
+            // READ THE UI STATE HERE, on the UI thread. Evaluating `content.IsChecked` INSIDE Task.Run touched an
+            // Avalonia control from a thread-pool thread, which throws "Call from invalid thread" — every Files-tab
+            // search failed with that message (reported 2026-10-10, screenshot of the pane).
+            var contentMode = content.IsChecked == true;
             results.Children.Add(Ui.Muted("Searching…", 11.5));
             try
             {
-                var hits = await Task.Run(() => content.IsChecked == true
+                var hits = await Task.Run(() => contentMode
                     ? SearchContent(from, q, cts.Token)
                     : SearchFolders(from, q, cts.Token), cts.Token);
                 if (cts.IsCancellationRequested) return;

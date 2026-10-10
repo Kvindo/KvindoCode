@@ -40,6 +40,9 @@ public sealed class SettingsWindow : Window
         var notifyBox = new CheckBox { Name = "NotificationSounds", Content = "Alert me when a session needs attention (the master switch for every alert below and for a Notification hook)", IsChecked = s.NotificationSounds, FontSize = 13 };
         var autoTitle = new CheckBox { Content = "Name new sessions automatically with AI after the first turn", IsChecked = s.AutoTitle, FontSize = 13 };
         var showSubagents = new CheckBox { Content = "Show subagent transcripts in the session list (they are not your conversations)", IsChecked = s.ShowSubagentSessions, FontSize = 13 };
+        var isolate = new CheckBox { Name = "IsolateSessions", Content = "Give every session its own git worktree, so parallel sessions on one project cannot corrupt each other", IsChecked = s.IsolateSessions, FontSize = 13 };
+        var worktreeScript = new TextBox { Text = s.WorktreeSetupScript, Watermark = "(none)", Width = 380 };
+        var worktreeScriptLabel = new TextBlock { Text = "Setup script run once in a new worktree (relative to the project root; empty = none). Use it to link node_modules, .venv, etc.", Classes = { "muted" }, FontSize = 12, TextWrapping = TextWrapping.Wrap, MaxWidth = 520 };
         var auditBox = new CheckBox { Content = "Audit every outbound request with the local secret-auditor model before sending it to the cloud", IsChecked = s.AuditSecrets, FontSize = 13 };
         var auditorUrl = T(s.AuditorUrl, SecretAuditor.DefaultUrl);
         var auditorModel = T(s.AuditorModel, SecretAuditor.DefaultModel);
@@ -108,6 +111,31 @@ public sealed class SettingsWindow : Window
         }
         tgSecret.TextChanged += (_, _) => RefreshTelegram();
         RefreshTelegram();
+
+        // §2d Telegram USER session (MTProto): acts AS you — reads history, sends as you. Opt-in, because automating a
+        // user account can get it limited or banned by Telegram (asked 2026-10-10).
+        var tgMode = new ComboBox
+        {
+            Name = "TelegramMode",
+            HorizontalAlignment = HorizontalAlignment.Left, Width = 200,
+            ItemsSource = new[] { "bot", "user" },
+            SelectedItem = s.TelegramMode == "user" ? "user" : "bot",
+        };
+        var tgApiId = T(s.TelegramApiIdSecret, "telegram-api-id"); tgApiId.Name = "TelegramApiIdSecret";
+        var tgApiHash = T(s.TelegramApiHashSecret, "telegram-api-hash"); tgApiHash.Name = "TelegramApiHashSecret";
+        var tgModeNote = new TextBlock { Classes = { "muted" }, FontSize = 12, TextWrapping = TextWrapping.Wrap };
+        void RefreshTelegramMode()
+        {
+            var user = (tgMode.SelectedItem as string) == "user";
+            tgApiId.IsVisible = tgApiHash.IsVisible = user;
+            tgModeNote.Text = user
+                ? "USER mode acts as your own account (reads chat history, sends as you). It needs api_id + api_hash from " +
+                  "my.telegram.org, stored in the vault, then a one-time interactive login: run `kvindocode --telegram-login`. " +
+                  "Be aware Telegram can limit or ban an account that automates — the bot mode carries no such risk."
+                : "BOT mode: a bot token from @BotFather. A bot cannot read a chat's history and only sees messages sent to it after it was created.";
+        }
+        tgMode.SelectionChanged += (_, _) => RefreshTelegramMode();
+        RefreshTelegramMode();
 
         // §3 prompt prefix / suffix
         var promptPrefix = new TextBox { Text = s.PromptPrefix, Watermark = "(nothing)", AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, Classes = { "plain" }, FontSize = 12.5, MinHeight = 70 };
@@ -189,6 +217,7 @@ public sealed class SettingsWindow : Window
             s.AutoTitle = autoTitle.IsChecked == true; s.RunHooks = hooksBox.IsChecked == true;
             s.NotificationSounds = notifyBox.IsChecked == true;
             s.ShowSubagentSessions = showSubagents.IsChecked == true;
+            s.IsolateSessions = isolate.IsChecked == true; s.WorktreeSetupScript = (worktreeScript.Text ?? "").Trim();
             s.AuditSecrets = auditBox.IsChecked == true; s.AuditorUrl = (auditorUrl.Text ?? "").Trim(); s.AuditorModel = (auditorModel.Text ?? "").Trim();
             s.FontSize = (double)(font.Value ?? 14);
             s.Theme = theme.SelectedItem as string ?? "system";
@@ -206,6 +235,9 @@ public sealed class SettingsWindow : Window
             s.PromptPrefix = promptPrefix.Text ?? "";
             s.PromptSuffix = promptSuffix.Text ?? "";
             s.TelegramTokenSecret = (tgSecret.Text ?? "").Trim();
+            s.TelegramMode = (tgMode.SelectedItem as string) == "user" ? "user" : "bot";
+            s.TelegramApiIdSecret = (tgApiId.Text ?? "").Trim();
+            s.TelegramApiHashSecret = (tgApiHash.Text ?? "").Trim();
             s.TelegramDefaultChat = (tgChat.Text ?? "").Trim();
             s.TelegramApiBase = (tgApi.Text ?? "").Trim();
             s.ClaudeSessionsDir = (claudeDir.Text ?? "").Trim(); s.ClaudeProjectsDir = (claudeProj.Text ?? "").Trim();
@@ -296,7 +328,12 @@ public sealed class SettingsWindow : Window
             Content = new ScrollViewer { Content = Page(
                 Field("Claude session registry folder", claudeDir, "Shares sessions with the Claude desktop app (…/claude-code-sessions/<account>). Empty = KvindoCode's own store. Restart to apply."),
                 Field("Claude transcripts folder", claudeProj),
-                compat, autoTitle, showSubagents, hooksBox) },
+                compat, autoTitle, showSubagents, hooksBox,
+                H("Git worktrees"),
+                isolate,
+                new TextBlock { Text = "With this on, each session works in its own git worktree (~/.kvindocode/worktrees) on its own branch, so several sessions on one project no longer share a checkout. The project folder is left alone and nothing is committed for you — merge the session's branch (git merge kv/<id>) when you want its work in the project. A folder that is not a git repo, or has no commits yet, is used directly as before.", Classes = { "muted" }, FontSize = 12, TextWrapping = TextWrapping.Wrap },
+                Field("Worktree setup script", worktreeScript),
+                worktreeScriptLabel) },
         });
         tabs.Items.Add(new TabItem
         {
@@ -308,8 +345,10 @@ public sealed class SettingsWindow : Window
                 new StackPanel { Orientation = Orientation.Horizontal, Spacing = 24, Children = { Field("Theme", theme), Field("Font size", font), Field("Bash timeout (s)", timeout), Field("Max model calls per turn", maxIters) } },
                 new TextBlock { Text = "A single turn normally ends when the agent stops calling tools. This is a safety cap: when it is reached the turn continues automatically for a few more batches, then stops and tells you — hitting it usually means the task is looping.", Classes = { "muted" }, FontSize = 12, TextWrapping = TextWrapping.Wrap },
                 H("Telegram"),
-                Field("Vault entry holding the bot token", tgSecret, "The NAME of a secret, never the token itself. Create the bot with @BotFather, then store the token in the vault (sidebar → Secrets, or the `telegram-setup` skill)."),
+                new StackPanel { Orientation = Orientation.Horizontal, Spacing = 24, Children = { Field("API", tgMode, "bot = a bot token; user = your own account (MTProto)."), Field("Vault entry holding the bot token", tgSecret, "Only for bot mode. The NAME of a secret, never the token itself.") } },
                 tgStatus,
+                tgModeNote,
+                new StackPanel { Orientation = Orientation.Horizontal, Spacing = 24, Children = { Field("api_id vault entry", tgApiId, "Only for user mode."), Field("api_hash vault entry", tgApiHash, "Only for user mode.") } },
                 new StackPanel { Orientation = Orientation.Horizontal, Spacing = 24, Children = { Field("Default chat", tgChat, "Used when a call passes no chat_id."), Field("Bot API base", tgApi, "Empty = https://api.telegram.org. Only for a self-hosted local Bot API server.") } }) },
         });
 

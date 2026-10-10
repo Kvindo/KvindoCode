@@ -164,11 +164,11 @@ public static class PlanReviewer
         // the prompt is configurable now (asked 2026-10-09); empty means the built-in one
         sb.AppendLine(string.IsNullOrWhiteSpace(settings.PlanReviewPrompt) ? PlanReviewGate.ReviewPrompt : settings.PlanReviewPrompt).AppendLine();
         if (request.Length > 0) sb.AppendLine("The user's request:").AppendLine(Clip(request, 3000)).AppendLine();
-        sb.AppendLine($"Project directory: {session.Project.Cwd}").AppendLine().AppendLine("The plan under review:").AppendLine("<plan>").AppendLine(plan).AppendLine("</plan>");
+        sb.AppendLine($"Project directory: {session.WorkDir}").AppendLine().AppendLine("The plan under review:").AppendLine("<plan>").AppendLine(plan).AppendLine("</plan>");
 
         var ctx = new ToolContext
         {
-            Cwd = session.Project.Cwd, Settings = settings, Project = session.Project, Session = session,
+            Cwd = session.WorkDir, Settings = settings, Project = session.Project, Session = session,
             Interaction = NullInteraction.Instance,
         };
         var defs = ReadOnlyTools.Select(t => new ToolDef(t.Name, t.Description, t.Schema)).ToList();

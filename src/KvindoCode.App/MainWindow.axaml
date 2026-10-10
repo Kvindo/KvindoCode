@@ -99,6 +99,7 @@
               <ToggleButton x:Name="OnlyMineBtn" Classes="ghost" Padding="6" ToolTip.Tip="Show only my messages (hide the assistant's answers, tool calls and notices)"/>
               <Button x:Name="AuditBtn" Classes="ghost" Padding="6" ToolTip.Tip="Enable/disable secret auditing for this session"/>
               <Button x:Name="WorkModeBtn" Classes="ghost" Padding="6" ToolTip.Tip="How this session works: Normal (the model uses every tool itself), Delegate (it only answers, asks and works through subagents)"/>
+              <Button x:Name="WorkspaceBtn" Classes="ghost" Padding="6,3" IsVisible="False" FontSize="12" ToolTip.Tip="This session works in its own git worktree. Click to copy the merge command."/>
             </StackPanel>
           </Grid>
           <TextBlock Grid.Column="1" x:Name="UsageText" Classes="muted" FontSize="12" VerticalAlignment="Center" Margin="0,0,10,0"/>
@@ -152,6 +153,10 @@
           <Border x:Name="ComposerBox" Classes="composer" Padding="16,12,10,8">
             <StackPanel Spacing="4">
               <WrapPanel x:Name="AttachStrip" IsVisible="False" Margin="0,0,0,4"/>
+              <!-- Typing "/" at the start of the composer lists the available skills (asked 2026-10-10). -->
+              <Border x:Name="SkillPicker" Classes="card" IsVisible="False" Padding="8,6" Margin="0,0,0,4">
+                <StackPanel x:Name="SkillPickerList" Spacing="2"/>
+              </Border>
               <TextBox x:Name="Input" Classes="composer" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="44" MaxHeight="240" FontSize="14.5"/>
               <Grid ColumnDefinitions="Auto,*,Auto,Auto,Auto">
                 <Button x:Name="ModeBtn" Classes="pill" VerticalAlignment="Center" ToolTip.Tip="Toggle plan mode (Shift+Tab)">

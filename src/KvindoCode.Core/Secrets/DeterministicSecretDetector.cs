@@ -254,22 +254,27 @@ public static partial class DeterministicSecretDetector
            && !v.Any(c => "!@#$%^&*()_+=[]{}|;:'\",.<>/?~`\\-".Contains(c));
 
     /// <summary>True for a ULID: 26 Crockford-base32 characters whose first 48 bits are a plausible millisecond time.</summary>
+    /// <remarks>
+    /// Case-INSENSITIVE. The rule used to require uppercase and rejected any lowercase character, so the ULIDs that
+    /// systems actually emit — lowercase, like the ones this app writes everywhere ("01kncygd22m0c4gxc6z262sqqr") —
+    /// fell through and were offered as credentials on every paste (reported 2026-10-10). The time-prefix check below
+    /// is what keeps a random 26-character token out of this rule, not the letter case.
+    /// </remarks>
     public static bool IsUlid(string value)
     {
         var v = value.Trim();
         if (v.Length != 26) return false;
-        // uppercase + digits only: a ULID never contains lowercase, and requiring that keeps ordinary mixed-case
-        // secrets out of this rule
         int suspect = 0;
         foreach (var ch in v)
         {
             if (ch is >= '0' and <= '9') continue;
-            if (ch is >= 'A' and <= 'Z') { if ("ABCDEFGHJKMNPQRSTVWXYZ".IndexOf(ch) < 0) suspect++; continue; }
-            return false;
+            var up = char.ToUpperInvariant(ch);
+            if (up is >= 'A' and <= 'Z') { if ("ABCDEFGHJKMNPQRSTVWXYZ".IndexOf(up) < 0) suspect++; continue; }
+            return false;                                    // not base32: no ULID, whatever its length
         }
         // Crockford drops I, L, O and U; a transcribed id often keeps them, so tolerate a couple
         if (suspect > 2) return false;
-        return LooksLikeCrockfordTime(v.Replace('O', '0').Replace('I', '1').Replace('L', '1'));
+        return LooksLikeCrockfordTime(v.ToUpperInvariant().Replace('O', '0').Replace('I', '1').Replace('L', '1'));
     }
 
     /// <summary>

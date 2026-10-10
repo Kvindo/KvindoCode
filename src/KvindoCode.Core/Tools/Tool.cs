@@ -19,10 +19,46 @@ public sealed class ToolContext
     public required IUserInteraction Interaction { get; init; }
     public FileTracker Files { get; } = new();
 
+    /// <summary>
+    /// True when this session runs in its own git worktree (<see cref="WorkDir"/>) rather than the shared project tree.
+    /// Set by <c>AgentSession.EnsureWorkspaceAsync</c> before the first tool call. When false the guards below are no-ops,
+    /// so a non-git project keeps today's behaviour.
+    /// </summary>
+    public bool Isolated { get; set; }
+    /// <summary>The directory the session's tools may write into (its worktree). Empty when not isolated.</summary>
+    public string WorkDir { get; set; } = "";
+
     public string Resolve(string path)
     {
         path = Paths.Expand(path.Trim());
         return Path.GetFullPath(Path.IsPathRooted(path) ? path : Path.Combine(Cwd, path));
+    }
+
+    /// <summary>
+    /// Refusal message for a WRITE to <paramref name="full"/>, or null when it is allowed. Under isolation the only
+    /// writable places are the session's own worktree and the app's own per-project files (memory, plans, secret-out);
+    /// a peer session's worktree — which also lives under the config dir — is deliberately NOT allowed, so one session
+    /// cannot clobber another's checkout.
+    /// </summary>
+    public string? WriteError(string full)
+    {
+        if (!Isolated || WorkDir.Length == 0) return null;
+        if (Paths.IsUnder(full, WorkDir)) return null;
+        if (Paths.IsUnder(full, Project.MemoryDir) || Paths.IsUnder(full, Paths.PlansDir) || Paths.IsUnder(full, Paths.SecretOutDir)) return null;
+        return $"Refused: {full} is outside this session's work tree. This session is isolated in {WorkDir}; write only inside it. " +
+               "To change the project itself, tell the user to merge this session's branch.";
+    }
+
+    /// <summary>
+    /// Refusal message for a READ of <paramref name="full"/>, or null when allowed. Reading the project root and the app's
+    /// own files stays allowed; reading ANOTHER session's worktree is refused (they are sibling checkouts under the config dir).
+    /// </summary>
+    public string? ReadError(string full)
+    {
+        if (!Isolated || WorkDir.Length == 0) return null;
+        if (Paths.IsUnder(full, Paths.WorktreesDir) && !Paths.IsUnder(full, WorkDir))
+            return $"Refused: {full} is another session's work tree and must not be read from here.";
+        return null;
     }
 }
 

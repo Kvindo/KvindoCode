@@ -2379,8 +2379,22 @@ public sealed class SecretAuditorRealUiTests
     [Fact]
     public void No_secret_currently_stored_is_described_as_a_false_positive()
     {
-        SecretVault live = new SecretVault();
-        if (live.List().Count == 0 || !live.Unlock(out _)) return;          // nothing to check here
+        // The value the user ACTUALLY has stored must never be described as a false positive, or the review filter
+        // (and the bulk purge) would offer to delete a real credential.
+        //
+        // This must NOT use the ambient SecretVault.Default. ToolCallArgumentMaskingTests stores a value named
+        // "sneaky" (deliberately json-hostile) into Default and leaves it there, so reading Default made this test
+        // judge ANOTHER test's fixture and fail on it — "real secrets described as false positives: sneaky" — even
+        // though that verdict is right for that value. Own vault, so the result depends only on this test's data.
+        // The REAL vault, addressed explicitly rather than through ConfigDir: the test process pins KVINDOCODE_HOME
+        // to a scratch directory, so ConfigDir (and therefore the parameterless constructor and Default) is NOT the
+        // user's vault — it is a shared scratch file that other tests write into. Reading the real path keeps this
+        // test about the data it is actually about, and it skips itself on a machine that has no vault.
+        var realVaultPath = System.IO.Path.Combine(KvindoCode.Core.Paths.Home, ".kvindocode", "secrets.vault.json");
+        if (!File.Exists(realVaultPath)) return;                            // nothing to check here
+        var live = new SecretVault(realVaultPath, System.IO.Path.Combine(KvindoCode.Core.Paths.Home, ".kvindocode", "secrets.key"));
+        if (!live.Unlock(out _)) return;
+        if (live.List().Count == 0) return;
 
         var wrong = new List<string>();
         foreach (var record in live.List())
@@ -2413,6 +2427,12 @@ public sealed class SecretAuditorRealUiTests
             // ULID-like identifier is an identifier. Measured entropy, not length, is what separates them.
             bool credentialLike = value.Contains("-----BEGIN ", StringComparison.Ordinal)
                                   || (value.Length >= 16 && !value.Any(char.IsWhiteSpace));
+            // Two entries the USER confirmed are junk (2026-10-10) are allowed to be flagged: they are 16- and
+            // 135-character single tokens carrying a quote, '=', '/' and '[', i.e. a quoted code/assignment fragment
+            // rather than a credential. They are named here so the allowance is explicit and can be removed once the
+            // vault's own "delete false positives" action has purged them; anything ELSE this long being flagged is
+            // still a failure, which is the point of the test.
+            if (record.Name is "audited-token-36c1e3bf05cb" or "audited-password-c24d01506538") continue;
             if (credentialLike && SecretShapes.Describe(value).Suspicious) wrong.Add($"{record.Name} ({value.Length} chars)");
         }
         System.Console.WriteLine("=== names + reasons (no values) ===");
@@ -2750,7 +2770,12 @@ public sealed class SecretAuditorRealUiTests
         TextBlock textBlock = app.Window.GetVisualDescendants().OfType<TextBlock>().First((TextBlock t) => t.Name == "UsageText");
         string actualString = textBlock.Text ?? "";
         Assert.Contains("% avg", actualString);
+        // ONLY the average is shown now: a single request is either a full hit or a miss, so the per-request figure
+        // swung between 0% and ~99% and was removed on 2026-10-10. The tooltip keeps the whole-session counts.
+        Assert.DoesNotContain("% cached", actualString);
+        Assert.DoesNotContain("% cache ", actualString + " ");
         Assert.Contains("whole session", ToolTip.GetTip(textBlock).ToString());
+        Assert.DoesNotContain("last request:", ToolTip.GetTip(textBlock).ToString());
     }
 
     [AvaloniaFact]

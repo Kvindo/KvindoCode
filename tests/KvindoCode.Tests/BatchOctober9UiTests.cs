@@ -198,6 +198,53 @@ public sealed class BatchOctober9UiTests(ITestOutputHelper o)
         try { Directory.Delete(dir, true); } catch { }
     }
 
+    /// <summary>
+    /// The Files-tab search actually RUNS when its Search button is clicked. The earlier tests below call the static
+    /// search helpers directly, so they passed while every real search in the app failed with "Call from invalid
+    /// thread" — the mode check read `content.IsChecked` INSIDE Task.Run, touching an Avalonia control from a
+    /// thread-pool thread (reported 2026-10-10 with a screenshot of the pane). This drives the button.
+    /// </summary>
+    [AvaloniaFact]
+    public void The_files_search_button_actually_runs_the_search()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "fui-" + Guid.NewGuid().ToString("N")[..6]);
+        Directory.CreateDirectory(Path.Combine(dir, "auth-service"));
+        File.WriteAllText(Path.Combine(dir, "note.txt"), "some text");
+
+        var pane = new RightPane();
+        var w = new Window { Content = pane, Width = 500, Height = 600 };
+        w.Show();
+        pane.SetProject(dir);
+        Dispatcher.UIThread.RunJobs();
+
+        // open the Files tab, which builds the tree and the search row
+        var filesTab = w.GetVisualDescendants().OfType<Button>().First(b => (b.Content as string) == "Files");
+        filesTab.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+        Dispatcher.UIThread.RunJobs();
+
+        var box = w.GetVisualDescendants().OfType<TextBox>().FirstOrDefault(t => (t.Watermark as string) == "Search…");
+        Assert.NotNull(box);
+        box!.Text = "auth";
+        var search = w.GetVisualDescendants().OfType<Button>().First(b => (b.Content as string) == "Search");
+        search.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+
+        // let the search finish; it runs off the UI thread and posts back
+        string all = "";
+        for (int i = 0; i < 60; i++)
+        {
+            Dispatcher.UIThread.RunJobs();
+            all = string.Join(" | ", w.GetVisualDescendants().OfType<TextBlock>().Select(t => t.Text ?? ""));
+            if (all.Contains("auth-service") || all.Contains("Search failed")) break;
+            Thread.Sleep(50);
+        }
+        o.WriteLine("pane text: " + all[..Math.Min(200, all.Length)]);
+        Assert.DoesNotContain("Search failed", all);
+        Assert.DoesNotContain("invalid thread", all);
+        Assert.Contains("auth-service", all);
+        w.Close();
+        try { Directory.Delete(dir, true); } catch { }
+    }
+
     [Fact]
     public void Content_search_finds_matches_and_skips_binaries()
     {

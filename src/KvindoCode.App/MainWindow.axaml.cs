@@ -12,7 +12,9 @@ using KvindoCode.App.Views;
 using KvindoCode.Core;
 using KvindoCode.Core.Agent;
 using KvindoCode.Core.Browser;
+using KvindoCode.Core.Context;
 using KvindoCode.Core.Llm;
+using KvindoCode.Core.Notify;
 using KvindoCode.Core.Secrets;
 using KvindoCode.Core.Search;
 using KvindoCode.Core.Tools;
@@ -164,10 +166,23 @@ public partial class MainWindow : Window
             UpdateWorkModeButton();
         };
         RegenBtn.Click += async (_, _) => { if (_current != null) await RegenerateAsync(_current.Session.Info); };
+        WorkspaceBtn.Click += async (_, _) =>
+        {
+            if (_current is null) return;
+            var cmd = _current.Session.MergeCommand();
+            if (cmd.Length == 0) { ShowInfo("This session works directly in the project folder (not isolated)."); return; }
+            try
+            {
+                var cb = TopLevel.GetTopLevel(this)?.Clipboard;
+                if (cb != null) await cb.SetTextAsync(cmd);
+                ShowInfo("Merge command on the clipboard: " + cmd);
+            }
+            catch (Exception e) { ShowError("Could not use the clipboard: " + e.Message); }
+        };
         TodoHeader.Click += (_, _) => { _todosCollapsed = !_todosCollapsed; UpdateTodos(); };
         TodoClose.Click += (_, _) => { if (_current != null) { _current.TodosDismissed = true; UpdateTodos(); } };
         EffortBox.SelectionChanged += OnEffortChanged;
-        Input.TextChanged += (_, _) => { if (_current != null) _current.Draft = Input.Text ?? ""; UpdateSendButton(); };
+        Input.TextChanged += (_, _) => { if (_current != null) _current.Draft = Input.Text ?? ""; UpdateSendButton(); RefreshSkillPicker(); };
         Input.AddHandler(KeyDownEvent, OnInputKeyDown, RoutingStrategies.Tunnel);
         Input.AddHandler(KeyDownEvent, OnPasteKey, RoutingStrategies.Tunnel);
         AddHandler(KeyDownEvent, OnWindowKeyDown, RoutingStrategies.Tunnel);
@@ -249,6 +264,10 @@ public partial class MainWindow : Window
         string? requested = args.Length > 1 && Directory.Exists(args[1]) ? Path.GetFullPath(args[1]) : null;
         var project = requested ?? (_settings.LastProject is { } lp && Directory.Exists(lp) ? lp : null);
         if (project != null) OpenProject(project); else { RebuildSidebar(); UpdateAll(); }
+
+        // Every beep decision is logged to the same trace file, so "why did it beep" can be answered from evidence
+        // rather than by reading the code (reported 2026-10-10: constant beeps with no reason).
+        Notifier.Trace ??= m => UiTrace.Line("beep: " + m);
 
         if (string.IsNullOrEmpty(_settings.EffectiveKey)) await OpenSettingsAsync();
         EnableDropTargets(this);
@@ -477,7 +496,17 @@ public partial class MainWindow : Window
         _project = path;
         _settings.RememberProject(path);
         try { _settings.Save(); } catch { }
+        PruneWorktrees(path);
         NewSession(path);
+    }
+
+    /// <summary>Drop worktrees left by sessions that no longer exist (a deleted session cleans up after itself, this
+    /// covers an app killed before it could). Only a clean, not-ahead worktree is removed, and its branch is kept.</summary>
+    void PruneWorktrees(string root)
+    {
+        if (!_settings.IsolateSessions || !Workspaces.CanIsolate(root)) return;
+        var ids = new HashSet<string>(_storage.ListAll().Select(x => x.Id), StringComparer.Ordinal);
+        try { Workspaces.Prune(root, id => !ids.Contains(id)); } catch { }
     }
 
     void NewSession(string project)
@@ -533,15 +562,29 @@ public partial class MainWindow : Window
 
     TranscriptView MakeTranscript(SessionView sv)
     {
-        var tv = new TranscriptView { BodyFontSize = _settings.FontSize, ProjectCwd = sv.Session.Project.Cwd };
+        var tv = new TranscriptView { BodyFontSize = _settings.FontSize, ProjectCwd = sv.Session.WorkDir, RootCwd = sv.Session.Project.Cwd };
         tv.ToolDetailRequested += d => { if (sv == _current) OpenToolDetail(d, sv); };
-        tv.FileRequested += (p, l) => { if (sv == _current) { OpenPane(); _pane.SetProject(sv.Session.Project.Cwd); _pane.ShowFile(p, l); } };
+        tv.FileRequested += (p, l) => { if (sv == _current) { OpenPane(); _pane.SetProject(sv.Session.WorkDir); _pane.ShowFile(p, l); } };
         tv.PlanAwaiting += plan => { if (sv == _current) { OpenPane(); _pane.ShowPlan(plan, _settings.FontSize); } };
         tv.PlanOpened += plan => { if (sv == _current) { OpenPane(); _pane.ShowPlan(plan, _settings.FontSize); } };
         tv.RewindRequested += (i, t) => _ = RewindAsync(sv, i, t);
         tv.ForkRequested += (i, t) => _ = ForkAsync(sv, i, t);
         tv.LoadEarlierRequested += () => _ = LoadEarlierAsync(sv);
+        tv.TaskStopRequested += id => StopTaskFromTranscript(sv, id);
         return tv;
+    }
+
+    /// <summary>
+    /// Stop whatever a transcript's task card refers to. The Tasks panel already offers this; the card in the
+    /// transcript is the same action where the user is actually looking (asked 2026-10-10). A task id can be a
+    /// background process, a scheduled loop, or a subagent, so all three are tried — only one can own the id.
+    /// </summary>
+    void StopTaskFromTranscript(SessionView sv, int id)
+    {
+        sv.Session.Tasks.Stop(id);
+        sv.Session.StopScheduledPrompt(id);
+        sv.Session.Subagents.Stop(id);
+        UpdateTasks();
     }
 
     /// <summary>
@@ -555,11 +598,11 @@ public partial class MainWindow : Window
         OpenPane();
         if (SubagentFor(d, sv.Session) is { } agent)
         {
-            _pane.SetAgentCwd(sv.Session.Project.Cwd);
+            _pane.SetAgentCwd(sv.Session.WorkDir);
             _pane.ShowAgent(agent);
             return;
         }
-        _pane.ShowTool(d, sv.Session.Project.Cwd);
+        _pane.ShowTool(d, sv.Session.WorkDir);
     }
 
     /// <summary>The subagent a card refers to: <c>AgentOutput</c>/<c>AgentStop</c> carry <c>agent_id</c>, and the
@@ -825,6 +868,12 @@ public partial class MainWindow : Window
                 RebuildSidebar(); if (cur) { UpdateSendButton(); UpdateTodos(); Input.Focus(); } break;
             case ModeChangedEvent: if (cur) UpdateMode(); break;
             case WorkModeChangedEvent: if (cur) { UpdateWorkModeButton(); UpdateMode(); } break;
+            case WorkspaceReadyEvent wr:
+                // The session now knows where it works (its own worktree, or the shared project tree). Point path
+                // resolution and the Files pane at it — both were wired at attach, before this could be known.
+                sv.Transcript.ProjectCwd = wr.Workspace.WorkDir;
+                if (cur) { UpdateWorkspaceButton(); if (PaneHost.IsVisible && _pane.HasContent) _pane.SetProject(wr.Workspace.WorkDir); }
+                break;
             case TasksChangedEvent: if (cur) UpdateTasks(); RebuildSidebar(); break;
             case TodosChangedEvent t:
                 {   // a changed list re-opens the panel; an unchanged one keeps the user's choice
@@ -1380,7 +1429,7 @@ public partial class MainWindow : Window
             var name = new Button { Name = "AgentRow", Content = $"#{agent.Id}  Agent: {agent.Description}{(model is null ? "" : " · " + model)}{state}", Classes = { "ghost" }, Padding = new Thickness(0), HorizontalAlignment = HorizontalAlignment.Stretch, HorizontalContentAlignment = HorizontalAlignment.Left, FontSize = 13 };
             if (!agent.Running) name.Opacity = 0.75;
             ToolTip.SetTip(name, agent.Prompt + "\n\nClick to open its transcript in the side panel.");
-            name.Click += (_, _) => { OpenPane(); _pane.SetAgentCwd(session!.Project.Cwd); _pane.ShowAgent(agent); };
+            name.Click += (_, _) => { OpenPane(); _pane.SetAgentCwd(session!.WorkDir); _pane.ShowAgent(agent); };
             Grid.SetColumn(name, 1); g.Children.Add(name);
             if (agent.Running)
             {
@@ -1391,7 +1440,7 @@ public partial class MainWindow : Window
             else
             {
                 var open = new Button { Content = "Open", Classes = { "outline" }, Padding = new Thickness(10, 2), FontSize = 12 };
-                open.Click += (_, _) => { OpenPane(); _pane.SetAgentCwd(session!.Project.Cwd); _pane.ShowAgent(agent); };
+                open.Click += (_, _) => { OpenPane(); _pane.SetAgentCwd(session!.WorkDir); _pane.ShowAgent(agent); };
                 Grid.SetColumn(open, 2); g.Children.Add(open);
             }
             TasksList.Children.Add(g);
@@ -1477,6 +1526,18 @@ public partial class MainWindow : Window
 
     void OnInputKeyDown(object? sender, KeyEventArgs e)
     {
+        // While the "/" skill picker is open it owns ↑/↓/Enter/Tab/Esc, so the keys do not also send the message or
+        // walk the prompt history (asked 2026-10-10).
+        if (SkillPicker.IsVisible)
+        {
+            switch (e.Key)
+            {
+                case Key.Down: SkillMove(+1); e.Handled = true; return;
+                case Key.Up: SkillMove(-1); e.Handled = true; return;
+                case Key.Enter or Key.Tab: PickSkill(); e.Handled = true; return;
+                case Key.Escape: SkillPicker.IsVisible = false; e.Handled = true; return;
+            }
+        }
         if (e.Key == Key.Enter && !e.KeyModifiers.HasFlag(KeyModifiers.Shift) && !e.KeyModifiers.HasFlag(KeyModifiers.Alt))
         {
             e.Handled = true;
@@ -1487,6 +1548,75 @@ public partial class MainWindow : Window
         // otherwise the arrows must keep moving inside a multi-line draft (asked 2026-10-09).
         if (e.Key == Key.Up && e.KeyModifiers == KeyModifiers.None && CaretOnLine(Input, first: true)) { RecallPrompt(-1); e.Handled = true; }
         else if (e.Key == Key.Down && e.KeyModifiers == KeyModifiers.None && CaretOnLine(Input, first: false)) { RecallPrompt(+1); e.Handled = true; }
+    }
+
+    // ================================================================== "/" skill picker
+
+    List<SkillInfo> _skillMatches = new();
+    int _skillIndex;
+
+    /// <summary>
+    /// Offer the session's skills while the user types "/name" at the START of the composer. Lists the same skills the
+    /// system prompt advertises, so what is offered and what the model can actually run cannot drift.
+    /// </summary>
+    void RefreshSkillPicker()
+    {
+        var text = Input.Text ?? "";
+        // only at the very start, and only while the word is still being typed — "/a/b" or text after a space is prose
+        if (!text.StartsWith('/') || text.Contains(' ') || text.Contains('\n') || _current is null)
+        {
+            SkillPicker.IsVisible = false;
+            return;
+        }
+        var query = text[1..];
+        var all = _current.Session.Project.Skills;
+        _skillMatches = all.Where(s => s.Name.Contains(query, StringComparison.OrdinalIgnoreCase)).ToList();
+        if (_skillMatches.Count == 0)
+        {
+            SkillPicker.IsVisible = false;
+            return;
+        }
+        _skillIndex = Math.Clamp(_skillIndex, 0, _skillMatches.Count - 1);
+        SkillPickerList.Children.Clear();
+        for (int i = 0; i < _skillMatches.Count; i++)
+        {
+            var s = _skillMatches[i];
+            var label = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
+            label.Children.Add(new TextBlock { Text = "/" + s.Name, FontWeight = FontWeight.Medium, FontSize = 12.5 });
+            var d = s.Description.Replace('\n', ' ').Trim();
+            label.Children.Add(new TextBlock { Text = d.Length > 70 ? d[..70] + "…" : d, Classes = { "muted" }, FontSize = 11.5, VerticalAlignment = VerticalAlignment.Center });
+            var b = new Button { Name = "SkillPick", Content = label, Classes = { "ghost" }, FontSize = 12.5, Padding = new Thickness(8, 3), HorizontalAlignment = HorizontalAlignment.Stretch, HorizontalContentAlignment = HorizontalAlignment.Left };
+            if (i == _skillIndex) b.Classes.Add("selected");        // reuses the sidebar's selected-row style
+            var pick = s.Name;
+            b.Click += (_, _) => InsertSkill(pick);
+            SkillPickerList.Children.Add(b);
+        }
+        SkillPicker.IsVisible = true;
+    }
+
+    void SkillMove(int step)
+    {
+        if (_skillMatches.Count == 0) return;
+        _skillIndex = (_skillIndex + step + _skillMatches.Count) % _skillMatches.Count;
+        RefreshSkillPicker();
+    }
+
+    void PickSkill()
+    {
+        if (_skillMatches.Count == 0) { SkillPicker.IsVisible = false; return; }
+        InsertSkill(_skillMatches[Math.Clamp(_skillIndex, 0, _skillMatches.Count - 1)].Name);
+    }
+
+    /// <summary>
+    /// Put the skill into the composer as text the user can still edit — choosing from the list never runs anything by
+    /// itself. The model invokes it through the ordinary Skill tool, exactly as if the sentence had been typed.
+    /// </summary>
+    void InsertSkill(string name)
+    {
+        Input.Text = $"use the {name} skill: ";
+        Input.CaretIndex = Input.Text.Length;
+        SkillPicker.IsVisible = false;
+        Input.Focus();
     }
 
     /// <summary>True when the caret sits on the first (or last) line of the composer.</summary>
@@ -1918,7 +2048,26 @@ public partial class MainWindow : Window
 
     void UpdateAll()
     {
-        UpdateTitle(); UpdateMode(); UpdateTodos(); UpdateTasks(); UpdateUsage(); UpdateSendButton(); UpdateQueue(); UpdateEmpty(); UpdateModelUi(); UpdateAuditButton(); UpdateWorkModeButton();
+        UpdateTitle(); UpdateMode(); UpdateTodos(); UpdateTasks(); UpdateUsage(); UpdateSendButton(); UpdateQueue(); UpdateEmpty(); UpdateModelUi(); UpdateAuditButton(); UpdateWorkModeButton(); UpdateWorkspaceButton();
+    }
+
+    /// <summary>The workspace chip: the session's worktree branch, or "shared tree" when it is not isolated.</summary>
+    void UpdateWorkspaceButton()
+    {
+        var s = _current?.Session;
+        if (s is null) { WorkspaceBtn.IsVisible = false; return; }
+        WorkspaceBtn.IsVisible = true;
+        var shortId = s.Info.Id.Length > 8 ? s.Info.Id[..8] : s.Info.Id;
+        if (s.IsIsolated)
+        {
+            WorkspaceBtn.Content = new TextBlock { Text = "⑂ kv/" + shortId, FontSize = 12 };
+            ToolTip.SetTip(WorkspaceBtn, "Isolated: this session edits its own git worktree (branch kv/" + shortId + "). The project folder is untouched. Click to copy the merge command.");
+        }
+        else
+        {
+            WorkspaceBtn.Content = new TextBlock { Text = "shared tree", FontSize = 12, Opacity = 0.6 };
+            ToolTip.SetTip(WorkspaceBtn, "Not isolated: this session edits the project folder directly (not a git repo, or no commit yet).");
+        }
     }
 
     void UpdateAuditButton()
@@ -2015,7 +2164,7 @@ public partial class MainWindow : Window
             EmptyTitle.Text = plan ? "Let's plan it first" : "What are we building?";
             EmptyHint.Text = (plan
                 ? "Plan mode is on — I'll research the code read-only, have the plan reviewed adversarially, and ask for your approval before changing anything."
-                : "Regular mode — I can read, edit and run commands in this project.\nShift+Tab switches to plan mode.") + "\n\n" + _current.Session.Project.Cwd;
+                : "Regular mode — I can read, edit and run commands in this project.\nShift+Tab switches to plan mode.") + "\n\n" + _current.Session.WorkDir;
         }
         Input.IsEnabled = _current != null;
     }
@@ -2141,21 +2290,17 @@ public partial class MainWindow : Window
         }
         var w = Math.Max(1, _current.ContextWindow);
         var pct = Ui.Pct(_current.PromptTokens, w);
-        var cache = _current.CachedTokens;
-        var cachePct = Ui.Pct(cache, _current.PromptTokens);
         var life = _current.LifetimePromptTokens;
         // 64-bit + clamped: with millions of lifetime tokens a naive int "cached * 100" overflowed and the figure went negative
         var lifePct = Ui.Pct(_current.LifetimeCachedTokens, life);
         var text = $"{Ui.Tokens(_current.PromptTokens)} / {Ui.Tokens(w)}  ({pct}%)";
-        text += cache > 0 ? $"  ·  ↓{cachePct}% cached" : $"  ·  ↓0% cache";
-        // the per-request figure flips between 0% and ~99% (a call is either a hit or a miss); the session average is the
-        // number that actually reflects how much of the prompt is served from cache
+        // ONLY the session average is shown (asked 2026-10-10). A single request is either a full hit or a miss, so the
+        // last-request figure swings between 0% and ~99% and says nothing; the average is the honest number.
         if (life > 0) text += $"  ·  ↓{lifePct}% avg";
         if (_current.CostRub > 0) text += $"  ·  ₽{_current.CostRub:0.00}";
         if (UsageText.Text != text) UsageText.Text = text;          // ditto: only when the figure really changed
         var tip = $"Context used by the last request (older messages are summarised automatically at {KvindoCode.Core.Agent.AgentSession.CompactionThreshold * 100:0}%) · session cost reported by the gateway";
-        if (cache > 0) tip += $"\nPrompt cache, last request: {Ui.Tokens(cache)} of {Ui.Tokens(_current.PromptTokens)} tokens read from cache ({cachePct}%).";
-        if (life > 0) tip += $"\nPrompt cache, whole session: {Ui.Tokens(_current.LifetimeCachedTokens)} of {Ui.Tokens(life)} tokens ({lifePct}%). A single request is either a full hit or a miss, so the last-request figure jumps: the average is the honest one.";
+        if (life > 0) tip += $"\nPrompt cache, whole session: {Ui.Tokens(_current.LifetimeCachedTokens)} of {Ui.Tokens(life)} tokens ({lifePct}%). A single request is either a full hit or a miss, so the per-request figure jumps — the session average is the one to watch.";
         ToolTip.SetTip(UsageText, tip);
         SetClass(UsageText, "err", pct >= KvindoCode.Core.Agent.AgentSession.CompactionThreshold * 100);   // the warning colour matches the real threshold
     }
@@ -2430,6 +2575,10 @@ public partial class MainWindow : Window
             v.Cts?.Cancel(); v.Session.Dispose(); _live.Remove(s.Id);
             if (_current == v) { _current = null; if (_project != null) NewSession(_project); }
         }
+        // Drop this session's worktree. It is KEPT (with a reason) when it holds uncommitted or unmerged work — and its
+        // branch is never deleted — so deleting a session can never throw away work the user has not merged.
+        if (!Workspaces.Forget(s.Cwd, s.Id, out var keepReason) && keepReason.Length > 0)
+            ShowInfo($"“{s.Title}” was deleted, but its work tree was kept: {keepReason}. The branch kv/{s.Id} is still there to merge.");
         _storage.Delete(s);
         await RefreshSessionsAsync();
         RebuildSidebar();

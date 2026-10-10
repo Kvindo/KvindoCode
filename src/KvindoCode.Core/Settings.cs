@@ -81,11 +81,30 @@ public sealed class AppSettings
     public string TelegramApiBase { get; set; } = "";
     /// <summary>Chat the <c>Telegram</c> tool sends to when no chat_id is given (a numeric id or an @channelusername).</summary>
     public string TelegramDefaultChat { get; set; } = "";
+    /// <summary>
+    /// Which Telegram API a session uses: "user" (an MTProto session that acts AS you — reads history, sends as you) or
+    /// "bot" (the Bot API). Bot is the DEFAULT because automating a user account can get that account limited or banned
+    /// by Telegram; the user session is opt-in (asked 2026-10-10).
+    /// </summary>
+    public string TelegramMode { get; set; } = "bot";
+    /// <summary>Vault entry NAME holding the api_id from my.telegram.org (user mode).</summary>
+    public string TelegramApiIdSecret { get; set; } = "telegram-api-id";
+    /// <summary>Vault entry NAME holding the api_hash (user mode).</summary>
+    public string TelegramApiHashSecret { get; set; } = "telegram-api-hash";
     public int ChromePort { get; set; } = 9222;
     public string ChromePath { get; set; } = "";
     public bool ChromeAutoLaunch { get; set; } = true;
     /// <summary>Use the user's real Chrome profile (extensions, logins) — restarting Chrome with remote debugging if needed — instead of a separate KvindoCode profile.</summary>
     public bool ChromeUseMyProfile { get; set; } = true;
+    /// <summary>
+    /// Run every session in its own `git worktree` (its own working tree, index and branch), so several sessions on one
+    /// project no longer corrupt each other's checkout. The app never commits or merges: it creates the branch and the
+    /// user merges it. Ignored for a project that is not a git repo (or has no commit yet) — sessions then share the
+    /// folder as before, and the header says so.
+    /// </summary>
+    public bool IsolateSessions { get; set; } = true;
+    /// <summary>Optional per-project script run once in a new worktree to link things worktrees do not carry (node_modules, .venv…). Relative to the project root; empty = none.</summary>
+    public string WorktreeSetupScript { get; set; } = ".kvindocode/worktree-setup.sh";
     /// <summary>Pinned session ids when using KvindoCode's own store (Claude registry sessions use isStarred instead).</summary>
     public List<string> PinnedSessions { get; set; } = new();
     /// <summary>Run Claude Code–style hooks (UserPromptSubmit, PreToolUse, PostToolUse, Stop, Notification) from settings.json / hooks.json.</summary>

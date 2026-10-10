@@ -73,7 +73,8 @@ public sealed class SubagentManager : IDisposable
             try
             {
                 using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, h.Cts.Token);
-                using var child = new AgentSession(_parent.Settings, _parent.Llm, _parent.Cwd, _parent.Interaction, null, _parent.Storage)
+                using var child = new AgentSession(_parent.Settings, _parent.Llm, _parent.Project.Cwd, _parent.Interaction, null, _parent.Storage,
+                                                   workDirOverride: _parent.IsIsolated ? _parent.WorkDir : null)
                 {
                     AutoTitle = false, ModelLookup = _parent.ModelLookup, Auditor = _parent.Auditor, IsChild = true,
                 };

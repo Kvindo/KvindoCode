@@ -203,6 +203,7 @@ public sealed class ReadTool : Tool
     public override Task<ToolResult> RunAsync(JsonObject input, ToolContext ctx, CancellationToken ct)
     {
         var path = ctx.Resolve(Str(input, "file_path"));
+        if (ctx.ReadError(path) is { } rerr) return Task.FromResult(ToolResult.Err(rerr));
         if (Directory.Exists(path)) return Task.FromResult(ToolResult.Err($"{path} is a directory, not a file. Use `ls` via Bash or Glob to list it."));
         if (!File.Exists(path)) return Task.FromResult(ToolResult.Err($"File does not exist: {path}" + Suggest(path)));
         var ext = Path.GetExtension(path).ToLowerInvariant();
@@ -274,6 +275,7 @@ public sealed class WriteTool : Tool
     public override Task<ToolResult> RunAsync(JsonObject input, ToolContext ctx, CancellationToken ct)
     {
         var path = ctx.Resolve(Str(input, "file_path"));
+        if (ctx.WriteError(path) is { } werr) return Task.FromResult(ToolResult.Err(werr));
         var content = Fs.StripLineNumbers(Str(input, "content"));
         // S11: an unknown marker must not abort an unrelated write of ordinary text that merely mentions the syntax
         if (!KvindoCode.Core.Secrets.SecretPlaceholders.TryExpand(content, out content, out var secretError))
@@ -321,6 +323,7 @@ public sealed class EditTool : Tool
     public override Task<ToolResult> RunAsync(JsonObject input, ToolContext ctx, CancellationToken ct)
     {
         var path = ctx.Resolve(Str(input, "file_path"));
+        if (ctx.WriteError(path) is { } werr) return Task.FromResult(ToolResult.Err(werr));
         var oldS = Fs.StripLineNumbers(Str(input, "old_string"));
         var newS = Fs.StripLineNumbers(Str(input, "new_string"));
         bool literal = Bool(input, "literal_markers");
@@ -407,6 +410,7 @@ public sealed class GlobTool : Tool
     public override Task<ToolResult> RunAsync(JsonObject input, ToolContext ctx, CancellationToken ct)
     {
         var root = StrOpt(input, "path") is { Length: > 0 } p ? ctx.Resolve(p) : ctx.Cwd;
+        if (ctx.ReadError(root) is { } gerr) return Task.FromResult(ToolResult.Err(gerr));
         if (!Directory.Exists(root)) return Task.FromResult(ToolResult.Err($"Directory does not exist: {root}"));
         var pattern = Str(input, "pattern");
         if (pattern.StartsWith('/'))
@@ -416,6 +420,7 @@ public sealed class GlobTool : Tool
             // literal directory the pattern names instead, and search from there.
             var (dir, tail) = Fs.SplitLiteralDir(pattern);
             root = dir;
+            if (ctx.ReadError(root) is { } gerr2) return Task.FromResult(ToolResult.Err(gerr2));
             pattern = tail;
             if (!Directory.Exists(root)) return Task.FromResult(ToolResult.Err($"Directory does not exist: {root}"));
         }
@@ -462,6 +467,7 @@ public sealed class GrepTool : Tool
     public override Task<ToolResult> RunAsync(JsonObject input, ToolContext ctx, CancellationToken ct)
     {
         var root = StrOpt(input, "path") is { Length: > 0 } p ? ctx.Resolve(p) : ctx.Cwd;
+        if (ctx.ReadError(root) is { } rerr) return Task.FromResult(ToolResult.Err(rerr));
         var opts = RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.Multiline;
         if (Bool(input, "-i")) opts |= RegexOptions.IgnoreCase;
         if (Bool(input, "multiline")) opts |= RegexOptions.Singleline;

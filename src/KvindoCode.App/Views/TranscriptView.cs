@@ -43,14 +43,19 @@ public sealed class TranscriptView : UserControl
             foreach (var md in this.GetVisualDescendants().OfType<MarkdownView>()) md.BaseSize = value;
         }
     }
-    /// <summary>Project folder: relative paths in the conversation resolve against it.</summary>
+    /// <summary>Where the session's edits happen (its git worktree, or the project folder). Relative path links resolve against it.</summary>
     public string ProjectCwd { get; set; } = "";
+    /// <summary>The project folder (identity). A path recorded while the session ran directly in the project — before it
+    /// moved to a worktree, or from a tool that reported the root — still resolves against it.</summary>
+    public string RootCwd { get; set; } = "";
     public string? LatestPlan { get; private set; }
 
     public event Action<ToolDetail>? ToolDetailRequested;
     public event Action<string, int?>? FileRequested;
     public event Action<string>? PlanAwaiting;          // a live plan is waiting for the user's approval
     public event Action<string>? PlanOpened;            // the user asked to see a plan in the side panel
+    /// <summary>The user pressed Stop on a background task's card in the transcript (asked 2026-10-10).</summary>
+    public event Action<int>? TaskStopRequested;
     public event Action<int, string>? RewindRequested;
     public event Action<int, string>? ForkRequested;
     /// <summary>The user asked for the messages before the ones on screen (see <see cref="OpenedWhenOlderExist"/>).</summary>
@@ -129,8 +134,15 @@ public sealed class TranscriptView : UserControl
         try
         {
             var t = p.StartsWith("~/") ? Path.Combine(KvindoCode.Core.Paths.Home, p[2..]) : p;
-            var full = Path.IsPathRooted(t) ? t : Path.Combine(ProjectCwd, t);
-            return File.Exists(full) ? Path.GetFullPath(full) : null;
+            if (Path.IsPathRooted(t)) return File.Exists(t) ? Path.GetFullPath(t) : null;
+            // Relative: the session's work directory first, then the project folder (paths recorded before isolation).
+            foreach (var b in new[] { ProjectCwd, RootCwd })
+            {
+                if (string.IsNullOrEmpty(b)) continue;
+                var full = Path.GetFullPath(Path.Combine(b, t));
+                if (File.Exists(full)) return full;
+            }
+            return null;
         }
         catch { return null; }
     }
@@ -486,12 +498,32 @@ public sealed class TranscriptView : UserControl
 
     void AddTaskNotice(TaskNoticeEvent e)
     {
+        // The exit notice closes the card whose id it names, wherever that card is — NOT only when it happens to be the
+        // last child. Requiring it to be last meant a task that ended after any other card appeared kept offering Stop
+        // for a task that no longer existed (caught by TranscriptTaskStopTests).
         if (_lastTask is { } lt && !e.IsExit && e.TaskId != 0 && lt.TaskId == e.TaskId && ReferenceEquals(_stack.Children.LastOrDefault(), lt))
         { lt.Append(e.Text); return; }
+        if (e.IsExit && e.TaskId != 0 && _openTaskCards.TryGetValue(e.TaskId, out var ending))
+        {
+            ending.Append(e.Text);
+            ending.TaskEnded();
+            _openTaskCards.Remove(e.TaskId);
+            return;
+        }
         var card = new TaskNoticeCard(e.TaskId, e.Description, e.Text, e.IsExit);
+        // the card offers Stop while the task runs; the window decides what stopping means for this id
+        if (e.TaskId != 0 && !e.IsExit)
+        {
+            var id = e.TaskId;
+            card.StopRequested = () => TaskStopRequested?.Invoke(id);
+            _openTaskCards[id] = card;
+        }
         _lastTask = e.IsExit || e.TaskId == 0 ? null : card;
         Add(card);
     }
+
+    /// <summary>Cards of tasks that are still running, so an exit notice can close the right one.</summary>
+    readonly Dictionary<int, TaskNoticeCard> _openTaskCards = new();
 
     void OnPlanReview(PlanReviewEvent e)
     {

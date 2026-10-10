@@ -77,6 +77,28 @@ public static class Paths
     public static string UserSkillsDir => Path.Combine(ConfigDir, "skills");
     public static string PlansDir => Path.Combine(ConfigDir, "plans");
 
+    /// <summary>Per-session git worktrees (one per session, so parallel sessions do not share a checkout).</summary>
+    public static string WorktreesDir => Path.Combine(ConfigDir, "worktrees");
+    /// <summary>
+    /// Where a session's worktree lives. It is OUTSIDE the project so it never shows up in `git status` there, and it is
+    /// keyed by the FULL session id (a git branch name is unique per id, and no two sessions ever want one branch).
+    /// <see cref="EncodeProject"/> collapses every non-alphanumeric to '-', so "/a/b-c" and "/a/b/c" would map to the same
+    /// folder; a short hash of the full root is appended to keep different projects apart.
+    /// </summary>
+    public static string WorktreeDir(string root, string sessionId)
+    {
+        var full = Path.GetFullPath(root);
+        var key = EncodeProject(full) + "-" + ShortHash(full);
+        return Path.Combine(WorktreesDir, key, sessionId);
+    }
+
+    /// <summary>Stable 8-hex-digit digest of a path, for disambiguating encoded project keys.</summary>
+    public static string ShortHash(string s)
+    {
+        var bytes = System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(s));
+        return Convert.ToHexString(bytes)[..8].ToLowerInvariant();
+    }
+
     /// <summary>Encrypted secret vault (values only ever stored as AES-GCM ciphertext).</summary>
     public static string SecretsFile => Path.Combine(ConfigDir, "secrets.vault.json");
     /// <summary>32-byte master key for the vault, user-only readable. Never written into a session.</summary>

@@ -15,6 +15,43 @@ namespace KvindoCode.Core.Agent;
 /// </remarks>
 public static class VaultMaintenance
 {
+    /// <summary>
+    /// The one-time interactive Telegram USER login: Telegram messages a code to the phone and may ask for a 2FA
+    /// password. Only a human can answer those, which is why this is its own command rather than something the app does
+    /// on its own (asked 2026-10-10).
+    /// </summary>
+    public static async Task<int> TelegramLoginAsync()
+    {
+        var settings = AppSettings.Load();
+        var client = Telegram.TelegramUserClient.Open(settings, out var err);
+        if (client is null) { Console.Error.WriteLine(err); return 2; }
+        using (client)
+        {
+            if (client.IsSignedIn)
+            {
+                try { Console.Error.WriteLine("Already signed in: " + await client.WhoAmIAsync(CancellationToken.None)); return 0; }
+                catch (Exception e) { Console.Error.WriteLine("The stored session no longer works (" + Telegram.TelegramUserClient.DescribeError(e) + "); logging in again."); }
+            }
+            Console.Error.WriteLine("Telegram will send a login code to your phone (and ask for your 2FA password if you set one).");
+            try
+            {
+                var result = await client.LoginAsync(prompt =>
+                {
+                    Console.Error.WriteLine(prompt);
+                    return Console.ReadLine();
+                }, CancellationToken.None);
+                Console.Error.WriteLine("✓ " + result);
+                Console.Error.WriteLine($"The session is stored owner-only at {Paths.ConfigDir}/telegram-user.session — it is not a vault value.");
+                return 0;
+            }
+            catch (Exception e)
+            {
+                Console.Error.WriteLine("✗ Login failed: " + Telegram.TelegramUserClient.DescribeError(e));
+                return 1;
+            }
+        }
+    }
+
     public static int RotateVaultKey(bool force = false)
     {
         if (!force && AnotherInstanceIsRunning() is { } pid)

@@ -19,6 +19,10 @@ static class Program
         if (args.Contains("--rotate-vault-key"))
             return VaultMaintenance.RotateVaultKey(force: args.Contains("--force"));
 
+        // One-time interactive Telegram USER login: Telegram sends a code to a phone, so it cannot be automated.
+        if (args.Contains("--telegram-login"))
+            return VaultMaintenance.TelegramLoginAsync().GetAwaiter().GetResult();
+
         return BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
     }
 

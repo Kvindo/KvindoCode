@@ -45,19 +45,58 @@ public static class Notifier
     /// <summary>True when a sound can actually be played right now.</summary>
     public static bool Available(AppSettings s) => Resolve(s).Exe.Length > 0;
 
+    /// <summary>
+    /// Where a beep happened, why, and how long it took. Set once at startup so the trace lands in the same file as
+    /// everything else; used to explain "I get beeps for no reason" without guessing (reported 2026-10-10).
+    /// </summary>
+    public static Action<string>? Trace { get; set; }
+
+    /// <summary>
+    /// Ask for the alert sound without blocking the caller. One sound per <see cref="CoalesceSeconds"/> for the whole
+    /// app, however many sessions ask.
+    /// </summary>
+    /// <remarks>
+    /// The per-session throttle in <c>AgentSession.Notify</c> is not enough: several sessions finishing together each
+    /// fired their own sound, and the user's own beep is a script that runs <c>awk</c> to build a WAV and then
+    /// <c>paplay</c>, so a burst meant several of those at once on the UI thread — reported as constant beeps plus
+    /// lag (2026-10-10). A single app-wide window fixes the burst and keeps the cost off the caller.
+    /// </remarks>
+    public static void RequestPlay(AppSettings s)
+    {
+        var now = DateTime.UtcNow;
+        if (_lastPlay is { } at && (now - at).TotalSeconds < CoalesceSeconds)
+        {
+            Trace?.Invoke($"beep coalesced (another sound {((now - at).TotalSeconds):0.#}s ago, window {CoalesceSeconds}s)");
+            return;
+        }
+        _lastPlay = now;
+        _ = Task.Run(() => TryPlay(s));
+    }
+
+    /// <summary>Seconds during which any further alert is dropped, app-wide.</summary>
+    public static int CoalesceSeconds { get; set; } = 3;
+    static DateTime? _lastPlay;
+    /// <summary>For tests: forget the coalescing window.</summary>
+    public static void ResetCoalesceForTest() => _lastPlay = null;
+
     /// <summary>Play the alert. False when nothing could be started (the caller may say so once).</summary>
     public static bool TryPlay(AppSettings s)
     {
         try
         {
-            var (exe, args, _) = Resolve(s);
-            if (exe.Length == 0) return false;
+            var (exe, args, why) = Resolve(s);
+            if (exe.Length == 0) { Trace?.Invoke($"beep SKIPPED — {why}"); return false; }
             var psi = new ProcessStartInfo(exe) { UseShellExecute = false, RedirectStandardError = true };
             foreach (var a in ArgSplit(args)) psi.ArgumentList.Add(a);
+            // The elapsed time is measured because "the app lags when it beeps" was reported: the user's beep script
+            // synthesises a WAV with awk and then plays it, so if spawning is what stutters the UI, this number shows it.
+            var sw = System.Diagnostics.Stopwatch.StartNew();
             using var p = Process.Start(psi);
+            sw.Stop();
+            Trace?.Invoke($"beep spawn={sw.ElapsedMilliseconds}ms via {why}");
             return p is not null;
         }
-        catch { return false; }
+        catch (Exception e) { Trace?.Invoke("beep FAILED — " + e.Message); return false; }
     }
 
     /// <summary>Desktop-notification programs, in order of preference.</summary>

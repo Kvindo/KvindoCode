@@ -394,6 +394,11 @@ public sealed class TaskNoticeCard : Border
     public int TaskId { get; }
     readonly SelectableTextBlock _text = new() { Classes = { "mono" }, TextWrapping = TextWrapping.Wrap };
     readonly List<string> _lines = new();
+    readonly Button _stop = new() { Name = "TaskCardStop", Content = "Stop", Classes = { "ghost" }, FontSize = 11.5, Padding = new Thickness(8, 1), VerticalAlignment = VerticalAlignment.Center };
+    readonly TextBlock _state = new() { FontSize = 11.5, Classes = { "muted" }, VerticalAlignment = VerticalAlignment.Center };
+
+    /// <summary>Set by the transcript while the task is running: cancels it, from the card itself.</summary>
+    public Action? StopRequested;
 
     public TaskNoticeCard(int id, string description, string text, bool isExit)
     {
@@ -403,9 +408,23 @@ public sealed class TaskNoticeCard : Border
         var head = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
         head.Children.Add(Ui.Icon("IconClock", isExit ? "KvMuted" : "KvAccent", 14));
         head.Children.Add(new SelectableTextBlock { Text = id > 0 ? $"Background #{id} · {description}" : "Background tasks", FontSize = 12.5, FontWeight = FontWeight.Medium, Classes = { "muted" }, VerticalAlignment = VerticalAlignment.Center });
+        // A RUNNING task can be stopped from the transcript, not only from the Tasks panel (asked 2026-10-10). The
+        // button is hidden as soon as the task has ended: there is nothing left to cancel.
+        ToolTip.SetTip(_stop, "Stop this background task");
+        _stop.Click += (_, _) => { StopRequested?.Invoke(); _stop.IsVisible = false; _state.Text = "stopping…"; };
+        _stop.IsVisible = id > 0 && !isExit;
+        head.Children.Add(_stop);
+        head.Children.Add(_state);
         Child = new StackPanel { Spacing = 4, Children = { head, _text } };
-        if (isExit) text = "— " + text;
+        if (isExit) { text = "— " + text; _stop.IsVisible = false; }
         Append(text);
+    }
+
+    /// <summary>The card stops offering Stop once its task has ended, whatever ended it.</summary>
+    public void TaskEnded()
+    {
+        _stop.IsVisible = false;
+        _state.Text = "";
     }
 
     public void Append(string text)

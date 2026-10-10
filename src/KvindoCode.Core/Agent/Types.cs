@@ -81,3 +81,6 @@ public sealed record PlanReviewEvent(int Round, int Total, string Text, bool Run
 public sealed record NoticeEvent(string Text, bool IsError) : AgentEvent;
 public sealed record CompactedEvent(string Summary) : AgentEvent;
 public sealed record TitleChangedEvent(string Title) : AgentEvent;
+/// <summary>The session's work directory is now known (its own git worktree, or the shared project tree). The UI uses it
+/// to point path resolution and the Files pane at where the session actually edits.</summary>
+public sealed record WorkspaceReadyEvent(SessionWorkspace Workspace) : AgentEvent;

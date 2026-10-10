@@ -75,24 +75,31 @@ public sealed class AgentSession : IDisposable
 
     public void Notify(string message)
     {
-        if (!_settings.NotificationSounds) return;              // silenced in Settings
-        if (IsChild) return;                                   // a subagent finishing is not the human's business
-        if (IsForeground) return;                              // the window is showing this session: the result is already in front of the human
+        // Every decision is traced, because "I get beeps with no reason" cannot be answered from the code alone
+        // (reported 2026-10-10): the log names WHICH session asked, WHY it fired or was throttled, and how long the
+        // sound took to start. The trace is a no-op unless the UI installed one.
+        void Trace(string what) => Notifier.Trace?.Invoke($"[{Info.Title}] {what}");
+        if (!_settings.NotificationSounds) { Trace("quiet: alerts are off in Settings"); return; }
+        if (IsChild) { Trace("quiet: this is a subagent"); return; }
+        if (IsForeground) { Trace("quiet: the session is on screen"); return; }
         // A sound no longer REQUIRES a hook: the app can beep natively (asked 2026-10-09). Hooks still run when
         // enabled, and either path alone is enough.
         bool hooks = Hooks.Any("Notification");
         bool nativeSound = _settings.NativeBeep && Notifier.Available(_settings);
         bool nativePopup = _settings.NotificationDesktop && Notifier.NotifyAvailable(_settings);
-        if (!hooks && !nativeSound && !nativePopup) return;
+        if (!hooks && !nativeSound && !nativePopup) { Trace("quiet: no hook, no beep command, no notifier installed"); return; }
         lock (_lock)
         {
             // the same message at most once per 15 s per session (a looping question must not become a siren)
-            if (_lastNotified.TryGetValue(message, out var last) && (DateTime.UtcNow - last).TotalSeconds < 15) return;
+            if (_lastNotified.TryGetValue(message, out var last) && (DateTime.UtcNow - last).TotalSeconds < 15)
+            { Trace($"throttled: same message {(DateTime.UtcNow - last).TotalSeconds:0.#}s ago (min 15s)"); return; }
             // ... and whatever the messages are, at most one sound per this many seconds: "nonstop" must be impossible
-            if (_lastNotifiedAt is { } at && (DateTime.UtcNow - at).TotalSeconds < 8) return;
+            if (_lastNotifiedAt is { } at && (DateTime.UtcNow - at).TotalSeconds < 8)
+            { Trace($"throttled: another alert {(DateTime.UtcNow - at).TotalSeconds:0.#}s ago (min 8s)"); return; }
             _lastNotified[message] = DateTime.UtcNow;
             _lastNotifiedAt = DateTime.UtcNow;
         }
+        Trace($"FIRING ({message}) hooks={hooks} nativeSound={nativeSound} nativePopup={nativePopup}");
         // Name the session in the payload so a system notification can say WHICH session needs you — the hook used
         // to get only a message, so a plain beep told you nothing (asked for 2026-10-05).
         var payload = HookPayload(new JsonObject
@@ -109,7 +116,11 @@ public sealed class AgentSession : IDisposable
         // title is the app name; the body names the session, as the user's own hook did.
         var title = "KvindoCode";
         var body = $"{Info.Title} — {message}";
-        if (nativeSound) Notifier.TryPlay(_settings);
+        // Spawn the sound OFF the calling thread and coalesce it app-wide. Per-session throttling above does not stop
+        // several sessions finishing at once from each spawning their own player, and the user's own beep is a script
+        // that synthesises a WAV before playing it (reported 2026-10-10: constant beeps, and the app lags). One alert
+        // per short window, whatever the number of sessions, and the UI thread is never the one waiting on a process.
+        if (nativeSound) Notifier.RequestPlay(_settings);
         if (nativePopup) _ = Task.Run(() => Notifier.TryNotify(_settings, title, body));
     }
     PlanReviewGate? _gate;
@@ -585,6 +596,13 @@ public sealed class AgentSession : IDisposable
         });
     }
     public string Cwd => _ctx.Cwd;
+    /// <summary>True when this session edits its own git worktree rather than the shared project tree.</summary>
+    public bool IsIsolated => _ctx.Isolated;
+    /// <summary>Where this session's tools write (its worktree, or the project root when not isolated).</summary>
+    public string WorkDir => _ctx.Cwd;
+    /// <summary>Set by a subagent's parent so the child shares the parent's worktree instead of making its own.</summary>
+    readonly string? _workDirOverride;
+    bool _workspaceReady;
     /// <summary>Generate an AI title after the first completed turn (UI sets this; tests leave it off).</summary>
     public bool AutoTitle { get; set; }
     public event Action<AgentEvent>? Event;
@@ -598,11 +616,12 @@ public sealed class AgentSession : IDisposable
     bool _servicingQueuedTurn;
 
     public AgentSession(AppSettings settings, ILlmClient llm, string projectCwd, IUserInteraction interaction,
-                        SessionInfo? info = null, ISessionStorage? storage = null)
+                        SessionInfo? info = null, ISessionStorage? storage = null, string? workDirOverride = null)
     {
         _settings = settings;
         _llm = llm;
         projectCwd = Path.GetFullPath(projectCwd);
+        _workDirOverride = workDirOverride;
         Storage = storage ?? SessionStorage.Default;
         Info = info ?? Storage.Create(projectCwd, ResolveConfiguredDefaultModel(settings));
         Project = ProjectContext.Load(projectCwd, settings);
@@ -630,6 +649,53 @@ public sealed class AgentSession : IDisposable
         // release the browser tabs this session owned, so another session may use them (the pages stay open)
         if (_browser is not null && Info.Id.Length > 0) _browser.Owners.Release(Info.Id);
     }
+
+    /// <summary>
+    /// Decide where this session works, once, before its first tool call: its own git worktree (created and seeded from
+    /// the user's current working tree), or the shared project tree when isolation does not apply. Runs on the turn's
+    /// thread — never the constructor, which runs on the UI thread when a session is opened. A subagent passes its
+    /// parent's worktree so it shares one tree with the parent instead of forking another.
+    /// </summary>
+    async Task EnsureWorkspaceAsync(CancellationToken ct)
+    {
+        if (_workspaceReady) return;
+        _workspaceReady = true;
+        try
+        {
+            SessionWorkspace ws;
+            if (_workDirOverride is { Length: > 0 } wd && Directory.Exists(wd))
+                ws = new SessionWorkspace(Project.Cwd, wd, null, true);   // share the parent session's worktree
+            else if (!_settings.IsolateSessions)
+                ws = SessionWorkspace.Shared(Project.Cwd);
+            else
+                ws = await Task.Run(() => Workspaces.Ensure(Project.Cwd, Info.Id, _settings), ct);
+
+            _ctx.WorkDir = ws.WorkDir;
+            _ctx.Isolated = ws.Isolated;
+            _ctx.Cwd = ws.WorkDir;
+            Emit(new WorkspaceReadyEvent(ws));
+        }
+        catch (Exception e)
+        {
+            // never let workspace setup break the turn: fall back to the shared tree and say so
+            _ctx.Cwd = Project.Cwd; _ctx.WorkDir = Project.Cwd; _ctx.Isolated = false;
+            Emit(new NoticeEvent("Could not set up an isolated work tree (" + e.Message + "); working in the project folder.", true));
+        }
+    }
+
+    /// <summary>Drop this session's worktree when it is deleted. Kept (with a reason) if it holds uncommitted or unmerged work.</summary>
+    public bool ForgetWorkspace(out string reason)
+    {
+        reason = "";
+        if (!IsIsolated) return true;
+        return Workspaces.Forget(Project.Cwd, Info.Id, out reason);
+    }
+
+    /// <summary>The command that merges this session's work into the project. Empty when the session is not isolated.</summary>
+    public string MergeCommand() => IsIsolated ? Workspaces.MergeCommand(new SessionWorkspace(Project.Cwd, _ctx.Cwd, Workspaces.BranchFor(Info.Id), true)) : "";
+
+    /// <summary>Release this session's workspace resources (nothing persistent to free; the worktree stays for the user to merge).</summary>
+    public void ReleaseWorkspace() => _workspaceReady = false;
 
     /// <summary>Start a native recurring prompt: each tick becomes a real user turn in this session.</summary>
     public int SchedulePrompt(TimeSpan interval, string prompt)
@@ -1281,6 +1347,9 @@ public sealed class AgentSession : IDisposable
         LastTurnError = null;                     // a fresh turn starts clean; failures set it in the handler below
         LastProgressTime = DateTime.UtcNow;       // a resumed/old session starts a fresh stall clock
         _activeTaskInterrupted = false;
+        // Where this session works (its own git worktree, or the shared project tree) must be decided before any tool,
+        // hook or subagent can look at the cwd. It can shell out to git, so it runs on this (already background) thread.
+        await EnsureWorkspaceAsync(ct);
         // Both masking counters are PER TURN: the notice says "in this turn", so it has to be able to fire again next
         // turn. `_maskNoticed` was never reset, so after the first masked value of a session every later turn that
         // masked something did so silently — the one signal that the transcript differs from what a tool returned.

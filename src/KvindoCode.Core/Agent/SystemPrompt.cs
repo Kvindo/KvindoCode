@@ -73,10 +73,34 @@ A value must never be written into a message or a tool result. `Secrets get` wri
         sb.AppendLine($"- Platform: {(OperatingSystem.IsLinux() ? "linux" : OperatingSystem.IsMacOS() ? "darwin" : "windows")} ({Environment.OSVersion.VersionString})");
         sb.AppendLine("- Shell: bash");
         sb.AppendLine($"- Today's date: {DateTime.Now:yyyy-MM-dd}");
-        var git = GitInfo(project.Cwd);
+        var git = GitInfo(cwd);
         sb.AppendLine(git is null ? "- Git repository: no" : $"- Git repository: yes (branch: {git})");
+        // A session isolated in a git worktree edits its OWN checkout, not the project folder. Say so clearly, or the
+        // model reasons about the wrong tree (and its .git is only a pointer file, which must not be "cleaned up").
+        if (!cwd.Equals(project.Cwd))
+            sb.AppendLine("- This session works in its own git worktree (the working directory above), NOT in the project root. " +
+                          "Edits here do not change the project folder or your IDE. Nothing is committed or merged for you; the user merges this " +
+                          $"session's branch (`git -C \"{project.Cwd}\" merge {BranchName(cwd)}`) to bring the work into the project. " +
+                          "The worktree's .git file points at the main repository — never delete it or the worktree directory to \"tidy up\".");
 
         return sb.ToString();
+    }
+
+    /// <summary>The branch a worktree is on, or "" when it cannot be read.</summary>
+    static string BranchName(string cwd)
+    {
+        try
+        {
+            var psi = new ProcessStartInfo("git") { RedirectStandardOutput = true, RedirectStandardError = true, WorkingDirectory = cwd };
+            psi.ArgumentList.Add("rev-parse");
+            psi.ArgumentList.Add("--abbrev-ref");
+            psi.ArgumentList.Add("HEAD");
+            using var p = Process.Start(psi);
+            var s = p?.StandardOutput.ReadToEnd().Trim() ?? "";
+            p?.WaitForExit(3000);
+            return s;
+        }
+        catch { return ""; }
     }
 
     static void AppendMemory(StringBuilder sb, ProjectContext project)

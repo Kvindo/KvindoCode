@@ -29,6 +29,11 @@ public sealed class BashTool : Tool
     {
         var command = Str(input, "command");
         if (string.IsNullOrWhiteSpace(command)) return Task.FromResult(ToolResult.Err("command is empty"));
+        // Best-effort: an isolated session must not `cd` out of its worktree into the shared tree (or a peer's). The
+        // durable guard is the cwd-persistence clamp below; this stops the common explicit form before it runs.
+        if (ctx.Isolated && ctx.WorkDir.Length > 0 && CdsOutside(command, ctx.WorkDir, out var target))
+            return Task.FromResult(ToolResult.Err(
+                $"Refused: `cd {target}` leaves this session's work tree ({ctx.WorkDir}). Work inside it."));
         // The model only ever sees vault values as markers. Expand them here, immediately before the shell runs the text; the
         // transcript keeps the marker, and anything the command prints is masked again by the tool-output audit.
         if (KvindoCode.Core.Secrets.SecretPlaceholders.Contains(command))
@@ -116,7 +121,10 @@ public sealed class BashTool : Tool
             {
                 var nd = File.ReadAllText(cwdFile).Trim();
                 File.Delete(cwdFile);
-                if (nd.Length > 0 && Directory.Exists(nd)) ctx.Cwd = nd;
+                // An isolated session must not be able to leave its worktree: `cd ..`/`cd /` in one command would
+                // otherwise permanently re-point every later tool call at the shared tree (or a peer session's tree).
+                if (nd.Length > 0 && Directory.Exists(nd) && (!ctx.Isolated || Paths.IsUnder(nd, ctx.WorkDir)))
+                    ctx.Cwd = nd;
             }
         }
         catch { }
@@ -130,6 +138,25 @@ public sealed class BashTool : Tool
         int code = proc.HasExited ? proc.ExitCode : -1;
         if (code != 0) return new ToolResult((output.Length > 0 ? output + "\n" : "") + $"Exit code: {code}", true);
         return ToolResult.Ok(output.Length == 0 ? "(command completed with no output)" : output);
+    }
+
+    /// <summary>
+    /// Best-effort detection of `cd <absolute path>` that would leave the session's worktree. Only literal absolute
+    /// targets are caught (relative moves stay inside anyway, and the persisted-cwd clamp is the durable guard).
+    /// </summary>
+    static bool CdsOutside(string command, string workDir, out string target)
+    {
+        target = "";
+        foreach (Match m in Regex.Matches(command, "(?:^|[\\s;&|(])cd\\s+(?:--\\s+)?(\"[^\"]+\"|'[^']+'|\\S+)"))
+        {
+            var t = m.Groups[1].Value.Trim('"', '\'');
+            if (t.Length == 0 || t.StartsWith("-")) continue;
+            var expanded = Paths.Expand(t);
+            if (!Path.IsPathRooted(expanded)) continue;                    // relative: stays inside the worktree
+            var full = Path.GetFullPath(expanded);
+            if (!Paths.IsUnder(full, workDir)) { target = t; return true; }
+        }
+        return false;
     }
 }
 
