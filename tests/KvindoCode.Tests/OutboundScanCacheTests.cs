@@ -104,6 +104,174 @@ public sealed class OutboundScanCacheTests
         Assert.NotNull(typeof(GitleaksRules).GetMethod(nameof(GitleaksRules.Detect), new[] { typeof(string), typeof(bool).MakeByRefType() }));
     }
 
+    // ------------------------------------------------------------------ the cap: this is where the first version failed
+
+    /// <summary>
+    /// The reported regression, end to end: SEVERAL concurrent sessions, each with a real-sized history, using the
+    /// DEFAULT bounds. The first version's cap was 4000 ENTRIES and it cleared the whole dictionary on overflow; the
+    /// cache is process-wide, so 8 sessions of 552 strings (4416 entries) collapsed it to zero hits for ever, while 6
+    /// sessions (3318) worked — the cliff landed exactly inside the headline "many sessions are slow" case.
+    /// </summary>
+    /// <remarks>
+    /// A declared limitation, stated here because it is a real property and not an oversight: if the COMBINED working
+    /// set genuinely exceeds the bounds, no bounded cache can hold it, and a sequential replay wider than the cache
+    /// will miss. This test therefore asserts the two things that are true and useful — the default budget is large
+    /// enough for this many real sessions (nothing is evicted), and re-sending the same history hits every time.
+    /// </remarks>
+    [Fact]
+    public async Task Several_concurrent_sessions_fit_within_the_default_budget_and_hit()
+    {
+        using var sb = new Sandbox();
+        var vault = new SecretVault(Path.Combine(sb.Home, "v.json"), Path.Combine(sb.Home, "k.json"));
+        vault.Unlock();
+        SecretVault.Default = vault;
+        OutboundScanCache.Bump();
+        OutboundScanCache.ResetCounters();
+
+        const int sessions = 8, history = 552;             // 4416 distinct strings: the exact shape that collapsed the 4000-entry cap
+        var requests = Enumerable.Range(0, sessions).Select(s => new LlmRequest
+        {
+            SessionId = "s" + s, Model = "m", System = "sys",
+            Messages = Enumerable.Range(0, history)
+                .Select(i => new ChatMessage { Role = i % 2 == 0 ? "user" : "assistant", Content = $"session {s} history line {i}: an ordinary message with no secret in it" })
+                .ToList(),
+        }).ToList();
+
+        async Task OneRound()
+        {
+            foreach (var r in requests)
+            {
+                var inner = new ScriptedLlmClient(new JsonArray { new JsonObject { ["text"] = "ok", ["delay"] = 0, ["chunkDelay"] = 0 } });
+                await new AuditingLlmClient(inner, new SecretAuditor(enabled: false), vault).StreamAsync(r, null, default);
+            }
+        }
+
+        await OneRound();
+        Assert.True(OutboundScanCache.Scans > 4_000, $"only {OutboundScanCache.Scans} distinct strings were scanned: this no longer crosses the old 4000-entry cap, so it proves nothing");
+        Assert.Equal(0, OutboundScanCache.Evictions);      // the default budget must hold this many real sessions
+        OutboundScanCache.ResetCounters();
+
+        await OneRound();
+        // round 2 is the SAME bytes: every string must come from the cache. Under the old 4000-entry cap with a
+        // wholesale clear this was 4416 scans and 0 hits, every round, for ever.
+        Assert.Equal(0, OutboundScanCache.Scans);
+        Assert.True(OutboundScanCache.Hits >= sessions * history);
+    }
+
+    /// <summary>
+    /// Eviction is LRU, not "throw it all away": when the cache IS forced over its cap, the retained tail still
+    /// serves hits (with a wholesale clear the tail's oldest entries are gone and re-scanning them misses).
+    /// </summary>
+    [Fact]
+    public void When_the_cap_is_crossed_eviction_is_least_recently_used()
+    {
+        var savedMax = OutboundScanCache.MaxEntries;
+        try
+        {
+            OutboundScanCache.Bump();
+            OutboundScanCache.ResetCounters();
+            OutboundScanCache.MaxEntries = 200;
+            var all = Enumerable.Range(0, 400).Select(i => $"line {i} of a history wider than the cap").ToList();
+
+            foreach (var s in all) OutboundScanCache.Spans(s, out _);
+            Assert.True(OutboundScanCache.Evictions > 0, "the cap was never reached, so this test proves nothing");
+            Assert.True(OutboundScanCache.Count <= OutboundScanCache.MaxEntries, $"count {OutboundScanCache.Count} exceeded the cap");
+
+            Assert.False(OutboundScanCache.Knows(all[0]), "the oldest entry should have been evicted");
+            Assert.True(OutboundScanCache.Knows(all[^1]), "the newest entry must survive");
+
+            // the retained tail is the newest 200: re-sending exactly those must be ALL hits
+            OutboundScanCache.ResetCounters();
+            foreach (var s in all.TakeLast(200)) OutboundScanCache.Spans(s, out _);
+            Assert.Equal(0, OutboundScanCache.Scans);
+            Assert.Equal(200, OutboundScanCache.Hits);
+        }
+        finally { OutboundScanCache.MaxEntries = savedMax; OutboundScanCache.Bump(); }
+    }
+
+    /// <summary>
+    /// A re-sent history is the steady state (the same messages on every call), so a HIT must refresh an entry's
+    /// recency. Without the move-to-front, the freshest scans would evict the very strings that are asked for most.
+    /// </summary>
+    [Fact]
+    public void A_hit_keeps_an_entry_alive_under_pressure()
+    {
+        var savedMax = OutboundScanCache.MaxEntries;
+        try
+        {
+            OutboundScanCache.Bump();
+            OutboundScanCache.MaxEntries = 50;
+
+            var hot = "the string that every single request re-sends, so it deserves to stay";
+            OutboundScanCache.Spans(hot, out _);
+            for (var round = 0; round < 30; round++)
+            {
+                OutboundScanCache.Spans(hot, out var hit);                  // touched every round
+                Assert.True(hit, $"the hot string was evicted on round {round}");
+                for (var i = 0; i < 10; i++) OutboundScanCache.Spans($"cold-{round}-{i} unique string", out _);
+            }
+            Assert.True(OutboundScanCache.Knows(hot));
+        }
+        finally { OutboundScanCache.MaxEntries = savedMax; OutboundScanCache.Bump(); }
+    }
+
+    /// <summary>
+    /// The byte budget is a separate bound from the entry count, because one real message was 1.2 MB while the median
+    /// is ~1.5 KB — 4000 huge entries and 4000 tiny ones are wildly different footprints.
+    /// </summary>
+    [Fact]
+    public void A_single_string_larger_than_the_budget_is_not_cached_at_all()
+    {
+        var savedBytes = OutboundScanCache.MaxBytes;
+        try
+        {
+            OutboundScanCache.Bump();
+            OutboundScanCache.Spans(Plain, out _);
+            Assert.Equal(1, OutboundScanCache.Count);
+
+            OutboundScanCache.MaxBytes = 64;                 // smaller than one of the strings below
+            var big = new string('q', 5000);
+            OutboundScanCache.Spans(big, out _);
+
+            // it is neither stored nor allowed to evict the working set on its way in
+            Assert.False(OutboundScanCache.Knows(big));
+            Assert.True(OutboundScanCache.Knows(Plain), "an oversized string evicted the cache");
+        }
+        finally { OutboundScanCache.MaxBytes = savedBytes; OutboundScanCache.Bump(); }
+    }
+
+    /// <summary>
+    /// The integration-level assertion: N requests over an UNCHANGED history scan each distinct string once. This is
+    /// the shape that catches the thrash, because it fails the moment the cap drops a string that is still being sent.
+    /// </summary>
+    [Fact]
+    public async Task N_requests_over_an_unchanged_history_scan_each_string_once()
+    {
+        using var sb = new Sandbox();
+        var vault = new SecretVault(Path.Combine(sb.Home, "v.json"), Path.Combine(sb.Home, "k.json"));
+        vault.Unlock();
+        SecretVault.Default = vault;
+        OutboundScanCache.Bump();
+        OutboundScanCache.ResetCounters();
+
+        var msgs = Enumerable.Range(0, 40)
+            .Select(i => new ChatMessage { Role = i % 2 == 0 ? "user" : "assistant", Content = $"history message {i}: an ordinary line with no secret in it" })
+            .ToList();
+        // the system prompt plus every message content is what the scan walks; nothing here is a secret
+        var distinct = msgs.Select(m => m.Content!).Concat(new[] { "sys" }).Distinct().Count();
+
+        for (var request = 0; request < 5; request++)
+        {
+            var inner = new ScriptedLlmClient(new JsonArray { new JsonObject { ["text"] = "ok", ["delay"] = 0, ["chunkDelay"] = 0 } });
+            await new AuditingLlmClient(inner, new SecretAuditor(enabled: false), vault)
+                .StreamAsync(new LlmRequest { SessionId = "s", Model = "m", System = "sys", Messages = msgs }, null, default);
+        }
+
+        Assert.Equal(distinct, OutboundScanCache.Scans);
+        Assert.True(OutboundScanCache.Hits > 0);
+        Assert.Equal(0, OutboundScanCache.Evictions);      // nothing set the bounds, so nothing may be dropped
+    }
+
     /// <summary>A vault write rewrites already-sent text into a marker, so every memo entry must go.</summary>
     [Fact]
     public void Storing_a_value_drops_the_memo()
