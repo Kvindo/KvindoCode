@@ -197,6 +197,183 @@ public sealed class SecretVault
             if (s.Redact && TryDecrypt(s, out var v)) _values[s.Id] = v;
     }
 
+    // ------------------------------------------------------------------ key rotation
+
+    /// <summary>What <see cref="RotateKey"/> did. Counts only — no value ever leaves the vault.</summary>
+    public sealed record KeyRotation(int Secrets, int NonSecrets, int Leaks, int UnreadableBlobs, string BackupDir);
+
+    /// <summary>
+    /// Re-encrypt every stored value under a brand-new 32-byte master key, and replace both the vault file and the key
+    /// file. The old key is useless afterwards, which is the point: the previous key must be assumed compromised.
+    /// </summary>
+    /// <remarks>
+    /// SAFETY — the reason this is a method and not a script:
+    /// <list type="number">
+    /// <item>Every <see cref="SecretRecord"/> is decrypted FIRST. If any one of them fails, nothing is written and the
+    /// vault is left exactly as it was — a half-rotated vault would be unrecoverable. A secret can never be skipped.</item>
+    /// <item><see cref="NonSecretRecord"/> and <see cref="LeakRecord"/> blobs that do not decrypt (ciphertext from a
+    /// previous, lost key) are emptied rather than re-encrypted: they carry no recoverable value, and re-writing them
+    /// under the new key would pretend a value exists. Their metadata (the SHA-256, the register rows) is untouched.</item>
+    /// <item>Both files are backed up to a timestamped directory that later saves never overwrite, so the old key and
+    /// the old vault stay available as a fallback.</item>
+    /// <item>The result is VERIFIED by re-reading the written files with only the new key: every value must decrypt
+    /// again and reproduce the SHA-256 the vault already stores. Any mismatch restores the backup and throws.</item>
+    /// </list>
+    /// The app must not be running: it holds the old key in memory and would re-save old-key ciphertext over the new
+    /// file. Callers are responsible for that (the CLI checks).
+    /// </remarks>
+    public KeyRotation RotateKey(string? backupRoot = null)
+    {
+        lock (_lock)
+        {
+            var oldKey = _key ?? throw new InvalidOperationException("The vault must be unlocked before its key can be rotated.");
+            if (_data.Secrets.Count == 0 && _data.NonSecrets.Count == 0 && _data.Leaks.Count == 0)
+                throw new InvalidOperationException("The vault is empty; there is nothing to re-encrypt.");
+
+            // 1. Read everything out under the OLD key. A secret that will not decrypt aborts the whole operation.
+            var secretPlain = new Dictionary<string, string>();
+            foreach (var s in _data.Secrets)
+            {
+                if (s.Blob.Length == 0) continue;
+                if (!TryDecrypt(s, out var v))
+                    throw new InvalidOperationException(
+                        $"'{s.Name}' could not be decrypted with the current key, so the vault was left untouched. " +
+                        "A rotation would make that entry permanently unreadable.");
+                secretPlain[s.Id] = v;
+            }
+            var nonSecretPlain = new Dictionary<string, string?>();
+            foreach (var n in _data.NonSecrets)
+                if (n.Blob.Length > 0) nonSecretPlain[n.Id] = TryDecryptHolder(NonSecretKey(n), n.Blob);
+            var leakPlain = new Dictionary<string, string?>();
+            foreach (var l in _data.Leaks)
+                if (l.Blob.Length > 0) leakPlain[l.Id] = TryDecryptHolder(LeakKey(l), l.Blob);
+
+            int unreadable = nonSecretPlain.Values.Count(v => v is null) + leakPlain.Values.Count(v => v is null);
+
+            // 2. Back up BOTH files before touching either. The directory is timestamped and never pruned by a save.
+            var dir = backupRoot ?? Path.Combine(Paths.ConfigDir, "key-rotation-" + DateTime.Now.ToString("yyyyMMdd-HHmmss"));
+            Directory.CreateDirectory(dir);
+            File.Copy(FilePath, Path.Combine(dir, Path.GetFileName(FilePath)), true);
+            if (File.Exists(KeyPath)) File.Copy(KeyPath, Path.Combine(dir, Path.GetFileName(KeyPath)), true);
+            // a marker so the reason for the directory is obvious later
+            File.WriteAllText(Path.Combine(dir, "WHY.txt"),
+                $"Backup taken by RotateKey at {DateTimeOffset.Now:u}.{Environment.NewLine}" +
+                $"The key in this directory is the PREVIOUS key; it decrypts the vault copy beside it, not the live vault.{Environment.NewLine}" +
+                "Keep it until you have confirmed every secret is readable. It is the only way back." + Environment.NewLine);
+            OwnerOnly(Path.Combine(dir, Path.GetFileName(FilePath)));
+            var dirKey = Path.Combine(dir, Path.GetFileName(KeyPath));
+            if (File.Exists(dirKey)) OwnerOnly(dirKey);
+
+            // 3. Re-encrypt under the new key. Swap _key only for the length of this block.
+            var newKey = RandomNumberGenerator.GetBytes(32);
+            try
+            {
+                _key = newKey;
+                foreach (var s in _data.Secrets)
+                    if (secretPlain.TryGetValue(s.Id, out var v)) s.Blob = Encrypt(s, v);
+                foreach (var n in _data.NonSecrets)
+                    if (nonSecretPlain.TryGetValue(n.Id, out var v))
+                        n.Blob = v is null ? "" : Encrypt(NonSecretKey(n), v);
+                foreach (var l in _data.Leaks)
+                    if (leakPlain.TryGetValue(l.Id, out var v))
+                        l.Blob = v is null ? "" : Encrypt(LeakKey(l), v);
+
+                // 4. Write the vault, then the key. A crash between them is why step 2 exists.
+                WriteVaultFile();
+                WriteKeyFile(newKey);
+            }
+            catch
+            {
+                RestoreFrom(dir);
+                throw;
+            }
+
+            // 5. Prove it: re-read from disk using ONLY the new key.
+            try
+            {
+                VerifyRotation(secretPlain);
+            }
+            catch
+            {
+                // the new key never took effect, so it is safe (and right) to wipe it before restoring
+                CryptographicOperations.ZeroMemory(newKey);
+                RestoreFrom(dir);
+                throw;
+            }
+            // Retire the OLD key only. The new one is `_key` now — zeroing it here would leave the vault unlocked
+            // but unusable, with every value silently unreadable until the process restarted (caught by a test).
+            CryptographicOperations.ZeroMemory(oldKey);
+
+            DecryptAll();
+            RaiseChanged();
+            return new KeyRotation(secretPlain.Count, nonSecretPlain.Count - nonSecretPlain.Values.Count(v => v is null),
+                                   leakPlain.Count - leakPlain.Values.Count(v => v is null), unreadable, dir);
+        }
+    }
+
+    string? TryDecryptHolder(SecretRecord holder, string blob)
+    {
+        holder.Blob = blob;
+        return TryDecrypt(holder, out var v) ? v : null;
+    }
+
+    /// <summary>Serialize the vault exactly as <see cref="SaveFile"/> does (tmp + owner-only + rename).</summary>
+    void WriteVaultFile()
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(FilePath)!);
+        var tmp = FilePath + ".tmp";
+        File.WriteAllText(tmp, JsonSerializer.Serialize(_data, VaultJson.Opts));
+        OwnerOnly(tmp);
+        File.Move(tmp, FilePath, true);
+    }
+
+    void WriteKeyFile(byte[] key)
+    {
+        var tmp = KeyPath + ".tmp";
+        File.WriteAllBytes(tmp, key);
+        OwnerOnly(tmp);
+        File.Move(tmp, KeyPath, true);
+    }
+
+    /// <summary>Re-open the written files with the new key alone and check every secret decrypts to the same SHA-256.</summary>
+    void VerifyRotation(IReadOnlyDictionary<string, string> expected)
+    {
+        var check = new SecretVault(FilePath, KeyPath);
+        if (!check.Unlock(out var err))
+            throw new InvalidOperationException("Verification failed: the new key does not open the vault. " + err);
+        int seen = 0;
+        foreach (var r in check.List())
+        {
+            if (!expected.ContainsKey(r.Id)) continue;
+            // by ID, not name: names are not guaranteed unique, and a wrong row here would verify the wrong value
+            var v = check.Reveal(r.Id, out var revErr);
+            if (v is null) throw new InvalidOperationException($"Verification failed for '{r.Name}': {revErr}");
+            if (Sha256Hex(v) != r.Sha256)
+                throw new InvalidOperationException($"Verification failed for '{r.Name}': the value changed under rotation.");
+            if (v != expected[r.Id])
+                throw new InvalidOperationException($"Verification failed for '{r.Name}': the value did not survive rotation intact.");
+            seen++;
+        }
+        if (seen != expected.Count)
+            throw new InvalidOperationException($"Verification failed: {seen} of {expected.Count} entries were readable after rotation.");
+    }
+
+    void RestoreFrom(string dir)
+    {
+        try
+        {
+            var vaultCopy = Path.Combine(dir, Path.GetFileName(FilePath));
+            var keyCopy = Path.Combine(dir, Path.GetFileName(KeyPath));
+            if (File.Exists(vaultCopy)) { File.Copy(vaultCopy, FilePath, true); OwnerOnly(FilePath); }
+            if (File.Exists(keyCopy)) { File.Copy(keyCopy, KeyPath, true); OwnerOnly(KeyPath); }
+            _key = File.Exists(KeyPath) ? File.ReadAllBytes(KeyPath) : null;
+            _loadFailed = false;
+            _data = LoadFileOnly();
+            DecryptAll();
+        }
+        catch { /* restore is best-effort; the backup directory still holds everything */ }
+    }
+
     // ------------------------------------------------------------------ crypto
 
     static readonly byte[] AadPrefix = Encoding.UTF8.GetBytes("kvindocode-secret-v1:");

@@ -1,3 +1,4 @@
+// Vault maintenance (--rotate-vault-key) lives in Core so it can be tested without a window.
 using Avalonia;
 using KvindoCode.Core.Agent;
 
@@ -11,6 +12,12 @@ static class Program
         // Headless mode: `kvindocode --print "prompt" [--plan] [--cwd dir]` — no window.
         if (args.Contains("--print") || args.Contains("-p"))
             return HeadlessRunner.RunAsync(args).GetAwaiter().GetResult();
+
+        // Vault maintenance: `kvindocode --rotate-vault-key [--force]` — re-encrypt every stored value under a new
+        // master key. Refuses to run while another instance is alive (it holds the old key and would overwrite the
+        // result). --force skips ONLY that check, which is correct against a copy of the vault (a dry run).
+        if (args.Contains("--rotate-vault-key"))
+            return VaultMaintenance.RotateVaultKey(force: args.Contains("--force"));
 
         return BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
     }
