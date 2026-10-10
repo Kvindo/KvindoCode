@@ -11,12 +11,21 @@ A Claude Code–style coding agent as a native desktop app, built with [Avalonia
 
 ## Install / run
 ```bash
-./install.sh          # builds, installs to ~/.local/{bin,share}, adds a desktop launcher
+./install.sh                        # build from this checkout, install to ~/.local/{bin,share}
+./install.sh --from-release [tag]   # install a prebuilt GitHub release instead (no .NET SDK needed)
 kvindocode                          # open the current directory as a project
 kvindocode ~/dev/app                # open a specific project
 kvindocode --last                   # reopen the last project (what the desktop launcher does)
 kvindocode -p "fix the failing test" --cwd ~/dev/app [--plan --approve-plan] [--model ID]   # headless, one turn
 ```
+Prebuilt self-contained archives for Linux, macOS (Intel + Apple silicon) and Windows are attached to every release:
+<https://github.com/Kvindo/KvindoCode/releases>. `tools/release.sh <version>` builds all of them and creates the
+release (`--draft` to check it first, `--no-push` to build the files only).
+
+Both scripts swap the installed files **per file**, so an app that is already running keeps working until you restart
+it. Builds are throttled (`-maxcpucount:1`, `nice`, one global lock) so they do not make the desktop unresponsive;
+`KVINDOCODE_BUILD_FAST=1` lifts that for a one-off fast build.
+
 First run: *Settings* (bottom-left) → API key (`~/.kvindocode/settings.json`, mode 600; `KVINDOCODE_API_KEY` overrides).
 
 ## Features
