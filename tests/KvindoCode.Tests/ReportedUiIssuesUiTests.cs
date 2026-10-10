@@ -28,8 +28,16 @@ public sealed class ReportedUiIssuesUiTests
 
         var content = app.Window.FindControl<StackPanel>("BrowserContent")!;
         var send = app.Window.FindControl<Button>("SendBtn")!;
+        // Establish the baseline first. The browser status is painted by an ASYNC call fired from window startup, so
+        // capturing before it lands made the first of the three ticks below look like a rebuild when it was really the
+        // first paint — the property under test is "repeated updates do not REBUILD what did not change", which needs a
+        // baseline that has already been built once. (Window startup got faster when session opening was made
+        // synchronous, which is what exposed the assumption.)
+        await SecretAuditorRealUiTests.InvokeUiAsync(app.Window, "UpdateBrowserStatusAsync");
+        Dispatcher.UIThread.RunJobs();
         var browserChildren = content.Children.ToList();
         var sendContent = send.Content;
+        Assert.NotEmpty(browserChildren);              // a baseline must exist, or the test proves nothing
 
         for (int i = 0; i < 3; i++)
         {

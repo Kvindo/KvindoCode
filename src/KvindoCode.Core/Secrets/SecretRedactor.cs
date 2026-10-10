@@ -14,6 +14,23 @@ public sealed class SecretRedactor
 
     readonly List<(string Value, string Name)> _map = new();   // longest value first
 
+    /// <summary>
+    /// Every registered value (raw + JSON-escaped) as an Aho-Corasick automaton, for the "does ANY of them occur?"
+    /// pre-check.
+    /// </summary>
+    /// <remarks>
+    /// The replacement loop below is inherently per-value, and it dominated everything: a session switch re-emits its
+    /// whole history through this, and measured on 2026-10-10 the old code was **~50-70x slower** with 1000 values than
+    /// with 20 (56 ms -> 4139 ms for 20 scans of a 0.5 MB log). The common case is that NO registered value occurs at
+    /// all, and that question is answered here in ONE pass over the text, independent of how many values are stored.
+    ///
+    /// The equivalence is exact, not approximate: if no value occurs in the text, the original per-value loop would
+    /// find nothing, leave the string untouched and report "not redacted" — the same answer this gives. When a value
+    /// IS present the original loop still runs, unchanged, so its results (including any effect a replacement has on
+    /// a later match) are preserved.
+    /// </remarks>
+    readonly AcAutomaton _automaton = new();
+
     public SecretRedactor(IEnumerable<(string Name, string Value)> secrets)
     {
         var tooShort = new List<string>();
@@ -22,12 +39,72 @@ public sealed class SecretRedactor
             if (string.IsNullOrEmpty(value) || string.IsNullOrWhiteSpace(name)) continue;
             if (value.Length < MinLength) { tooShort.Add(name); continue; }
             _map.Add((value, name));
+            _automaton.Add(value);
             // the same value appears escaped inside JSON tool arguments ("quoted", \n) — match that form too
             var escaped = JsonEscape(value);
-            if (escaped != value && escaped.Length >= MinLength) _map.Add((escaped, name));
+            if (escaped != value && escaped.Length >= MinLength) { _map.Add((escaped, name)); _automaton.Add(escaped); }
         }
         _map.Sort((a, b) => b.Value.Length.CompareTo(a.Value.Length));
         TooShort = tooShort;
+        _automaton.Build();
+    }
+
+    /// <summary>Aho-Corasick: does any registered pattern occur? One pass, O(text), regardless of pattern count.</summary>
+    sealed class AcAutomaton
+    {
+        readonly List<Dictionary<char, int>> _next = new() { new Dictionary<char, int>() };
+        readonly List<int> _fail = new() { 0 };
+        readonly List<bool> _output = new() { false };
+
+        public void Add(string pattern)
+        {
+            int node = 0;
+            foreach (var c in pattern)
+            {
+                if (!_next[node].TryGetValue(c, out var child))
+                {
+                    child = _next.Count;
+                    _next[node][c] = child;
+                    _next.Add(new Dictionary<char, int>());
+                    _fail.Add(0);
+                    _output.Add(false);
+                }
+                node = child;
+            }
+            _output[node] = true;
+        }
+
+        /// <summary>Link each node's failure transition and let a node inherit its failure node's "output" flag.</summary>
+        public void Build()
+        {
+            var queue = new Queue<int>();
+            foreach (var child in _next[0].Values) { _fail[child] = 0; queue.Enqueue(child); }
+            while (queue.Count > 0)
+            {
+                int node = queue.Dequeue();
+                foreach (var (c, child) in _next[node])
+                {
+                    int f = _fail[node];
+                    while (f != 0 && !_next[f].ContainsKey(c)) f = _fail[f];
+                    _fail[child] = _next[f].TryGetValue(c, out var t) && t != child ? t : 0;
+                    _output[child] |= _output[_fail[child]];
+                    queue.Enqueue(child);
+                }
+            }
+        }
+
+        /// <summary>True as soon as any pattern is seen; stops there rather than finishing the scan.</summary>
+        public bool Occurs(string text)
+        {
+            int node = 0;
+            foreach (var c in text)
+            {
+                while (node != 0 && !_next[node].ContainsKey(c)) node = _fail[node];
+                if (_next[node].TryGetValue(c, out var next)) node = next;
+                if (_output[node]) return true;
+            }
+            return false;
+        }
     }
 
     public bool IsEmpty => _map.Count == 0;
@@ -44,6 +121,8 @@ public sealed class SecretRedactor
     public bool Contains(string? text)
     {
         if (string.IsNullOrEmpty(text) || _map.Count == 0) return false;
+        // One pass for the common "nothing here" answer; only then the per-value loop.
+        if (!_automaton.Occurs(text)) return false;
         foreach (var (value, _) in _map)
         {
             if (text.Contains(value, StringComparison.Ordinal)) return true;
@@ -61,6 +140,9 @@ public sealed class SecretRedactor
     {
         safe = text ?? "";
         if (string.IsNullOrEmpty(text) || _map.Count == 0) return false;
+        // Almost every block a session renders contains no stored value. Answer that in one pass instead of one pass
+        // per value — this is what made a session switch slow with a few hundred secrets in the vault (2026-10-10).
+        if (!_automaton.Occurs(text)) return false;
         var s = text;
         foreach (var (value, name) in _map)
             if (s.Contains(value, StringComparison.Ordinal))

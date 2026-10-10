@@ -51,6 +51,10 @@ public sealed class SessionView
     public string HistoryDraft { get; set; } = "";
     public bool TodosDismissed { get; set; }
     public string TodosSig { get; set; } = "";
+    /// <summary>Messages older than the replayed window that have not been shown yet (0 = everything is on screen).</summary>
+    public int ReplayOlderRemaining { get; set; }
+    /// <summary>How many messages of the history are currently rendered (the open window, grown by load-earlier).</summary>
+    public int ReplayLoadedMessages { get; set; }
     public int PromptTokens { get; set; }
     public int CachedTokens { get; set; }
     public int LifetimePromptTokens { get; set; }

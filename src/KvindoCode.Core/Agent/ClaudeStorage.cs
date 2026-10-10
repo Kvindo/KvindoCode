@@ -453,7 +453,11 @@ public sealed class ClaudeStorage : ISessionStorage
 
     // ------------------------------------------------------------------ loading (Claude JSONL tree → Entries)
 
-    sealed record Node(string Uuid, string? Parent, string? LogicalParent, string Type, int Line, bool Sidechain, bool CompactSummary, bool Boundary, bool Rewind = false);
+    sealed record Node(string Uuid, string? Parent, string? LogicalParent, string Type, int Line, bool Sidechain, bool CompactSummary, bool Boundary, bool Rewind = false)
+    {
+        /// <summary>Byte offset of this line in the file, so pass 2 can seek to it instead of re-reading everything.</summary>
+        public long Offset { get; init; }
+    };
 
     public const int ToolResultCap = 8000;
 
@@ -464,15 +468,31 @@ public sealed class ClaudeStorage : ISessionStorage
         if (!string.IsNullOrWhiteSpace(info.KvModel)) loaded.Model = info.KvModel;
         if (!File.Exists(info.Path)) return loaded;
 
-        // pass 1: node table (uuid → parent) without keeping any message bodies
+        // A real transcript here is 90-116 MB and parsing it costs ~700 ms even reading it only once, which alone
+        // exceeds the switch budget. The parse result is therefore cached next to the config, keyed on the file's size
+        // AND last-write time: any append changes both, so a stale cache is impossible and the first open after a new
+        // message pays the parse again (the append rewrites the file, so its mtime moves). Only the parsed entries are
+        // kept, never the raw transcript.
+        var cachePath = CachePathFor(info.Path);
+        if (cachePath is not null && TryLoadCache(cachePath, info, out var cached)) return cached!;
+
+        // pass 1: node table (uuid → parent) without keeping any message bodies. The byte offset of every line is
+        // recorded here so pass 2 can SEEK to the lines it needs instead of reading the whole file again: a real
+        // session is 90-116 MB on this machine, and re-reading it cost ~700 ms per open (measured 2026-10-10).
         var nodes = new Dictionary<string, Node>();
         Node? leaf = null;
         int lineNo = 0;
         using (var sr = new StreamReader(new FileStream(info.Path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, 1 << 16), Encoding.UTF8, false, 1 << 16))
         {
             string? line;
+            long offset = 0;
             while ((line = sr.ReadLine()) != null)
             {
+                long lineStart = offset;
+                // Byte length of the line. `Encoding.UTF8.GetByteCount` on every line was a measurable regression by
+                // itself (115 MB of text); for the ASCII lines that dominate, the byte count IS the char count, and
+                // Ascii.IsValid is SIMD-accelerated, so the expensive path is only taken when it has to be.
+                offset += (System.Text.Ascii.IsValid(line) ? line.Length : Encoding.UTF8.GetByteCount(line)) + 1;
                 lineNo++;
                 if (line.Length < 20 || line[0] != '{') continue;
                 if (!line.StartsWith("{\"parentUuid\"")) continue;           // queue-operation, ai-title, last-prompt, …
@@ -488,7 +508,7 @@ public sealed class ClaudeStorage : ISessionStorage
                     bool cs = r.TryGetProperty("isCompactSummary", out var c) && c.ValueKind == JsonValueKind.True;
                     bool bnd = type == "system" && r.TryGetProperty("subtype", out var st) && st.GetString() == "compact_boundary";
                     bool rew = type == "system" && r.TryGetProperty("subtype", out var st2) && st2.GetString() == "kvindocode_rewind";
-                    var n = new Node(uu.GetString()!, parent, lp, type, lineNo, side, cs, bnd, rew);
+                    var n = new Node(uu.GetString()!, parent, lp, type, lineNo, side, cs, bnd, rew) { Offset = lineStart };
                     nodes[n.Uuid] = n;
                     if (!side && (type is "user" or "assistant" || rew)) leaf = n;
                 }
@@ -513,27 +533,155 @@ public sealed class ClaudeStorage : ISessionStorage
         chain.Reverse();
         var wanted = new HashSet<int>(chain.Where(n => n.Type is "user" or "assistant" or "system").Select(n => n.Line));
 
-        // pass 2: read only the lines on the active chain
+        // pass 2: read ONLY the lines on the active chain, seeking straight to each recorded offset. This used to
+        // re-read the whole file (90-116 MB here) just to throw all but the active branch away — about 400 ms of the
+        // ~700 ms an open cost. (Seeking with StreamReader.DiscardBufferedData per line was tried and was WORSE: it
+        // reallocates the reader's 64 KB buffer on every call, thousands of times.)
+        // Offsets assume LF line endings, so a CRLF file falls back to the sequential scan — never a corrupt read.
         var conv = new Converter();
-        lineNo = 0;
-        using (var sr = new StreamReader(new FileStream(info.Path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, 1 << 16), Encoding.UTF8, false, 1 << 16))
+        var byOffset = chain.Where(n => n.Type is "user" or "assistant" or "system").OrderBy(n => n.Offset).ToList();
+        bool useOffsets = !HasCarriageReturns(info.Path);
+        if (useOffsets)
         {
-            string? line;
-            var order = new Dictionary<int, int>();
-            for (int i = 0; i < chain.Count; i++) order[chain[i].Line] = i;
-            var buffered = new SortedDictionary<int, Entry>();
-            while ((line = sr.ReadLine()) != null)
+            using var fs = new FileStream(info.Path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, 1 << 16);
+            var buf = new byte[1 << 16];
+            foreach (var node in byOffset)
             {
-                lineNo++;
-                if (!wanted.Contains(lineNo)) continue;
+                if (ReadLineAt(fs, node.Offset, buf) is not { } line) continue;
                 try { conv.Feed(line); }
+                catch (Exception e) when (e is JsonException or InvalidOperationException or DecoderFallbackException) { }
+            }
+        }
+        else
+        {
+            var wanted2 = new HashSet<int>(byOffset.Select(n => n.Line));
+            int n2 = 0;
+            using var sr2 = new StreamReader(new FileStream(info.Path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, 1 << 16), Encoding.UTF8, false, 1 << 16);
+            string? line2;
+            while ((line2 = sr2.ReadLine()) != null)
+            {
+                n2++;
+                if (!wanted2.Contains(n2)) continue;
+                try { conv.Feed(line2); }
                 catch (Exception e) when (e is JsonException or InvalidOperationException or DecoderFallbackException) { }
             }
         }
         // chronological order == chain order == file order for a tree whose chain is monotonic; sort by line to be safe
         loaded.Entries.AddRange(conv.Finish());
         loaded.Model ??= conv.Model;
+        if (cachePath is not null) WriteCache(cachePath, info.Path, loaded);
         return loaded;
+    }
+
+    // ------------------------------------------------------------------ parse cache
+
+    sealed class CacheFile
+    {
+        public long Size { get; set; }
+        public long MtimeTicks { get; set; }
+        public string? Model { get; set; }
+        public List<Entry> Entries { get; set; } = new();
+    }
+
+    /// <summary>Where the parsed form of a transcript is cached, or null when the transcript is not cacheable.</summary>
+    static string? CachePathFor(string transcriptPath)
+    {
+        try
+        {
+            var dir = Path.Combine(Paths.ConfigDir, "loadcache");
+            var key = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(Path.GetFullPath(transcriptPath))))[..24];
+            return Path.Combine(dir, key + ".json");
+        }
+        catch { return null; }
+    }
+
+    /// <summary>Load the parsed transcript when the cache matches the file exactly (size AND mtime).</summary>
+    bool TryLoadCache(string cachePath, SessionInfo info, out LoadedSession? loaded)
+    {
+        loaded = null;
+        try
+        {
+            if (!File.Exists(cachePath)) return false;
+            var fi = new FileInfo(info.Path);
+            using var fs = File.OpenRead(cachePath);
+            var c = JsonSerializer.Deserialize<CacheFile>(fs, SessionStore.Json);
+            if (c is null || c.Size != fi.Length || c.MtimeTicks != fi.LastWriteTimeUtc.Ticks) return false;
+            var l = new LoadedSession { Info = info, Model = c.Model };
+            l.Entries.AddRange(c.Entries);
+            l.Mode = info.PermissionMode == "plan" ? PermissionMode.Plan : PermissionMode.Regular;
+            loaded = l;
+            return true;
+        }
+        catch { return false; }                       // a damaged or unreadable cache just means "parse it again"
+    }
+
+    void WriteCache(string cachePath, string path, LoadedSession loaded)
+    {
+        try
+        {
+            var fi = new FileInfo(path);
+            var c = new CacheFile { Size = fi.Length, MtimeTicks = fi.LastWriteTimeUtc.Ticks, Model = loaded.Model };
+            c.Entries.AddRange(loaded.Entries);
+            var dir = Path.GetDirectoryName(cachePath)!;
+            Directory.CreateDirectory(dir);
+            var tmp = cachePath + ".tmp";
+            using (var fs = File.Create(tmp)) JsonSerializer.Serialize(fs, c, SessionStore.Json);
+            // the parsed entries contain transcript text, so the cache is owner-only like the rest of the config
+            if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(tmp, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+            File.Move(tmp, cachePath, true);
+            PruneCache(dir);
+        }
+        catch { }                                      // caching is an optimisation; never let it break a load
+    }
+
+    /// <summary>Drop cache files for sessions that have not been opened in a while, so they cannot accumulate forever.</summary>
+    static void PruneCache(string dir)
+    {
+        try
+        {
+            var cutoff = DateTime.UtcNow.AddDays(-14);
+            foreach (var f in Directory.EnumerateFiles(dir, "*.json"))
+                if (File.GetLastWriteTimeUtc(f) < cutoff) File.Delete(f);
+        }
+        catch { }
+    }
+
+    /// <summary>True when the file uses CRLF, in which case byte offsets are not usable for a seek-based read.</summary>
+    static bool HasCarriageReturns(string path)
+    {
+        try
+        {
+            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            var head = new byte[1 << 16];
+            int n = fs.Read(head, 0, head.Length);
+            return Array.IndexOf(head, (byte)'\r', 0, Math.Max(0, n)) >= 0;
+        }
+        catch { return true; }                    // unknown: take the safe path
+    }
+
+    /// <summary>Read one line starting at a byte offset, without buffering the rest of the file.</summary>
+    /// <remarks>
+    /// A stream seek plus a chunked read until the newline. Deliberately not <c>StreamReader</c>: seeking and calling
+    /// <c>DiscardBufferedData</c> once per line reallocates a 64 KB buffer every time, which cost more than the whole
+    /// second pass it was meant to save (measured 2026-10-10).
+    /// </remarks>
+    static string? ReadLineAt(FileStream fs, long offset, byte[] buf)
+    {
+        if (offset < 0 || offset >= fs.Length) return null;
+        fs.Seek(offset, SeekOrigin.Begin);
+        using var ms = new MemoryStream(1024);
+        int n;
+        while ((n = fs.Read(buf, 0, buf.Length)) > 0)
+        {
+            int nl = Array.IndexOf(buf, (byte)'\n', 0, n);
+            if (nl >= 0) { ms.Write(buf, 0, nl); break; }
+            ms.Write(buf, 0, n);
+        }
+        if (ms.Length == 0) return null;
+        var bytes = ms.GetBuffer();
+        int len = (int)ms.Length;
+        if (len > 0 && bytes[len - 1] == (byte)'\r') len--;             // tolerate CRLF
+        return Encoding.UTF8.GetString(bytes, 0, len);
     }
 
     /// <summary>Anthropic-format lines → OpenAI-style messages. Stateful: merges split assistant lines and pairs tool results.</summary>

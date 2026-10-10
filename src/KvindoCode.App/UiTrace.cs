@@ -177,7 +177,10 @@ public static class UiTrace
         public void OnCompleted() { }
     }
 
-    static void Line(string text)
+    /// <summary>Append one timestamped line to the trace (no-op when tracing is off or the file is full).</summary>
+    /// <remarks>Public so timing measurements (e.g. how long a session switch takes) land in the same file as the
+    /// pointer trace, where they can be read side by side.</remarks>
+    public static void Line(string text)
     {
         lock (Gate)
         {

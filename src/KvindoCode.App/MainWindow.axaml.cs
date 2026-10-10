@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Input;
@@ -502,15 +503,28 @@ public partial class MainWindow : Window
         SetLoading(info.Title);
         try
         {
+            // Timing: switching sessions must stay snappy, and the cost has three very different parts — reading the
+            // transcript off disk (background), masking + re-emitting the history, and building the controls. Which
+            // one dominates decides what to optimise, so it is measured rather than guessed (asked 2026-10-10:
+            // "switching between session takes about 2 seconds, i want it optimized to 500ms or less").
+            var sw = Stopwatch.StartNew();
+            long resumeMs, replayMs;
             var inter = new UiInteraction();
             var session = await Task.Run(() => AgentSession.Resume(_settings, _llm, info, inter, _storage, ResolveModel));
+            resumeMs = sw.ElapsedMilliseconds; sw.Restart();
             session.ModelLookup = LookupModel; session.ModelNameLookup = LookupModelByName; session.AutoTitle = _settings.AutoTitle;
             var sv = Attach(session, inter, replay: true);
+            replayMs = sw.ElapsedMilliseconds; sw.Restart();
             _project = sv.Session.Project.Cwd;
             _settings.RememberProject(_project); try { _settings.Save(); } catch { }
             SetLoading(null);
             Show(sv);
             RebuildSidebar();
+            var renderMs = sw.ElapsedMilliseconds;
+            var total = resumeMs + replayMs + renderMs;
+            UiTrace.Line($"session-open '{info.Title}' total={total}ms resume={resumeMs} mask+replay={replayMs} render={renderMs} history={session.HistoryCount} controls={sv.Transcript.ItemCount}");
+            if (total > 500)
+                sv.Transcript.Handle(new NoticeEvent($"Opening this session took {total} ms (resume {resumeMs}, replay {replayMs}, render {renderMs}).", false));
         }
         catch (Exception e) { SetLoading(null); ShowError("Could not open session: " + e.Message); }
     }
@@ -526,6 +540,7 @@ public partial class MainWindow : Window
         tv.PlanOpened += plan => { if (sv == _current) { OpenPane(); _pane.ShowPlan(plan, _settings.FontSize); } };
         tv.RewindRequested += (i, t) => _ = RewindAsync(sv, i, t);
         tv.ForkRequested += (i, t) => _ = ForkAsync(sv, i, t);
+        tv.LoadEarlierRequested += () => _ = LoadEarlierAsync(sv);
         return tv;
     }
 
@@ -588,7 +603,6 @@ public partial class MainWindow : Window
         sv.Transcript = MakeTranscript(sv);
         inter.View = sv.Transcript;
         _live[sv.Id] = sv;
-        session.Event += e => Dispatcher.UIThread.Post(() => OnEvent(sv, e));
         session.DequeueQueuedTurn = () =>
         {
             var scheduled = sv.Session.DequeueScheduledTurn();
@@ -600,8 +614,80 @@ public partial class MainWindow : Window
         };
         session.DequeueQueuedTurnPending = () => sv.SnapshotQueue().Count > 0;
         session.WakeRequested += () => Dispatcher.UIThread.Post(() => { if (_live.ContainsKey(sv.Id) && !sv.Running) Start(sv, null, null); });
-        if (replay) session.Replay();
+
+        if (replay)
+        {
+            // Collect the replay instead of letting every event take its own trip through the dispatcher: a 500-message
+            // history produced ~800 separate work items, and each one rebuilt the sidebar. Applied as ONE batch, with
+            // the sidebar rebuilt once at the end. Only the newest window is replayed — a real session here holds
+            // ~4000 messages and building a control for every one was ~300 ms of the switch; the rest load on demand
+            // (asked 2026-10-10, target 500 ms).
+            //
+            // Applied SYNCHRONOUSLY, not in a posted callback: the caller shows the view as soon as Attach returns, so
+            // posting the batch left the transcript blank until the dispatcher got around to it (and a test asserting
+            // on the freshly opened view saw nothing). Attach already runs on the UI thread.
+            var collected = new List<AgentEvent>();
+            Action<AgentEvent> grab = collected.Add;
+            session.Event += grab;
+            try { sv.ReplayOlderRemaining = session.ReplayWindow(ReplayWindowMessages); }
+            finally { session.Event -= grab; }
+            sv.ReplayLoadedMessages = Math.Min(ReplayWindowMessages, session.HistoryCount);
+            session.Event += e => Dispatcher.UIThread.Post(() => OnEvent(sv, e));
+            ReplayPosts++;
+            _replaying = true;
+            try { foreach (var e in collected) OnEvent(sv, e); }
+            finally { _replaying = false; }
+            sv.Transcript.OpenedWhenOlderExist(sv.ReplayOlderRemaining);
+            if (_sidebarDirty) { _sidebarDirty = false; }
+        }
+        else
+        {
+            session.Event += e => Dispatcher.UIThread.Post(() => OnEvent(sv, e));
+        }
         return sv;
+    }
+
+    /// <summary>True while a replay batch is being applied: sidebar rebuilds are deferred to the end of the batch.</summary>
+    bool _replaying;
+    bool _sidebarDirty;
+    /// <summary>How many times the sidebar has actually been rebuilt (a full projects-panel rebuild). For tests that a
+    /// replayed history does not do it once per event.</summary>
+    internal int RebuildSidebarCount;
+    /// <summary>Dispatcher posts made to apply a replayed history — ONE per session open, not one per event. That is
+    /// the cost this batching removes (~800 work items for a 500-message history).</summary>
+    internal int ReplayPosts;
+
+    /// <summary>
+    /// How many of the newest messages a freshly opened session renders up front. A real session on this machine holds
+    /// ~4000 messages and building a control for each was ~300 ms of the switch, so only the newest window is built;
+    /// the rest come from "Load earlier messages" (asked 2026-10-10, target 500 ms).
+    /// </summary>
+    const int ReplayWindowMessages = 150;
+    /// <summary>How many more older messages each "Load earlier messages" brings in.</summary>
+    const int LoadEarlierBatch = 150;
+
+    /// <summary>Bring in the messages older than the ones on screen, keeping the viewport where the user left it.</summary>
+    async Task LoadEarlierAsync(SessionView sv)
+    {
+        if (sv.ReplayOlderRemaining <= 0) return;
+        sv.Transcript.SetLoadEarlierBusy(true);
+        try
+        {
+            int batch = Math.Min(LoadEarlierBatch, sv.ReplayOlderRemaining);
+            int from = sv.ReplayOlderRemaining - batch;               // the block just above the current window
+            var events = new List<AgentEvent>();
+            Action<AgentEvent> grab = events.Add;
+            sv.Session.Event += grab;
+            try { sv.Session.ReplayRange(from, batch); }
+            finally { sv.Session.Event -= grab; }
+
+            sv.ReplayOlderRemaining = from;
+            sv.ReplayLoadedMessages += batch;
+            await Task.Yield();                                        // let the busy state paint before the insert
+            sv.Transcript.PrependRange(events);
+            sv.Transcript.OpenedWhenOlderExist(sv.ReplayOlderRemaining);
+        }
+        finally { sv.Transcript.SetLoadEarlierBusy(false); }
     }
 
     /// <summary>Throw away the transcript view and rebuild it from the session history (after a rewind).</summary>
@@ -609,7 +695,12 @@ public partial class MainWindow : Window
     {
         sv.Transcript = MakeTranscript(sv);
         sv.Interaction.View = sv.Transcript;
-        sv.Session.Replay();
+        sv.Transcript.LoadEarlierRequested += () => _ = LoadEarlierAsync(sv);
+        // Same window rule as opening a session: a rewind rebuilds from the newest end, so reset the window counters
+        // rather than leaving them describing the view that was just thrown away.
+        sv.ReplayOlderRemaining = sv.Session.ReplayWindow(ReplayWindowMessages);
+        sv.ReplayLoadedMessages = Math.Min(ReplayWindowMessages, sv.Session.HistoryCount);
+        sv.Transcript.OpenedWhenOlderExist(sv.ReplayOlderRemaining);
         if (sv == _current) Show(sv);
     }
 
@@ -2146,6 +2237,10 @@ public partial class MainWindow : Window
 
     void RebuildSidebar()
     {
+        // While a replay batch is being applied, the sidebar is rebuilt ONCE at the end instead of per event: a
+        // session with hundreds of messages fires RebuildSidebar on every title/tasks/turn/user event, and each one
+        // walks and rebuilds the whole projects panel. That was most of the switch cost (measured 2026-10-10).
+        if (_replaying) { _sidebarDirty = true; return; }
         var keepOffset = SidebarScroll.Offset;
         RebuildSidebarCore();
         Dispatcher.UIThread.Post(() => SidebarScroll.Offset = keepOffset, DispatcherPriority.Loaded);
@@ -2153,6 +2248,7 @@ public partial class MainWindow : Window
 
     void RebuildSidebarCore()
     {
+        RebuildSidebarCount++;      // for the test that a replayed history does not rebuild the panel per event
         ProjectsPanel.Children.Clear();
         if (_query.Length > 0) { RebuildSearchResults(); return; }
 

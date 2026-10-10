@@ -17,7 +17,7 @@ namespace KvindoCode.App.Views;
 public sealed class TranscriptView : UserControl
 {
     readonly ScrollViewer _scroll = new() { VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled };
-    readonly StackPanel _stack = new() { Spacing = 14 };
+    StackPanel _stack = new() { Spacing = 14 };
     readonly DispatcherTimer _timer = new() { Interval = TimeSpan.FromMilliseconds(70) };
     readonly Dictionary<string, ToolCard> _tools = new();
     /// <summary>Tool cards created from a streaming tool-call delta that have not been started yet. Cleared when the
@@ -53,6 +53,74 @@ public sealed class TranscriptView : UserControl
     public event Action<string>? PlanOpened;            // the user asked to see a plan in the side panel
     public event Action<int, string>? RewindRequested;
     public event Action<int, string>? ForkRequested;
+    /// <summary>The user asked for the messages before the ones on screen (see <see cref="OpenedWhenOlderExist"/>).</summary>
+    public event Action? LoadEarlierRequested;
+
+    readonly Button _loadEarlier = new();
+
+    /// <summary>How many messages the transcript does not show yet (0 = everything is on screen).</summary>
+    public int OlderAvailable { get; private set; }
+
+    /// <summary>
+    /// Tell the view that <paramref name="count"/> earlier messages exist but were not replayed. The button appears
+    /// (with the count) instead of the old "N earlier messages are not shown" notice, which stated the fact but gave
+    /// the user no way to see them.
+    /// </summary>
+    public void OpenedWhenOlderExist(int count)
+    {
+        OlderAvailable = Math.Max(0, count);
+        _loadEarlier.Content = OlderAvailable == 0 ? "Load earlier messages" : $"Load earlier messages ({OlderAvailable} more)";
+        _loadEarlier.IsVisible = OlderAvailable > 0;
+    }
+
+    public void SetLoadEarlierBusy(bool busy)
+    {
+        _loadEarlier.IsEnabled = !busy;
+        if (busy) _loadEarlier.Content = "Loading…";
+    }
+
+    /// <summary>
+    /// Insert a batch of OLDER messages above what is on screen, keeping the viewport where it was.
+    /// </summary>
+    /// <remarks>
+    /// Inserting content above the scroll position would otherwise push everything down by the height of what was
+    /// added, so the user loses their place. The offset is corrected by exactly the height increase. Following the
+    /// bottom is only right when the user was already at the bottom, which is why <c>_stick</c> is untouched here:
+    /// <see cref="PrependRange"/> is only ever called for a load-earlier, never for live events.
+    /// </remarks>
+    public void PrependRange(IReadOnlyList<AgentEvent> events, Action<AgentEvent>? observer = null)
+    {
+        _suppressScroll = true;
+        try
+        {
+            double before = _scroll.Extent.Height;
+            double offset = _scroll.Offset.Y;
+            var atBottom = offset >= before - _scroll.Viewport.Height - 60;
+
+            // Render the older events into their own stack, then move those controls to the top in order. Everything
+            // below is left exactly as it is, so tool cards and text blocks on screen keep their state.
+            var temporary = new StackPanel();
+            var host = _stack;
+            _stack = temporary;
+            try { foreach (var e in events) { Handle(e); observer?.Invoke(e); } }
+            finally { _stack = host; }
+
+            var moved = temporary.Children.Cast<Control>().ToList();
+            int insertAt = 1;                                  // 0 is the load-earlier button
+            foreach (var c in moved)
+            {
+                ((Panel)temporary).Children.Remove(c);
+                _stack.Children.Insert(insertAt++, c);
+            }
+            double after = _scroll.Extent.Height;
+            double delta = Math.Max(0, after - before);
+            Dispatcher.UIThread.Post(() => _scroll.Offset = new Vector(_scroll.Offset.X, atBottom ? _scroll.Offset.Y : offset + delta), DispatcherPriority.Loaded);
+        }
+        finally { _suppressScroll = false; }
+    }
+    /// <summary>Set while a batch is being inserted: the scroll handler must not fight the anchor correction.</summary>
+    bool _suppressScroll;
+
     /// <summary>Timestamp of the last message processed — the UI sets it so hover tooltips can show it.</summary>
     DateTimeOffset? _lastMsgTs;
 
@@ -79,6 +147,18 @@ public sealed class TranscriptView : UserControl
     {
         _scroll.Content = new LeftColumn { MaxContentWidth = 1000, Child = new Border { Padding = new Thickness(28, 20, 28, 24), Child = _stack } };
 
+        // "Load earlier messages" sits ABOVE the transcript, inside the scrolled column. A long session's oldest
+        // messages are not built up front (4000 messages -> ~3000 controls is ~300 ms of a switch), so this is how
+        // they are reached. See OpenedWhenOlderExist.
+        _loadEarlier.Content = "Load earlier messages";
+        _loadEarlier.Classes.Add("ghost");
+        _loadEarlier.FontSize = 12.5;
+        _loadEarlier.Margin = new Thickness(0, 0, 0, 8);
+        _loadEarlier.HorizontalAlignment = HorizontalAlignment.Center;
+        _loadEarlier.IsVisible = false;
+        _loadEarlier.Click += (_, _) => LoadEarlierRequested?.Invoke();
+        _stack.Children.Add(_loadEarlier);
+
         _statusGlyph = new TextBlock { Text = "✻", FontSize = 15, VerticalAlignment = VerticalAlignment.Center };
         Ui.BindBrush(_statusGlyph, TextBlock.ForegroundProperty, "KvAccent");
         _statusText.Classes.Add("muted"); _statusText.VerticalAlignment = VerticalAlignment.Center;
@@ -90,6 +170,7 @@ public sealed class TranscriptView : UserControl
 
         _scroll.ScrollChanged += (_, e) =>
         {
+            if (_suppressScroll) return;
             if (e.ExtentDelta.Y != 0 || e.ViewportDelta.Y != 0) { if (_stick) ScrollToEndSoon(); }
             else _stick = _scroll.Offset.Y >= _scroll.Extent.Height - _scroll.Viewport.Height - 60;
         };
@@ -118,7 +199,12 @@ public sealed class TranscriptView : UserControl
     /// <summary>Marks a control as one of the user's own messages (survives the filter).</summary>
     public const string UserTag = "user";
 
-    public int ItemCount => _stack.Children.Count;
+    /// <summary>
+    /// How many MESSAGE controls the transcript holds. The "load earlier" button shares the same panel but is not
+    /// content: callers use this to ask "is the transcript empty?" (the window reuses a fresh empty session instead of
+    /// building a second view), and counting the button made an empty session look non-empty.
+    /// </summary>
+    public int ItemCount => _stack.Children.Count(c => !ReferenceEquals(c, _loadEarlier));
 
     // ------------------------------------------------------------------ in-session search
 

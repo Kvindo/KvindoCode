@@ -947,21 +947,102 @@ public sealed class AgentSession : IDisposable
     void EmitRaw(AgentEvent e) => Event?.Invoke(e);
 
     /// <summary>Re-emit the stored conversation so a fresh UI can rebuild its transcript (only the last <paramref name="maxMessages"/>).</summary>
-    public void Replay(int maxMessages = 500)
+    public void Replay(int maxMessages = 500) => ReplayWindow(maxMessages, 0);
+
+    /// <summary>
+    /// Re-emit a WINDOW of the conversation: the <paramref name="maxMessages"/> messages ending
+    /// <paramref name="olderSkip"/> messages before the newest one. Returns how many messages are still older than the
+    /// window (0 = the window reaches the start), so the UI can offer to load them.
+    /// </summary>
+    /// <remarks>
+    /// A long session is the reason this exists: a real one here holds ~4000 messages, and building controls for all
+    /// of them is ~300 ms of a switch (measured 2026-10-10). Only the newest window is built; the older ones are
+    /// rendered on demand. <c>HistoryIndex</c> stays ABSOLUTE (the entry's position in the whole history), because
+    /// rewind/fork address the session by it — a window must not renumber it.
+    /// </remarks>
+    public int ReplayWindow(int maxMessages = 500, int olderSkip = 0)
+    {
+        List<Entry> snapshot; lock (_lock) snapshot = _history.ToList();
+        int totalMessages = snapshot.Count(e => e.Kind == "msg");
+        int skipFromStart = Math.Max(0, totalMessages - maxMessages - Math.Max(0, olderSkip));
+        int take = totalMessages - skipFromStart;
+        ReplayRange(skipFromStart, take);
+        return skipFromStart;
+    }
+
+    /// <summary>
+    /// Emit the messages <c>[fromMessage, fromMessage + count)</c>, by absolute message ordinal. Used to bring in a
+    /// block of OLDER messages without re-emitting the ones already on screen.
+    /// </summary>
+    /// <remarks>
+    /// A tool call whose result falls outside the emitted slice shows as unfinished, because the pairing state only
+    /// covers the slice. That is display-only and only at a window boundary.
+    /// </remarks>
+    public void ReplayRange(int fromMessage, int count)
+    {
+        if (count <= 0) return;
+        var calls = new Dictionary<string, ToolCall>();
+        var open = new HashSet<string>();
+        List<Entry> snapshot; lock (_lock) snapshot = _history.ToList();
+        bool tail = false;                       // true once we are past the emitted slice
+        int seen = 0;
+        int hIdx = -1;
+        int emitted = 0;
+        foreach (var e in snapshot)
+        {
+            hIdx++;
+            if (tail) break;
+            if (e.Kind == "compact") { if (seen >= fromMessage) Emit(new CompactedEvent(e.Summary ?? "")); continue; }
+            if (e.Kind != "msg" || e.M is null) continue;
+            int ordinal = seen++;
+            if (ordinal < fromMessage) { foreach (var tc in e.M.ToolCalls ?? new()) calls[tc.Id] = tc; continue; }
+            if (emitted >= count) { tail = true; break; }
+            emitted++;
+            var m = e.M;
+            switch (m.Role)
+            {
+                case "user":
+                    if (m.IsSummary || m.IsInternal) break;
+                    if (m.IsNotification) Emit(new TaskNoticeEvent(0, "background tasks", StripTags(m.Content ?? ""), false));
+                    else Emit(new UserMessageEvent(StripReminders(m.Content), hIdx, Replayed: true));
+                    break;
+                case "assistant":
+                    if (!string.IsNullOrEmpty(m.Reasoning)) Emit(new ThinkingDeltaEvent(m.Reasoning));
+                    if (!string.IsNullOrEmpty(m.Content)) Emit(new TextDeltaEvent(m.Content));
+                    Emit(new AssistantMessageEndEvent());
+                    foreach (var tc in m.ToolCalls ?? new())
+                    {
+                        calls[tc.Id] = tc; open.Add(tc.Id);
+                        Emit(new ToolStartEvent(tc.Id, tc.Name, ParseArgs(tc.Arguments)));
+                    }
+                    break;
+                case "tool":
+                    var id = m.ToolCallId ?? "";
+                    var name = calls.TryGetValue(id, out var c) ? c.Name : "tool";
+                    open.Remove(id);
+                    if (!calls.ContainsKey(id)) break;                      // result of a call we did not display
+                    Emit(new ToolEndEvent(id, name, m.Content ?? "", m.IsError, m.DurationMs ?? 0));
+                    break;
+            }
+        }
+        foreach (var id in open) Emit(new ToolEndEvent(id, calls[id].Name, "No result recorded.", true, 0));
+    }
+
+    /// <summary>Re-emit the stored conversation so a fresh UI can rebuild its transcript (only the last <paramref name="maxMessages"/>).</summary>
+    public void ReplayFull(int maxMessages = 500)
     {
         var calls = new Dictionary<string, ToolCall>();
         var open = new HashSet<string>();
         List<Entry> snapshot; lock (_lock) snapshot = _history.ToList();
-        int skip = Math.Max(0, snapshot.Count(e => e.Kind == "msg") - maxMessages);
-        if (skip > 0) Emit(new NoticeEvent($"{skip} earlier messages of this conversation are not shown (they are still in the transcript file).", false));
+        int skipFromStart = Math.Max(0, snapshot.Count(e => e.Kind == "msg") - maxMessages);
         int seen = 0;
         int hIdx = -1;
         foreach (var e in snapshot)
         {
             hIdx++;
-            if (e.Kind == "compact") { if (seen >= skip) Emit(new CompactedEvent(e.Summary ?? "")); continue; }
+            if (e.Kind == "compact") { if (seen >= skipFromStart) Emit(new CompactedEvent(e.Summary ?? "")); continue; }
             if (e.Kind != "msg" || e.M is null) continue;
-            if (seen++ < skip) { foreach (var tc in e.M.ToolCalls ?? new()) calls[tc.Id] = tc; continue; }
+            if (seen++ < skipFromStart) { foreach (var tc in e.M.ToolCalls ?? new()) calls[tc.Id] = tc; continue; }
             var m = e.M;
             switch (m.Role)
             {
