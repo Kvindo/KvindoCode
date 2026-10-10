@@ -177,14 +177,26 @@ public static class UiTrace
         public void OnCompleted() { }
     }
 
-    /// <summary>Append one timestamped line to the trace (no-op when tracing is off or the file is full).</summary>
+    /// <summary>Append one timestamped line to the trace (rotates to ui-trace.log.1 at 512 KB).</summary>
     /// <remarks>Public so timing measurements (e.g. how long a session switch takes) land in the same file as the
     /// pointer trace, where they can be read side by side.</remarks>
     public static void Line(string text)
     {
         lock (Gate)
         {
-            if (_writer is null || _bytes > MaxBytes) return;
+            if (_writer is null) return;
+            if (_bytes > MaxBytes)
+            {
+                try
+                {
+                    _writer.Dispose();
+                    var path = Path.Combine(KvindoCode.Core.Paths.ConfigDir, "ui-trace.log");
+                    File.Move(path, path + ".1", overwrite: true);
+                    _writer = new StreamWriter(new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.ReadWrite)) { AutoFlush = true };
+                    _bytes = 0;
+                }
+                catch { return; }
+            }
             var line = $"{DateTime.Now:HH:mm:ss.fff} {text}";
             _writer.WriteLine(line);
             _bytes += line.Length + 1;
