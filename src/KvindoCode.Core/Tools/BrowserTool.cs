@@ -50,7 +50,10 @@ public sealed class BrowserTool : Tool
     {
         var b = ctx.Session.Browser;
         string A(string k) => Str(input, k);
-        double? D(string k) { var n = input[k]; if (n is null) return null; try { return (double)n; } catch { return double.TryParse((string?)n, out var v) ? v : null; } }
+        // InvariantCulture: a coordinate can arrive as a string, and the model writes "120.5" with a dot. On a
+        // comma-decimal locale (this box is ru-RU) the current-culture overload rejected it and the click landed at
+        // null. Same defect that was fixed in TaskTools.ParseInterval.
+        double? D(string k) { var n = input[k]; if (n is null) return null; try { return (double)n; } catch { return double.TryParse((string?)n, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var v) ? v : null; } }
         try
         {
             switch (A("action"))

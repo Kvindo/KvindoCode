@@ -33,6 +33,8 @@ public static class SimpleTips
     static TextBlock? _text;
     static Control? _owner;
     static Control? _pending;
+    /// <summary>Where the pointer last was, in TOP-LEVEL coordinates: the hit test below runs against the whole
+    /// window, so a position relative to whichever control received the move would be meaningless.</summary>
     static Point _lastPointer;
     static bool _installed;
     static readonly DispatcherTimer _timer = new() { Interval = TimeSpan.FromMilliseconds(400) };
@@ -61,7 +63,9 @@ public static class SimpleTips
         // PointerEntered/Exited are Direct events, so a handler on the window never sees them: class handlers it is.
         InputElement.PointerEnteredEvent.AddClassHandler<Control>((c, _) => Enter(c));
         InputElement.PointerExitedEvent.AddClassHandler<Control>((c, _) => Leave(c));
-        InputElement.PointerMovedEvent.AddClassHandler<Control>((c, e) => _lastPointer = e.GetPosition(c));
+        // TopLevel coordinates, because the Leave() re-check hit-tests the whole window: `GetPosition(c)` is relative to
+        // whichever control happened to receive the move, which is useless for that.
+        InputElement.PointerMovedEvent.AddClassHandler<Control>((c, e) => { if (TopLevel.GetTopLevel(c) is { } t) _lastPointer = e.GetPosition(t); });
         InputElement.PointerPressedEvent.AddClassHandler<Control>((_, _) => Hide());
     }
 
@@ -91,7 +95,16 @@ public static class SimpleTips
         Dispatcher.UIThread.Post(() =>
         {
             if (_layer is null) { Hide(); return; }
-            var hit = _layer.InputHitTest(_lastPointer) as Control;
+            // Leaving the WINDOW raises Exit without a trailing Move, so `_lastPointer` still names a point inside the
+            // control and the re-check below would resolve it back to `_owner` and never hide — the hint stayed on
+            // screen until the pointer came back. IsPointerOver is false in that case, which is the actual question.
+            var top = TopLevel.GetTopLevel(_layer);
+            if (top is null || !top.IsPointerOver) { Hide(); return; }
+            // Hit-test the TOP LEVEL, not `_layer`. The layer is a non-hit-testable Canvas (that is the whole point of
+            // it — see the class remarks), so `_layer.InputHitTest(...)` returns null for every point, the re-check
+            // could never see the hovered control, and the "don't flicker" branch below was dead code: every move
+            // between two children of the same button hid the hint and restarted the 400 ms timer.
+            var hit = top.InputHitTest(_lastPointer) as Control;
             var owner = TipOwner(hit);
             if (owner == _owner) return;
             Hide();

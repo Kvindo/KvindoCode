@@ -30,8 +30,9 @@ public static class HeadlessRunner
             switch (args[i])
             {
                 case "--print": case "-p": prompt = i + 1 < args.Length ? args[++i] : null; break;
-                case "--cwd": cwd = args[++i]; break;
-                case "--model": model = args[++i]; break;
+                // bounds-checked: a trailing flag used to throw IndexOutOfRangeException instead of a usage error
+                case "--cwd": cwd = i + 1 < args.Length ? args[++i] : null; break;
+                case "--model": model = i + 1 < args.Length ? args[++i] : null; break;
                 case "--plan": plan = true; break;
                 case "--approve-plan": approve = true; break;
             }
@@ -66,6 +67,17 @@ public static class HeadlessRunner
         Console.CancelKeyPress += (_, a) => { a.Cancel = true; cts.Cancel(); };
         await session.RunTurnAsync(prompt!, cts.Token);
         Console.Error.WriteLine($"[session {session.Info.Id}]");
+        // RunTurnAsync never throws — it records the failure and returns — so returning 0 unconditionally made an
+        // `-p` run look successful after an auth error, a 502 or an auditor outage, and a script that checked the exit
+        // code treated the failure as success.
+        if (session.LastTurnError is { Length: > 0 } err) { Console.Error.WriteLine("[failed] " + err); return 1; }
+        // A plan that was never approved is a failure too: with --plan and no --approve-plan the turn ends "done" and
+        // the session is still in plan mode, so nothing was implemented — exit 0 would tell a script it succeeded.
+        if (plan && session.Mode == PermissionMode.Plan)
+        {
+            Console.Error.WriteLine("[failed] The plan was not approved, so nothing was implemented (pass --approve-plan, or approve it in the app).");
+            return 1;
+        }
         return 0;
     }
 

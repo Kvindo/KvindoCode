@@ -63,6 +63,11 @@ public sealed class SubagentManager : IDisposable
         SubagentHandle h;
         lock (_gate) h = new SubagentHandle { Id = _next++, Prompt = prompt, Model = model, ModelTag = modelTag, Description = string.IsNullOrWhiteSpace(description) ? "subagent" : description.Trim() };
         lock (_gate) _all[h.Id] = h;
+        // NOTE: no CancellationToken on Task.Run. Passing h.Cts.Token makes the pool skip the delegate entirely when
+        // the token is ALREADY cancelled, so a Stop() (or a Dispose) landing in the window between this return and the
+        // task being scheduled transitioned the task to Canceled without the body ever running — and the `finally`
+        // that sets Running=false is in that body, so the handle stayed "running" forever and AgentOutput spun to its
+        // timeout on a ghost. Cancellation is still effective: `linked` below observes h.Cts.Token.
         _ = Task.Run(async () =>
         {
             try
@@ -115,7 +120,7 @@ public sealed class SubagentManager : IDisposable
             catch (OperationCanceledException) { h.Error = "Subagent stopped."; }
             catch (Exception e) { h.Error = e.Message; }
             finally { h.Running = false; h.Ended = DateTimeOffset.UtcNow; }
-        }, h.Cts.Token);
+        });
         return h;
     }
 

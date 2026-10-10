@@ -451,6 +451,12 @@ public static partial class DeterministicSecretDetector
     }
 
     /// <summary>Sort by position and drop spans contained in an earlier longer one.</summary>
+    /// <remarks>
+    /// Span that only PARTIALLY overlaps an earlier one is clipped to its uncovered tail rather than dropped: dropping
+    /// it discarded that tail outright, leaving a plaintext fragment of a secret in the text that was then masked with
+    /// the wrong marker (see <c>AgentSession.VaultAsync</c>). The tail carries no <see cref="SecretSpan.Name"/>, so it
+    /// gets the irreversible <see cref="RedactionText"/> rather than reusing the first span's reversible marker.
+    /// </remarks>
     static List<SecretSpan> Merge(List<SecretSpan> spans)
     {
         spans.Sort((a, b) => a.Start != b.Start ? a.Start.CompareTo(b.Start) : b.Length.CompareTo(a.Length));
@@ -461,6 +467,9 @@ public static partial class DeterministicSecretDetector
             if (span.Start < lastEnd)
             {
                 // overlapping: a wider span starting earlier already covers this one
+                if (span.End <= lastEnd) continue;
+                kept.Add(new SecretSpan(lastEnd, span.End - lastEnd, span.Type, span.Confidence));
+                lastEnd = span.End;
                 continue;
             }
             kept.Add(span);

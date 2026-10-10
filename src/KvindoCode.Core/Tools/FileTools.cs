@@ -347,8 +347,13 @@ public sealed class EditTool : Tool
         if (oldS.Length == 0) return Task.FromResult(ToolResult.Err("old_string is empty. To create or overwrite a file use Write."));
 
         var raw = File.ReadAllText(path);
-        bool crlf = raw.Contains("\r\n");
-        var text = crlf ? raw.Replace("\r\n", "\n") : raw;
+        // Use the DOMINANT line ending, not "does a CRLF appear anywhere". A single stray \r\n (a pasted Windows
+        // snippet, a git artifact) used to set the flag for a whole Unix file, and writing then converted every \n in
+        // the file to \r\n — an edit of one line rewrote the line endings of all of them.
+        int crlfCount = CountOccurrences(raw, "\r\n");
+        int lfCount = raw.Count(c => c == '\n');
+        bool crlf = crlfCount > 0 && crlfCount * 2 >= lfCount;
+        var text = raw.Replace("\r\n", "\n");
         oldS = oldS.Replace("\r\n", "\n"); newS = newS.Replace("\r\n", "\n");
 
         int count = CountOccurrences(text, oldS);

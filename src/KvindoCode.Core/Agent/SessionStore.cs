@@ -48,6 +48,9 @@ public sealed class Entry
     public string? Cwd { get; set; }
     public string? Uuid { get; set; }                 // Claude transcript line id of the last line this entry produced
     public string? Title { get; set; }
+    /// <summary>auto | user | "". Persisted so a rename survives a restart: without it the auto-title gate reopened on
+    /// resume and regenerated a title over the user's own (the native store never wrote the field the Claude store did).</summary>
+    public string? TitleSource { get; set; }
     public string? Mode { get; set; }
     public string? Summary { get; set; }
     public string? Model { get; set; }
@@ -117,17 +120,20 @@ public static class SessionStore
         {
             if (++n > 40)
             {   // later lines only matter if they retitle the session, or are a message (its time is the session's "last activity")
-                if (line.StartsWith("{\"kind\":\"title\"")) { try { var te = JsonSerializer.Deserialize<Entry>(line, Json); if (!string.IsNullOrEmpty(te?.Title)) info.Title = te.Title; } catch { } }
+                // Both branches must carry the title SOURCE, not just the text: the >40 fast path is what a long session
+                // is read through, and a rename that came back with an empty source re-opened the auto-title gate and
+                // was overwritten on the next turn — the fix is only as good as this path.
+                if (line.StartsWith("{\"kind\":\"title\"")) { try { var te = JsonSerializer.Deserialize<Entry>(line, Json); if (!string.IsNullOrEmpty(te?.Title)) { info.Title = te.Title!; if (te!.TitleSource is { Length: > 0 } ts) info.TitleSource = ts; } } catch { } }
                 else if (line.StartsWith("{\"kind\":\"msg\"") && MessageTime(line) is { } mt) lastMessage = mt;
-                else if (line.StartsWith("{\"kind\":\"meta\"")) { try { var me = JsonSerializer.Deserialize<Entry>(line, Json); if (me?.WasRunning is { } wr) info.WasRunning = wr; if (me?.Subagent is { } sub) info.Subagent = sub; if (Enum.TryParse<SessionMode>(me?.WorkMode, out var wmode)) info.WorkMode = wmode; } catch { } }
+                else if (line.StartsWith("{\"kind\":\"meta\"")) { try { var me = JsonSerializer.Deserialize<Entry>(line, Json); if (me?.WasRunning is { } wr) info.WasRunning = wr; if (me?.Subagent is { } sub) info.Subagent = sub; if (Enum.TryParse<SessionMode>(me?.WorkMode, out var wmode)) info.WorkMode = wmode; if (!string.IsNullOrEmpty(me?.Title)) { info.Title = me!.Title!; if (me.TitleSource is { Length: > 0 } ts) info.TitleSource = ts; } } catch { } }
                 continue;
             }
             if (line.Length == 0) continue;
             Entry? e;
             try { e = JsonSerializer.Deserialize<Entry>(line, Json); } catch { continue; }
             if (e is null) continue;
-            if (e.Kind == "meta") { info.Cwd = e.Cwd ?? ""; info.Created = e.Ts; info.WasRunning = e.WasRunning ?? false; if (e.Subagent is { } sub2) info.Subagent = sub2; if (Enum.TryParse<SessionMode>(e.WorkMode, out var wm0)) info.WorkMode = wm0; if (!string.IsNullOrEmpty(e.Title)) info.Title = e.Title; }
-            else if (e.Kind == "title" && !string.IsNullOrEmpty(e.Title)) info.Title = e.Title;
+            if (e.Kind == "meta") { info.Cwd = e.Cwd ?? ""; info.Created = e.Ts; info.WasRunning = e.WasRunning ?? false; if (e.Subagent is { } sub2) info.Subagent = sub2; if (Enum.TryParse<SessionMode>(e.WorkMode, out var wm0)) info.WorkMode = wm0; if (!string.IsNullOrEmpty(e.Title)) info.Title = e.Title; if (e.TitleSource is { Length: > 0 } src0) info.TitleSource = src0; }
+            else if (e.Kind == "title" && !string.IsNullOrEmpty(e.Title)) { info.Title = e.Title; if (e.TitleSource is { Length: > 0 } src1) info.TitleSource = src1; }
             else if (e.Kind == "msg") { hasMsg = true; lastMessage = e.Ts; if (info.Title == "New session" && e.M?.Role == "user") info.Title = TitleFrom(e.M.Content ?? ""); }
         }
         // "updated" is when the last message was written. Appending metadata (title, model, mode, cost) also touches the file,

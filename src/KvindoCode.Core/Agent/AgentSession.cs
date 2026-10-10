@@ -366,7 +366,19 @@ public sealed class AgentSession : IDisposable
         vault.RaiseChanged();
         _redactor = null;
         EmitRaw(new NoticeEvent($"The secret auditor found {stored.Count} secret(s) in tool output — the value(s) were stored in the encrypted vault as {string.Join(", ", replacements)} and only the value was masked in the transcript.", false));
-        return new SecretAuditOutcome(Merge(stored), replacements, null);
+        // Pair each marker with its OWN span before merging. `stored` and `replacements` are built in lockstep, but
+        // Merge may drop nested spans and clip overlapping ones, so passing the original list positionally made
+        // Strip() apply span i's marker to a different value — and `Write` would then expand the wrong credential into
+        // a file. A span with no original partner (a clipped tail) gets the irreversible redaction instead.
+        var pairs = stored.Select((span, i) => (Span: span, Replacement: replacements[i])).ToList();
+        var merged = Merge(stored);
+        var finalReplacements = new List<string>(merged.Count);
+        foreach (var m in merged)
+        {
+            var at = pairs.FindIndex(p => p.Span.Equals(m));
+            finalReplacements.Add(at >= 0 ? pairs[at].Replacement : DeterministicSecretDetector.RedactionText);
+        }
+        return new SecretAuditOutcome(merged, finalReplacements, null);
     }
 
     /// <summary>
@@ -434,14 +446,30 @@ public sealed class AgentSession : IDisposable
         return kept;
     }
 
-    static List<SecretSpan> Merge(IEnumerable<SecretSpan> spans)
+    /// <summary>Keep the outermost spans, with no overlap.</summary>
+    /// <remarks>
+    /// An earlier version dropped ANY span overlapping an already-kept one. For a span that was merely nested that is
+    /// right, but for one that stuck out past the kept span's end it silently discarded the uncovered tail — a
+    /// plaintext fragment of a real secret that then reached the transcript and the model provider while the notice
+    /// said the values had been masked. The tail is now kept as a span of its own. It deliberately carries no
+    /// <see cref="SecretSpan.Name"/> (and not the human's <c>Exact</c> bounds), so callers give it the irreversible
+    /// redaction instead of the first span's reversible marker — two markers for one value would expand to the same
+    /// text twice.
+    /// </remarks>
+    internal static List<SecretSpan> Merge(IEnumerable<SecretSpan> spans)
     {
         var list = spans.OrderBy(s => s.Start).ThenByDescending(s => s.Length).ToList();
         var kept = new List<SecretSpan>();
         var lastEnd = -1;
         foreach (var s in list)
         {
-            if (s.Start < lastEnd) continue;
+            if (s.Start < lastEnd)
+            {
+                if (s.End <= lastEnd) continue;                  // fully covered by the span already kept
+                kept.Add(new SecretSpan(lastEnd, s.End - lastEnd, s.Type, s.Confidence));
+                lastEnd = s.End;
+                continue;
+            }
             kept.Add(s);
             lastEnd = s.End;
         }
@@ -739,7 +767,14 @@ public sealed class AgentSession : IDisposable
             foreach (var tc in m.ToolCalls.Where(t => !answered.Contains(t.Id)))
             {
                 var synth = new ChatMessage { Role = "tool", ToolCallId = tc.Id, Content = "Interrupted before the tool finished.", IsError = true };
-                _history.Add(new Entry { Kind = "msg", M = synth });
+                var entry = new Entry { Kind = "msg", M = synth };
+                // PERSIST it, not just remember it. The in-memory history and the transcript file must stay the same
+                // length: RewindTo passes the history index as the number of entries to KEEP ON DISK, so an in-memory
+                // entry with no file line made the count drift and a later rewind left messages in the file that had
+                // been dropped from memory (they came back on the next open). Idempotent — once written, the tool call
+                // is answered and no new synthetic entry is produced on the next resume.
+                Persist(entry);
+                _history.Add(entry);
                 fixedList.Add(synth);
             }
         }
@@ -1040,7 +1075,7 @@ public sealed class AgentSession : IDisposable
         title = R(title.Trim());
         if (title.Length == 0) return;
         Info.Title = title; Info.TitleSource = source; _titled = true;
-        Persist(new Entry { Kind = "title", Title = title });
+        Persist(new Entry { Kind = "title", Title = title, TitleSource = source });
         SaveMeta();
         EmitRaw(new TitleChangedEvent(title));
     }
@@ -1165,6 +1200,11 @@ public sealed class AgentSession : IDisposable
         LastTurnError = null;                     // a fresh turn starts clean; failures set it in the handler below
         LastProgressTime = DateTime.UtcNow;       // a resumed/old session starts a fresh stall clock
         _activeTaskInterrupted = false;
+        // Both masking counters are PER TURN: the notice says "in this turn", so it has to be able to fire again next
+        // turn. `_maskNoticed` was never reset, so after the first masked value of a session every later turn that
+        // masked something did so silently — the one signal that the transcript differs from what a tool returned.
+        _maskedInTurn = 0;
+        _maskNoticed = false;
         // Remember on disk that a turn is in flight: if the app is closed or killed now, the next start can offer to continue it.
         if (Info.Exists && !Info.WasRunning) { Info.WasRunning = true; SaveMeta(); }
         Emit(new TurnStartEvent());
@@ -1397,8 +1437,14 @@ public sealed class AgentSession : IDisposable
                 }
                 // The secret-audit decorator refuses to send a request and returns this marker with the reason as
                 // its content (AuditingLlmClient.AuditUnavailable). Nothing consumed it, so an auditor outage looked
-                // like a normal answer (audit finding 2.6). Treat it as a failed turn so the caller learns about it.
-                if (res.FinishReason == "audit_failed") return "error";
+                // like a normal answer (audit finding 2.6). Treat it as a failed turn so the caller learns about it —
+                // including the headless runner, which reports the turn's outcome through the exit code and reads
+                // LastTurnError to decide it.
+                if (res.FinishReason == "audit_failed")
+                {
+                    LastTurnError = string.IsNullOrWhiteSpace(res.Content) ? "The secret audit failed; the request was not sent." : res.Content;
+                    return "error";
+                }
                 if (res.FinishReason == "length")
                     Emit(new NoticeEvent("The response was cut off by the output token limit.", true));
                 else if (string.IsNullOrWhiteSpace(res.Content))
@@ -1475,17 +1521,21 @@ public sealed class AgentSession : IDisposable
             try
             {
                 var req = new LlmRequest { SessionId = request.SessionId, AuditSecrets = request.AuditSecrets, Model = model, System = request.System, Messages = request.Messages, Tools = request.Tools, MaxTokens = request.MaxTokens, ReasoningEffort = request.ReasoningEffort };
-                var pendingCallbacks = new List<Action>();
+                // Forwarded LIVE, not queued. The callbacks used to be collected in a list and replayed only after the
+                // call returned, which meant nothing reached the UI (or `partial`, or LastProgressTime) until the whole
+                // answer was finished: the reply appeared in one burst, pressing Esc discarded everything already
+                // generated, and a healthy long answer tripped the "no response for Ns" stall warning. Failover stays
+                // safe without the queue — the `when` filter below only retries a model that produced NO output, so a
+                // partially-streamed attempt is never followed by a second one that would duplicate text.
                 var attemptCallbacks = new LlmCallbacks
                 {
-                    OnText = text => { attemptOutput = true; pendingCallbacks.Add(() => callbacks.OnText?.Invoke(text)); },
-                    OnReasoning = reasoning => { attemptOutput = true; pendingCallbacks.Add(() => callbacks.OnReasoning?.Invoke(reasoning)); },
-                    OnToolCallStart = call => { attemptOutput = true; pendingCallbacks.Add(() => callbacks.OnToolCallStart?.Invoke(call)); },
-                    OnRetry = message => pendingCallbacks.Add(() => callbacks.OnRetry?.Invoke(message)),
-                    OnNotice = message => pendingCallbacks.Add(() => callbacks.OnNotice?.Invoke(message)),
+                    OnText = text => { attemptOutput = true; callbacks.OnText?.Invoke(text); },
+                    OnReasoning = reasoning => { attemptOutput = true; callbacks.OnReasoning?.Invoke(reasoning); },
+                    OnToolCallStart = call => { attemptOutput = true; callbacks.OnToolCallStart?.Invoke(call); },
+                    OnRetry = message => callbacks.OnRetry?.Invoke(message),
+                    OnNotice = message => callbacks.OnNotice?.Invoke(message),
                 };
                 var result = await _llm.StreamAsync(req, attemptCallbacks, ct);
-                foreach (var callback in pendingCallbacks) callback();
                 return (result, model);
             }
             catch (Exception e) when (e is LlmException or HttpRequestException && !ct.IsCancellationRequested && !attemptOutput && !hasOutput())
@@ -1541,6 +1591,10 @@ public sealed class AgentSession : IDisposable
                 if (pre.Blocked) return Result($"Blocked by a PreToolUse hook: {pre.Reason}", true);
             }
             var r = await tool.RunAsync(input, _ctx, ct);
+            // Keep the output BEFORE auditing: the check below asks "did this call produce a secret", and after
+            // stripping the text the value is a marker, so asking the stripped text always answered "no" and the
+            // accompanying image was passed through — the one thing an image cannot be protected from by text masking.
+            var outputBeforeAudit = r.Output;
 
             if (AuditSecretsEnabled && !string.IsNullOrEmpty(r.Output))
             {
@@ -1557,7 +1611,7 @@ public sealed class AgentSession : IDisposable
             if (r.Images is { Count: > 0 } produced)
             {
                 // an image cannot be masked by matching text, so refuse one that came out of a call that produced a value
-                if (!Redactor.IsEmpty && Redactor.Contains(r.Output))
+                if (!Redactor.IsEmpty && Redactor.Contains(outputBeforeAudit))
                     EmitRaw(new NoticeEvent($"{tool.Name} returned an image together with a secret value — the image was dropped rather than risk showing the plaintext in a picture.", false));
                 else lock (_pendingImages) _pendingImages.AddRange(produced);
             }

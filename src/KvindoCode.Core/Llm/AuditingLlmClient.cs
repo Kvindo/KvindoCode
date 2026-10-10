@@ -62,6 +62,7 @@ public sealed class AuditingLlmClient : ILlmClient
         var names = new List<string>();
         var newlyStored = new List<string>();                     // only these are worth a message: they were not in the vault before this request
         var detected = new List<(string Value, string Type)>();
+        var unstorable = new List<string>();                            // values that must still not leave in plaintext
         foreach (var piece in EveryOutboundString(request))
             foreach (var span in DeterministicSecretDetector.Detect(piece))
             {
@@ -106,8 +107,14 @@ public sealed class AuditingLlmClient : ILlmClient
                     // One un-storable value must not abort the whole scan, which is what used to happen: the first
                     // failure returned "could not verify this request" and EVERY other value in the request was
                     // dropped from masking as well (reported 2026-10-04). Skip just this one and say so.
-                    _onNotice?.Invoke($"A detected value could not be stored in the vault and was left as-is ({e.Message}); " +
-                                      "the other values in this request are still masked.");
+                    //
+                    // But "skip" must not mean "send it in plaintext". Previously the value was left out of `names`,
+                    // so ProtectRequest did not touch it and the credential went to the provider while the notice said
+                    // it had been "left as-is". It is now recorded and masked irreversibly below, and the request is
+                    // refused outright if that masking cannot be shown to have worked.
+                    unstorable.Add(value);
+                    _onNotice?.Invoke($"A detected value could not be stored in the vault ({e.Message}); it will be masked " +
+                                      "with an irreversible placeholder and the other values in this request stay masked.");
                 }
             }
             if (names.Count > 0) _vault.RaiseChanged();
@@ -122,12 +129,67 @@ public sealed class AuditingLlmClient : ILlmClient
             if (value.Length > 0 && everything.Contains(value, StringComparison.Ordinal) && !names.Contains(name))
                 names.Add(name);
 
+        // A value that could not be stored cannot be masked by a marker, so it gets the generic irreversible text —
+        // and only then is the request allowed to leave. If the substitution did not actually remove the value from
+        // every outbound string (an awkward value, a shape the replace cannot match), the request is refused instead
+        // of being sent with the credential in it. This is the fail-closed half of the fix above: the old code
+        // reported "left as-is" and sent it.
+        if (unstorable.Count > 0)
+        {
+            request = WithPlainTextRedacted(request, unstorable);
+            var after = EveryOutboundString(request).ToList();
+            foreach (var v in unstorable)
+            {
+                var esc = SecretRedactor.JsonEscape(v);
+                // check the ESCAPED spelling as well: a value with a quote or a newline sits in the arguments JSON in
+                // that form, and a raw-only check would report "gone" while the provider still receives it.
+                if (after.Any(s => s.Contains(v, StringComparison.Ordinal)) || (esc != v && after.Any(s => s.Contains(esc, StringComparison.Ordinal))))
+                    return AuditUnavailable("A secret value could not be stored in the vault and could not be reliably masked.");
+            }
+        }
+
         if (names.Count == 0) return await _inner.StreamAsync(request, callbacks, ct);
 
         // Said once per value: a secret the vault already holds is masked silently on every later request.
         if (newlyStored.Count > 0)
             _onNotice?.Invoke($"Found {newlyStored.Count} new secret(s) in the conversation and replaced them with placeholders ({string.Join(", ", newlyStored)}). Use Write/Edit or Bash to put them back where they belong.");
         return await _inner.StreamAsync(ProtectRequest(request), callbacks, ct);
+    }
+
+    /// <summary>Replace a value that could not be turned into a marker with the irreversible redaction text.</summary>
+    /// <remarks>
+    /// A plain substring replace, deliberately: it either removes the value or matches nothing. It cannot corrupt the
+    /// request the way a JSON-aware rewrite could, and the caller verifies afterwards that no occurrence survived —
+    /// so "it did not match" is caught rather than silently shipped.
+    /// </remarks>
+    static LlmRequest WithPlainTextRedacted(LlmRequest r, IReadOnlyList<string> values)
+    {
+        string Red(string s)
+        {
+            foreach (var v in values) s = s.Replace(v, DeterministicSecretDetector.RedactionText, StringComparison.Ordinal);
+            return s;
+        }
+        // Tool-call arguments are JSON, so a value containing a quote, a backslash or a newline appears there in its
+        // ESCAPED form and a plain replace would miss it. Mask both spellings: the escaped one only in arguments, so
+        // ordinary prose is never rewritten just because it happens to contain backslashes.
+        string RedJson(string s)
+        {
+            foreach (var v in values)
+            {
+                s = s.Replace(v, DeterministicSecretDetector.RedactionText, StringComparison.Ordinal);
+                var esc = SecretRedactor.JsonEscape(v);
+                if (esc != v) s = s.Replace(esc, DeterministicSecretDetector.RedactionText, StringComparison.Ordinal);
+            }
+            return s;
+        }
+        var msgs = r.Messages.Select(m => new ChatMessage
+        {
+            Role = m.Role, Content = Red(m.Content ?? ""), Reasoning = Red(m.Reasoning ?? ""),
+            ToolCalls = m.ToolCalls?.Select(c => new ToolCall { Id = c.Id, Name = c.Name, Arguments = RedJson(c.Arguments) }).ToList(),
+            ToolCallId = m.ToolCallId, IsError = m.IsError, IsSummary = m.IsSummary, IsNotification = m.IsNotification, IsInternal = m.IsInternal,
+            Model = m.Model, Ts = m.Ts, DurationMs = m.DurationMs, Images = m.Images?.ToList(),
+        }).ToList();
+        return new LlmRequest { SessionId = r.SessionId, AuditSecrets = r.AuditSecrets, Model = r.Model, System = Red(r.System), Messages = msgs, Tools = r.Tools, MaxTokens = r.MaxTokens, ReasoningEffort = r.ReasoningEffort };
     }
 
     /// <summary>Every string in the request that reaches the provider: system prompt, all message texts, reasoning, tool-call arguments.</summary>
@@ -159,14 +221,25 @@ public sealed class AuditingLlmClient : ILlmClient
     {
         var sb = new StringBuilder();
         var images = new List<AuditedImage>();
+        // Images from every message that will actually be SENT. A tool-produced picture (a Read of a screenshot, a
+        // Browser capture) rides an INTERNAL carrier message, which `current` below deliberately excludes — so those
+        // images were never shown to the auditor while LlmClient still put them on the wire. The set mirrors BuildBody
+        // exactly: pixels are sent for the two most recent image-bearing messages only. (Scanning everything that
+        // merely HOLDS images would be worse than useless — it would push the whole session's back catalogue through
+        // the local model on every request, and an auditor outage would then refuse a request over a picture that was
+        // never going to leave the machine.) Collected BEFORE the `current is null` early return, which exists to
+        // skip the TEXT scan only.
+        var sent = r.Messages.Where(m => m.Images is { Count: > 0 }).TakeLast(2).ToHashSet();
+        foreach (var m in r.Messages)
+            if (m.Images is { Count: > 0 } carried && sent.Contains(m))
+                for (var i = 0; i < carried.Count; i++) images.Add(new AuditedImage(m, i, carried[i]));
+
         var current = r.Messages.LastOrDefault(m => !m.IsInternal && !m.IsSummary);
         if (current is null) return ("", images);
         if (!string.IsNullOrEmpty(current.Content)) sb.Append(current.Content).Append('\n');
         if (current.ToolCalls is not null)
             foreach (var call in current.ToolCalls)
                 if (!string.IsNullOrEmpty(call.Arguments)) sb.Append(call.Arguments).Append('\n');
-        if (current.Images is { Count: > 0 } currentImages)
-            for (var i = 0; i < currentImages.Count; i++) images.Add(new AuditedImage(current, i, currentImages[i]));
         return (sb.ToString(), images);
     }
 

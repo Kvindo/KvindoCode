@@ -62,7 +62,7 @@ public sealed class NativeStorage : ISessionStorage
     public void SaveMeta(SessionInfo info)
     {
         if (!File.Exists(info.Path)) return;
-        SessionStore.Append(info.Path, new Entry { Kind = "meta", Id = info.Id, Cwd = info.Cwd, Model = info.KvModel ?? info.Model, AuditSecrets = info.AuditSecrets, ModelTag = info.ModelTag, WorkMode = info.WorkMode.ToString(), Title = info.Title, WasRunning = info.WasRunning, Subagent = info.Subagent, Ts = info.Created });
+        SessionStore.Append(info.Path, new Entry { Kind = "meta", Id = info.Id, Cwd = info.Cwd, Model = info.KvModel ?? info.Model, AuditSecrets = info.AuditSecrets, ModelTag = info.ModelTag, WorkMode = info.WorkMode.ToString(), Title = info.Title, TitleSource = info.TitleSource, WasRunning = info.WasRunning, Subagent = info.Subagent, Ts = info.Created });
     }
     public void Delete(SessionInfo info) => SessionStore.Delete(info.Path);
     public void Rewind(SessionInfo info, string? leafUuid, int keepEntries) => SessionStore.Append(info.Path, new Entry { Kind = "rewind", Id = keepEntries.ToString() });

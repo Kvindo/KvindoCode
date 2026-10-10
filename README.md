@@ -54,7 +54,7 @@ Keys: `Enter` send · `Shift+Enter` newline · `Shift+Tab` plan/regular · `Esc`
 
 ## Develop
 ```bash
-dotnet test tests/KvindoCode.Tests      # 783 tests
+dotnet test tests/KvindoCode.Tests      # 796 tests
 python3 tools/update_scores.py      # refresh src/KvindoCode.App/Assets/scores.json
 dotnet run --project src/KvindoCode.App -- /path/to/project
 ```

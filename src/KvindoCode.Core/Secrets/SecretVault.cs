@@ -370,6 +370,10 @@ public sealed class SecretVault
             if (value is not null)
             {
                 if (value.Length == 0) throw new ArgumentException("The new value must not be empty.");
+                // The same guard Create has. Without it an update could store the marker text as the value — the
+                // "hidden twice" corruption that produced vault entries whose value is a placeholder (and that the
+                // false-positive filter exists to find). `Secrets create overwrite=true` routes here too.
+                if (SecretPlaceholders.Contains(value)) throw new ArgumentException("A placeholder cannot be stored as a secret value; resolve it first.");
                 r.Blob = Encrypt(r, value);
                 r.Sha256 = Sha256Hex(value);
                 r.Length = value.Length;
@@ -425,7 +429,11 @@ public sealed class SecretVault
         {
             var res = new List<(string, string)>();
             foreach (var s in _data.Secrets)
-                if (s.Redact && _values.TryGetValue(s.Id, out var v) && v.Length > 6 && !SecretPlaceholders.Contains(v) && !SecretPlaceholders.Contains(s.Name)) res.Add((s.Name, v));
+                // `>= MinLength`, not `> 6`: SecretRedactor masks values of exactly MinLength (6) characters and the
+                // "too short to mask" warning uses the same bound, so a 6-character secret was stored with no warning,
+                // left out of every masking path, and then sent to the provider in plaintext while the notice claimed
+                // the values in the request had been replaced.
+                if (s.Redact && _values.TryGetValue(s.Id, out var v) && v.Length >= SecretRedactor.MinLength && !SecretPlaceholders.Contains(v) && !SecretPlaceholders.Contains(s.Name)) res.Add((s.Name, v));
             return res;
         }
     }

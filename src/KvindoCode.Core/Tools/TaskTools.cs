@@ -36,11 +36,15 @@ public sealed class SchedulePromptTool : Tool
     }
     static TimeSpan? ParseInterval(string raw)
     {
+        // InvariantCulture: the model always writes "2.5m" with a DOT, but on a machine whose locale uses a comma as
+        // the decimal separator (this box is ru-RU) the current-culture overload rejected it and the interval silently
+        // became null ("Invalid interval"), so a perfectly good schedule could not be set.
         raw = raw.Trim().ToLowerInvariant();
-        if (double.TryParse(raw, out var seconds)) return TimeSpan.FromSeconds(seconds >= 5 ? seconds : 0);
+        if (double.TryParse(raw, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var seconds))
+            return TimeSpan.FromSeconds(seconds >= 5 ? seconds : 0);
         if (raw.Length == 0) return null;                       // an empty interval threw IndexOutOfRangeException
         var unit = raw[^1];
-        if (!double.TryParse(raw[..^1], out var n)) return null;
+        if (!double.TryParse(raw[..^1], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var n)) return null;
         TimeSpan? parsed = unit switch { 's' => TimeSpan.FromSeconds(n), 'm' => TimeSpan.FromMinutes(n), 'h' => TimeSpan.FromHours(n), _ => null };
         return parsed is { } t && t >= TimeSpan.FromSeconds(5) ? t : null;
     }

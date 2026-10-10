@@ -20,6 +20,9 @@ public sealed class TranscriptView : UserControl
     readonly StackPanel _stack = new() { Spacing = 14 };
     readonly DispatcherTimer _timer = new() { Interval = TimeSpan.FromMilliseconds(70) };
     readonly Dictionary<string, ToolCard> _tools = new();
+    /// <summary>Tool cards created from a streaming tool-call delta that have not been started yet. Cleared when the
+    /// tool starts, or closed as failed at the end of a turn that never ran them.</summary>
+    readonly HashSet<string> _pendingToolIds = new();
     readonly Dictionary<string, PlanCard> _plans = new();
     readonly Dictionary<string, QuestionCard> _questions = new();
     readonly List<PlanCard> _planOrder = new();
@@ -258,7 +261,16 @@ public sealed class TranscriptView : UserControl
                 _turnWatch.Restart(); _streamChars = 0; _phase = "Working"; _statusBar.IsVisible = true;
                 _glyphPulse?.Cancel(); _glyphPulse = Ui.Pulse(_statusGlyph); UpdateStatus(); break;
             case TurnEndEvent:
-                _statusBar.IsVisible = false; _turnWatch.Stop(); _glyphPulse?.Cancel(); _glyphPulse = null; break;
+                _statusBar.IsVisible = false; _turnWatch.Stop(); _glyphPulse?.Cancel(); _glyphPulse = null;
+                // A tool card is created from the model's streaming tool-call delta (ToolPendingEvent) and closed by
+                // its ToolStart/ToolEnd. If the model call then FAILS and is not retried — which is now possible,
+                // because those callbacks are forwarded live instead of being dropped with the failed attempt — no
+                // start ever arrives and the card would sit there spinning forever. Close any that never started.
+                foreach (var id in _pendingToolIds.ToList())
+                    if (_tools.TryGetValue(id, out var stuck))
+                        stuck.SetResult("The model call failed before this tool ran — it was not executed.", true, 0);
+                _pendingToolIds.Clear();
+                break;
             case UserMessageEvent u: CloseText(); Add(UserBubble(u.Text, u.HistoryIndex)); _lastMsgTs = DateTimeOffset.UtcNow; _stick = true; ScrollToEndSoon(); break;
             case TextDeltaEvent t:
                 if (_text is null)
@@ -275,7 +287,7 @@ public sealed class TranscriptView : UserControl
             case ToolPendingEvent p:
                 // do NOT close the text block here — the model may still be streaming text alongside the tool call
                 if (!_tools.ContainsKey(p.Id) && p.Name is not "ExitPlanMode" and not "AskUserQuestion" and not "TodoWrite")
-                { var c = NewToolCard(p.Id, p.Name); _tools[p.Id] = c; Add(c); }
+                { var c = NewToolCard(p.Id, p.Name); _tools[p.Id] = c; _pendingToolIds.Add(p.Id); Add(c); }
                 break;
             case ToolStartEvent s: CloseText(); EndThinking(); OnToolStart(s); SetPhase(s.Name switch { "ExitPlanMode" => "Waiting for your approval", "AskUserQuestion" => "Waiting for your answer", _ => "Running " + s.Name }); break;
             case ToolEndEvent d: OnToolEnd(d); SetPhase("Working"); break;
@@ -297,6 +309,7 @@ public sealed class TranscriptView : UserControl
     void OnToolStart(ToolStartEvent s)
     {
         CloseText(); EndThinking();
+        _pendingToolIds.Remove(s.Id);            // it started, so it is no longer an unresolved card
         if (s.Name == "ExitPlanMode")
         {
             var plan = (string?)s.Input?["plan"] ?? "";
@@ -329,6 +342,7 @@ public sealed class TranscriptView : UserControl
 
     void OnToolEnd(ToolEndEvent d)
     {
+        _pendingToolIds.Remove(d.Id);
         if (_plans.TryGetValue(d.Id, out var pc)) { pc.SetOutcome(d.Output, d.IsError); return; }
         if (_questions.TryGetValue(d.Id, out var qc)) { qc.SetOutcome(); return; }
         if (_tools.TryGetValue(d.Id, out var tc)) tc.SetResult(d.Output, d.IsError, d.DurationMs);

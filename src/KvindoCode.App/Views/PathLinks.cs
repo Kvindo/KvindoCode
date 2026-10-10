@@ -39,7 +39,11 @@ public static class PathLinks
         public bool Wired;
     }
 
-    static readonly Dictionary<Control, Map> Maps = new();
+    /// <summary>
+    /// Which registered spans a point falls on, or an empty result when the control has no map.
+    /// </summary>
+    /// <remarks>A WEAK table on purpose — see the comment on <see cref="Maps"/>; a strong one pinned every control.</remarks>
+    static readonly System.Runtime.CompilerServices.ConditionalWeakTable<Control, Map> Maps = new();
 
     /// <summary>Characters that end a path when they are the last one in a token (prose or list punctuation).</summary>
     const string TrailingJunk = ".,;:)]}>\"'`[(";
@@ -58,7 +62,7 @@ public static class PathLinks
             return;
         }
 
-        var map = Maps.TryGetValue(host, out var existing) ? existing : (Maps[host] = new Map());
+        if (!Maps.TryGetValue(host, out var map)) { map = new Map(); Maps.Add(host, map); }
         map.Spans.Clear();
         map.OnClick = onClick;
         foreach (var (tokStart, len) in Tokens(text))
@@ -183,21 +187,21 @@ public static class PathLinks
     }
 
     /// <summary>True when the pointer was over a registered path: the callback runs and the event should be handled.</summary>
+    /// <remarks>
+    /// Uses the SAME hit test as the cursor shape (<see cref="SpanAtPoint"/> → <see cref="SpanIndexAt"/>). It used to do
+    /// its own <c>HitTestPoint</c> call and bail on <c>!IsInside</c>, which is the very flag proven wrong elsewhere in
+    /// this file — so a path in a plain block (tool output, fenced code, a user bubble) lit the hand cursor and then did
+    /// nothing on press. Routing both through one function is what keeps "looks clickable" and "is clickable" in step.
+    /// </remarks>
     static bool TryClick(SelectableTextBlock host, PointerEventArgs e, Action<string, int?>? onClick)
     {
-        if (!Maps.TryGetValue(host, out var map) || map.Spans.Count == 0) return false;
         if (onClick is null) return false;
+        if (!Maps.TryGetValue(host, out var map) || map.Spans.Count == 0) return false;
         // SelectableTextBlock renders its own text (no TextPresenter inside): use its public TextLayout.
         if (host.TextLayout is not { } layout) return false;
-        var hit = layout.HitTestPoint(e.GetPosition(host));
-        if (!hit.IsInside) return false;
-        foreach (var s in map.Spans)
-            if (hit.TextPosition >= s.Start && hit.TextPosition < s.Start + s.Length)
-            {
-                onClick(s.Full, s.Line);
-                return true;
-            }
-        return false;
+        if (SpanAtPoint(layout, e.GetPosition(host), map.Spans) is not { } span) return false;
+        onClick(span.Full, span.Line);
+        return true;
     }
 
     /// <summary>For tests: is the character at this offset inside a clickable path?</summary>

@@ -41,7 +41,9 @@ public static class UrlLinks
         public bool Wired;
     }
 
-    static readonly Dictionary<Control, Map> Maps = new();
+    /// <summary>Recorded URLs per host control. WEAK on purpose: a strong map pinned every control that ever showed a
+    /// link, so the transcript's blocks (dropped and recreated as text streams) could never be collected.</summary>
+    static readonly System.Runtime.CompilerServices.ConditionalWeakTable<Control, Map> Maps = new();
 
     /// <summary>
     /// Record one URL at a known offset (the markdown renderer already knows where it put it) and make sure the host
@@ -55,7 +57,7 @@ public static class UrlLinks
     /// </remarks>
     public static void Add(SelectableTextBlock host, int start, int length, string url, Action<string>? open = null)
     {
-        if (!Maps.TryGetValue(host, out var map)) { map = new Map(); Maps[host] = map; }
+        if (!Maps.TryGetValue(host, out var map)) { map = new Map(); Maps.Add(host, map); }
         map.OnClick ??= open ?? Shell.Open;
         if (map.Spans.Any(s => s.Start == start && s.Length == length)) return;
         map.Spans.Add(new Span(start, length, url));
@@ -72,7 +74,7 @@ public static class UrlLinks
             return;
         }
 
-        var map = Maps.TryGetValue(host, out var existing) ? existing : (Maps[host] = new Map());
+        if (!Maps.TryGetValue(host, out var map)) { map = new Map(); Maps.Add(host, map); }
         map.Spans.Clear();
         map.OnClick = open;
         int i = 0;

@@ -76,8 +76,29 @@ public sealed class ProjectContext
         if (lines.Length > MemoryIndexMaxLines)
             text = string.Join('\n', lines.Take(MemoryIndexMaxLines)) + $"\n… (truncated: MEMORY.md has {lines.Length} lines, only the first {MemoryIndexMaxLines} are loaded — keep the index terse)";
         if (Encoding.UTF8.GetByteCount(text) > MemoryIndexMaxBytes)
-            text = text[..Math.Min(text.Length, MemoryIndexMaxBytes)] + "\n… (truncated by size)";
+            text = TruncateToBytes(text, MemoryIndexMaxBytes) + "\n… (truncated by size)";
         MemoryIndex = text;
+    }
+
+    /// <summary>Cut a string so its UTF-8 form fits in <paramref name="maxBytes"/>.</summary>
+    /// <remarks>
+    /// The size guard counts BYTES but the slice used to take CHARACTERS, so a Cyrillic index (2 bytes per character)
+    /// could still reach twice the ceiling after "truncating", and an index that was under the character limit but
+    /// over the byte limit passed through untouched — into the system prompt on every request. Counting bytes on both
+    /// sides is what makes the limit mean what it says.
+    /// </remarks>
+    static string TruncateToBytes(string text, int maxBytes)
+    {
+        if (Encoding.UTF8.GetByteCount(text) <= maxBytes) return text;
+        int lo = 0, hi = text.Length;
+        while (lo < hi)
+        {
+            int mid = (lo + hi + 1) / 2;
+            if (Encoding.UTF8.GetByteCount(text, 0, mid) <= maxBytes) lo = mid; else hi = mid - 1;
+        }
+        // never cut between the two halves of a surrogate pair: a lone surrogate is not valid text
+        if (lo > 0 && char.IsHighSurrogate(text[lo - 1])) lo--;
+        return text[..lo];
     }
 
     public IEnumerable<string> MemoryFiles() =>

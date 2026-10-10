@@ -53,7 +53,8 @@ public sealed class SecretRedactor
     }
 
     /// <summary>The value as it appears inside a JSON string (quotes/newlines escaped by the model's serializer).</summary>
-    static string JsonEscape(string value) => value.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\n", "\\n").Replace("\r", "\\r").Replace("\t", "\\t");
+    /// <summary>internal so the outbound fail-closed path can mask a value in its JSON-ESCAPED form too.</summary>
+    internal static string JsonEscape(string value) => value.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\n", "\\n").Replace("\r", "\\r").Replace("\t", "\\t");
 
     /// <summary>True when something was replaced; <paramref name="safe"/> then holds the masked text.</summary>
     public bool TryRedact(string? text, out string safe)

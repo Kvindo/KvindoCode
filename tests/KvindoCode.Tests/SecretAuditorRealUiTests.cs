@@ -2246,41 +2246,51 @@ public sealed class SecretAuditorRealUiTests
     [AvaloniaFact]
     public void The_secrets_window_can_filter_to_entries_that_look_like_false_positives()
     {
-        using (new Sandbox())
+        using (var sb = new Sandbox())
         {
-            SecretVault @default = SecretVault.Default;
+            // A vault of THIS test's own, installed and then restored. It used the ambient SecretVault.Default, which
+            // is a process-wide static: whichever test ran before it left its entries there, so the expected count of
+            // 4 drifted (seen as 13 and as 5) depending on ordering — this test passed alone and failed in a full run
+            // (2026-10-09). SecretsWindow reads Default, so installing ours is what makes the count deterministic.
+            var previous = SecretVault.Default;
+            var @default = new SecretVault(System.IO.Path.Combine(sb.Home, "secrets.vault.json"), System.IO.Path.Combine(sb.Home, "secrets.key"));
             @default.Unlock();
-            @default.Set("prod-db-password", "Hq72-Lm9x-Pw40-Zr31-Qw88", "prod Postgres");
-            @default.Set("audited-token-aaaa", "abc12", "from the old auditor");
-            @default.Set("audited-password-bbbb", "correcthorsebattery", "from the old auditor");
-            @default.Set("audited-token-cccc", string.Join("\n", Enumerable.Repeat("line of a tool output that is not a secret", 4)), "whole output");
-            SecretsWindow win = ShowSecretsWindow();
-            Assert.Equal(4, SuspectTitles().Length);
-            Assert.Contains("look like false positives", Find<TextBlock>("SecretSearchInfo").Text ?? "");
-            Find<CheckBox>("SecretSuspectsOnly").IsChecked = true;
-            Dispatcher.UIThread.RunJobs();
-            string[] array = SuspectTitles();
-            // the value that is only an ordinary word ("abc12" is 5 chars, still flagged; the 19-char
-            // "correcthorsebattery" is not) — what matters is that the real password is never in the list
-            Assert.DoesNotContain("prod-db-password", (IEnumerable<string>)array);
-            Assert.Contains("audited-token-cccc", (IEnumerable<string>)array);
-            Assert.Contains(win.GetVisualDescendants().OfType<TextBlock>(), (Predicate<TextBlock>)((TextBlock t) => (t.Text ?? "").Contains("possibly a false positive")));
-            Assert.NotEmpty(from b in win.GetVisualDescendants().OfType<Button>()
-                where b.Name == "MoveToNonSecret"
-                select b);
-            win.Close();
-            T Find<T>(string name) where T : notnull, Control
+            SecretVault.Default = @default;
+            try
             {
-                string name2 = name;
-                return win.GetVisualDescendants().OfType<T>().First((T c) => c.Name == name2);
+                @default.Set("prod-db-password", "Hq72-Lm9x-Pw40-Zr31-Qw88", "prod Postgres");
+                @default.Set("audited-token-aaaa", "abc12", "from the old auditor");
+                @default.Set("audited-password-bbbb", "correcthorsebattery", "from the old auditor");
+                @default.Set("audited-token-cccc", string.Join("\n", Enumerable.Repeat("line of a tool output that is not a secret", 4)), "whole output");
+                SecretsWindow win = ShowSecretsWindow();
+                Assert.Equal(4, SuspectTitles().Length);
+                Assert.Contains("look like false positives", Find<TextBlock>("SecretSearchInfo").Text ?? "");
+                Find<CheckBox>("SecretSuspectsOnly").IsChecked = true;
+                Dispatcher.UIThread.RunJobs();
+                string[] array = SuspectTitles();
+                // the value that is only an ordinary word ("abc12" is 5 chars, still flagged; the 19-char
+                // "correcthorsebattery" is not) — what matters is that the real password is never in the list
+                Assert.DoesNotContain("prod-db-password", (IEnumerable<string>)array);
+                Assert.Contains("audited-token-cccc", (IEnumerable<string>)array);
+                Assert.Contains(win.GetVisualDescendants().OfType<TextBlock>(), (Predicate<TextBlock>)((TextBlock t) => (t.Text ?? "").Contains("possibly a false positive")));
+                Assert.NotEmpty(from b in win.GetVisualDescendants().OfType<Button>()
+                    where b.Name == "MoveToNonSecret"
+                    select b);
+                win.Close();
+                T Find<T>(string name) where T : notnull, Control
+                {
+                    string name2 = name;
+                    return win.GetVisualDescendants().OfType<T>().First((T c) => c.Name == name2);
+                }
+                string[] SuspectTitles()
+                {
+                    return (from t in win.GetVisualDescendants().OfType<TextBlock>()
+                        select t.Text ?? "" into t
+                        where t.StartsWith("audited-") || t == "prod-db-password"
+                        select t).ToArray();
+                }
             }
-            string[] SuspectTitles()
-            {
-                return (from t in win.GetVisualDescendants().OfType<TextBlock>()
-                    select t.Text ?? "" into t
-                    where t.StartsWith("audited-") || t == "prod-db-password"
-                    select t).ToArray();
-            }
+            finally { SecretVault.Default = previous; }
         }
     }
 

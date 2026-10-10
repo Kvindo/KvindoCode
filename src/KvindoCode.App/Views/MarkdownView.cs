@@ -243,7 +243,7 @@ public sealed partial class MarkdownView : StackPanel
     {
         var t = new SelectableTextBlock { TextWrapping = TextWrapping.Wrap, FontSize = size ?? BaseSize };
         t.LineHeight = (size ?? BaseSize) * 1.55;
-        _pathMaps[t] = new PathMap();
+        _pathMaps.Add(t, new PathMap());
         // clickable paths are detected from the text itself, so the paragraph stays one selectable/copyable run
         t.AddHandler(InputElement.PointerPressedEvent, (_, e) => { if (TryPathClick(t, e)) e.Handled = true; },
                      RoutingStrategies.Tunnel, handledEventsToo: true);
@@ -597,7 +597,9 @@ public sealed partial class MarkdownView : StackPanel
     /// confused by several paragraphs or by merged blocks, and reset whenever the block is re-rendered.</summary>
     sealed class PathMap { public readonly List<PathSpan> Spans = new(); }
 
-    static readonly Dictionary<Control, PathMap> _pathMaps = new();
+    /// <summary>WEAK on purpose: a strong map pinned every text block the view ever created, including the ones dropped
+    /// as a streaming message re-renders — the map must not keep a control alive.</summary>
+    static readonly System.Runtime.CompilerServices.ConditionalWeakTable<Control, PathMap> _pathMaps = new();
 
     static int PlainLength(InlineCollection inlines) => inlines.Sum(i => i switch
     {
@@ -675,8 +677,9 @@ public sealed partial class MarkdownView : StackPanel
     public IEnumerable<(int Start, int Length, string Full)> PathSpansOf(Control host)
         => _pathMaps.TryGetValue(host, out var m) ? m.Spans.Select(s => (s.Start, s.Length, s.Full)) : Enumerable.Empty<(int, int, string)>();
 
-    /// <summary>How many clickable paths this view has registered (for tests).</summary>
-    public int PathSpanCount => _pathMaps.Values.Sum(m => m.Spans.Count);
+    /// <summary>For tests: total registered path spans. The table is weak, so enumerate it (enumeration does not keep
+    /// the controls alive, which is the point of using it rather than a Dictionary).</summary>
+    public int PathSpanCount { get { var n = 0; foreach (var kv in _pathMaps) n += kv.Value.Spans.Count; return n; } }
 
     /// <summary>True when the pointer is over a clickable path; sets it and marks the event handled.</summary>
     internal bool TryPathClick(SelectableTextBlock host, PointerEventArgs e)

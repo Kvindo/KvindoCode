@@ -39,7 +39,7 @@ public sealed class TelegramTool : Tool
       "wait":{"type":"integer","description":"read: seconds to long-poll for new messages (0 = return what is there now, max 50)"},
       "limit":{"type":"integer","description":"read: at most this many messages (1-100)"},
       "mark_read":{"type":"boolean","description":"read: advance the saved offset so these messages are not returned again (default true)"},
-      "link_preview":{"type":"boolean","description":"send: show a link preview (default false, which Telegram treats as a silent message)"}},
+      "link_preview":{"type":"boolean","description":"send: show a link preview for the first URL in the text. Omitting it leaves Telegram's default (a preview is shown); false disables it."}},
      "required":["action"]}
     """)!;
 
@@ -118,7 +118,11 @@ public sealed class TelegramTool : Tool
         if (StrOpt(input, "parse_mode") is { Length: > 0 } pm) body["parse_mode"] = pm;
         if (IntOpt(input, "reply_to_message_id") is { } reply) body["reply_to_message_id"] = reply;
         if (Bool(input, "silent")) body["disable_notification"] = true;
-        if (Bool(input, "link_preview")) body["link_preview_options"] = new JsonObject { ["is_disabled"] = false };
+        // Telegram shows a preview by default, so a `false` must be SENT as is_disabled=true. Only turning it ON when
+        // the flag was true meant the flag could never suppress a preview — a no-op in the one direction a caller
+        // would reach for it. Sending the option only when the argument is present keeps the API default otherwise.
+        if (input["link_preview"] is not null)
+            body["link_preview_options"] = new JsonObject { ["is_disabled"] = !Bool(input, "link_preview") };
         var sent = await client.CallAsync("sendMessage", body, ct);
         return ToolResult.Ok($"Sent to {ChatLabel(sent["result"])}.\n{Describe("Message", sent["result"])}");
     }

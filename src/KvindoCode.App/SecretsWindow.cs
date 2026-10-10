@@ -171,6 +171,18 @@ public sealed class SecretsWindow : Window
     }
 
     /// <summary>
+    /// Whether the "looks like a false positive" bulk action may offer an entry for deletion.
+    /// </summary>
+    /// <remarks>
+    /// A value that could not be decrypted is reported as <c>Suspicious</c> with the reason "no value could be
+    /// decrypted" — that is "cannot classify", not "not a secret". Offering those for a one-confirmation bulk delete
+    /// turned a missing key or a locked vault into a button that erases every entry in the vault (and each delete
+    /// overwrites the single <c>.bak</c>, so it is not recoverable). Only a readable value can be judged at all.
+    /// </remarks>
+    public static bool IsPurgeable(string? decryptedValue, KvindoCode.Core.Secrets.SecretShapes.Verdict verdict)
+        => decryptedValue is not null && verdict.Suspicious;
+
+    /// <summary>
     /// Walk every entry the classifier describes as a false positive, list them, and delete only the ones the human
     /// confirms — after showing the reason for each. Nothing is deleted without an explicit yes, and a real short
     /// secret that happens to look suspicious is one "No" away from surviving.
@@ -179,10 +191,20 @@ public sealed class SecretsWindow : Window
     {
         var suspects = _vault.List()
             .Select(r => (Record: r, Value: _vault.Reveal(r.Name, out _), Verdict: KvindoCode.Core.Secrets.SecretShapes.Describe(_vault.Reveal(r.Name, out _))))
-            .Where(x => x.Verdict.Suspicious)
+            // Only entries whose value actually decrypted. Describe() calls an undecryptable value "suspicious" (it
+            // cannot classify what it cannot read), so with a missing key or a locked vault EVERY entry would qualify
+            // and "Delete all" would wipe the whole vault — the exact opposite of the intent, and unrecoverable
+            // because each delete overwrites the single .bak.
+            .Where(x => IsPurgeable(x.Value, x.Verdict))
             .OrderBy(x => x.Record.Name, StringComparer.OrdinalIgnoreCase)
             .ToList();
-        if (suspects.Count == 0) { Info("No entry looks like a false positive."); return; }
+        if (suspects.Count == 0)
+        {
+            Info(_vault.List().Count > 0 && _vault.List().All(r => _vault.Reveal(r.Name, out _) is null)
+                ? "Nothing can be checked for false positives: no value in the vault could be decrypted with the current key."
+                : "No entry looks like a false positive.");
+            return;
+        }
 
         var lines = suspects.Take(25).Select(x => $"  • {x.Record.Name} — {x.Verdict.Reason}").ToList();
         if (suspects.Count > 25) lines.Add($"  …and {suspects.Count - 25} more");
