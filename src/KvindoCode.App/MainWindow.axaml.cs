@@ -178,13 +178,16 @@ public partial class MainWindow : Window
         WorkspaceBtn.Click += async (_, _) =>
         {
             if (_current is null) return;
-            var cmd = _current.Session.MergeCommand();
-            if (cmd.Length == 0) { ShowInfo("This session works directly in the project folder (not isolated)."); return; }
+            var cmds = _current.Session.MergeCommands();
+            if (cmds.Count == 0) { ShowInfo("This session works directly in the project folder (not isolated)."); return; }
+            var cmd = string.Join("\n", cmds);
             try
             {
                 var cb = TopLevel.GetTopLevel(this)?.Clipboard;
                 if (cb != null) await cb.SetTextAsync(cmd);
-                ShowInfo("Merge command on the clipboard: " + cmd);
+                ShowInfo(cmds.Count == 1
+                    ? "Merge command on the clipboard: " + cmd
+                    : $"{cmds.Count} merge commands on the clipboard (one per repository this session touched).");
             }
             catch (Exception e) { ShowError("Could not use the clipboard: " + e.Message); }
         };
@@ -513,7 +516,7 @@ public partial class MainWindow : Window
     /// covers an app killed before it could). Only a clean, not-ahead worktree is removed, and its branch is kept.</summary>
     void PruneWorktrees(string root)
     {
-        if (!_settings.IsolateSessions || !Workspaces.CanIsolate(root)) return;
+        if (!_settings.IsolateSessions) return;
         var ids = new HashSet<string>(_storage.ListAll().Select(x => x.Id), StringComparer.Ordinal);
         try { Workspaces.Prune(root, id => !ids.Contains(id)); } catch { }
     }
@@ -2075,7 +2078,17 @@ public partial class MainWindow : Window
         if (s is null) { WorkspaceBtn.IsVisible = false; return; }
         WorkspaceBtn.IsVisible = true;
         var shortId = s.Info.Id.Length > 8 ? s.Info.Id[..8] : s.Info.Id;
-        if (s.IsIsolated)
+        // A container-of-repos project has one worktree PER repo, not one for the project, so the chip counts them
+        // instead of naming a single branch. Until a repo is actually touched there is nothing protected yet.
+        if (s.Workspace is { Mirrored: true } mirror && mirror.RepoCount > 0)
+        {
+            var repos = mirror.Repos.Select(r => Path.GetFileName(r.RepoRoot)).ToList();
+            WorkspaceBtn.Content = new TextBlock { Text = $"⑂ {repos.Count} repo{(repos.Count == 1 ? "" : "s")}", FontSize = 12 };
+            ToolTip.SetTip(WorkspaceBtn, "Isolated: this project is a folder OF repositories, and this session edits its own worktree in each one it touches " +
+                                         "(branch kv/" + shortId + "):\n" + string.Join("\n", repos) +
+                                         "\nThe project checkouts are untouched. Click to copy the merge command(s).");
+        }
+        else if (s.IsIsolated)
         {
             WorkspaceBtn.Content = new TextBlock { Text = "⑂ kv/" + shortId, FontSize = 12 };
             ToolTip.SetTip(WorkspaceBtn, "Isolated: this session edits its own git worktree (branch kv/" + shortId + "). The project folder is untouched. Click to copy the merge command.");
@@ -2083,7 +2096,9 @@ public partial class MainWindow : Window
         else
         {
             WorkspaceBtn.Content = new TextBlock { Text = "shared tree", FontSize = 12, Opacity = 0.6 };
-            ToolTip.SetTip(WorkspaceBtn, "Not isolated: this session edits the project folder directly (not a git repo, or no commit yet).");
+            ToolTip.SetTip(WorkspaceBtn, s.Workspace is { Mirrored: true }
+                ? "This project is a folder of repositories; this session has not written into one yet, so nothing is isolated so far. It edits the project folder directly for loose files."
+                : "Not isolated: this session edits the project folder directly (not a git repo, or no commit yet).");
         }
     }
 

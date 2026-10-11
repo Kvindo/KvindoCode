@@ -138,6 +138,7 @@ public sealed class SettingsAndNotifierTests
     public void The_native_popup_runs_when_there_is_no_hook()
     {
         using var sb = new Sandbox();
+        using var notifyOn = new NotifyOptIn();     // asserts that a real notifier process is started
         var marker = Path.Combine(sb.Root, "popped");
         var script = MakeNotifier(sb, marker);
         var s = sb.Settings(x => { x.NotificationSounds = true; x.NativeBeep = false; x.NotificationDesktop = true; x.NotificationDesktopCommand = script; });

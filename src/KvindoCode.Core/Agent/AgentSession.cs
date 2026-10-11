@@ -610,6 +610,10 @@ public sealed class AgentSession : IDisposable
     public string WorkDir => _ctx.Cwd;
     /// <summary>Set by a subagent's parent so the child shares the parent's worktree instead of making its own.</summary>
     readonly string? _workDirOverride;
+    /// <summary>Set by a subagent's parent so the child shares the parent's WHOLE workspace (its per-repo map).</summary>
+    readonly SessionWorkspace? _inheritWorkspace;
+    /// <summary>The workspace this session settled on, once <c>EnsureWorkspaceAsync</c> has run.</summary>
+    SessionWorkspace? _ws;
     bool _workspaceReady;
     /// <summary>Generate an AI title after the first completed turn (UI sets this; tests leave it off).</summary>
     public bool AutoTitle { get; set; }
@@ -640,12 +644,14 @@ public sealed class AgentSession : IDisposable
     }
 
     public AgentSession(AppSettings settings, ILlmClient llm, string projectCwd, IUserInteraction interaction,
-                        SessionInfo? info = null, ISessionStorage? storage = null, string? workDirOverride = null)
+                        SessionInfo? info = null, ISessionStorage? storage = null, string? workDirOverride = null,
+                        SessionWorkspace? inheritWorkspace = null)
     {
         _settings = settings;
         _llm = llm;
         projectCwd = Path.GetFullPath(projectCwd);
         _workDirOverride = workDirOverride;
+        _inheritWorkspace = inheritWorkspace;
         Storage = storage ?? SessionStorage.Default;
         Info = info ?? Storage.Create(projectCwd, ResolveConfiguredDefaultModel(settings));
         Project = ProjectContext.Load(projectCwd, settings);
@@ -687,13 +693,18 @@ public sealed class AgentSession : IDisposable
         try
         {
             SessionWorkspace ws;
-            if (_workDirOverride is { Length: > 0 } wd && Directory.Exists(wd))
-                ws = new SessionWorkspace(Project.Cwd, wd, null, true);   // share the parent session's worktree
+            if (_inheritWorkspace is { } shared)                        // a subagent: share the parent's whole map
+                ws = shared;
+            else if (_workDirOverride is { Length: > 0 } wd && Directory.Exists(wd))
+                ws = new SessionWorkspace(Project.Cwd, wd, null, true);   // legacy single-tree override
             else if (!_settings.IsolateSessions)
                 ws = SessionWorkspace.Shared(Project.Cwd);
             else
                 ws = await Task.Run(() => Workspaces.Ensure(Project.Cwd, Info.Id, _settings), ct);
 
+            _ws = ws;
+            _ctx.Workspace = ws;
+            _ctx.SessionId = Info.Id;
             _ctx.WorkDir = ws.WorkDir;
             _ctx.Isolated = ws.Isolated;
             _ctx.Cwd = ws.WorkDir;
@@ -715,8 +726,20 @@ public sealed class AgentSession : IDisposable
         return Workspaces.Forget(Project.Cwd, Info.Id, out reason);
     }
 
-    /// <summary>The command that merges this session's work into the project. Empty when the session is not isolated.</summary>
-    public string MergeCommand() => IsIsolated ? Workspaces.MergeCommand(new SessionWorkspace(Project.Cwd, _ctx.Cwd, Workspaces.BranchFor(Info.Id), true)) : "";
+    /// <summary>The command(s) that merge this session's work into the project(s). Empty when not isolated.</summary>
+    public string MergeCommand()
+    {
+        if (_ws is { } ws && (ws.HasRootWorktree || ws.RepoCount > 0)) return Workspaces.MergeCommand(ws);
+        return IsIsolated ? Workspaces.MergeCommand(new SessionWorkspace(Project.Cwd, _ctx.Cwd, Workspaces.BranchFor(Info.Id), true)) : "";
+    }
+
+    /// <summary>One merge command per repo this session touched (a container-of-repos project has several).</summary>
+    public IReadOnlyList<string> MergeCommands() => _ws is { } ws && ws.RepoCount > 0
+        ? Workspaces.MergeCommands(ws)
+        : (IsIsolated && MergeCommand() is { Length: > 0 } one ? new[] { one } : Array.Empty<string>());
+
+    /// <summary>The session's workspace once it is known (null before the first turn's <c>EnsureWorkspaceAsync</c>).</summary>
+    public SessionWorkspace? Workspace => _ws;
 
     /// <summary>Release this session's workspace resources (nothing persistent to free; the worktree stays for the user to merge).</summary>
     public void ReleaseWorkspace() => _workspaceReady = false;

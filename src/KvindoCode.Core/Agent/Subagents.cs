@@ -74,7 +74,10 @@ public sealed class SubagentManager : IDisposable
             {
                 using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, h.Cts.Token);
                 using var child = new AgentSession(_parent.Settings, _parent.Llm, _parent.Project.Cwd, _parent.Interaction, null, _parent.Storage,
-                                                   workDirOverride: _parent.IsIsolated ? _parent.WorkDir : null)
+                                                   workDirOverride: _parent.IsIsolated ? _parent.WorkDir : null,
+                                                   // the parent's whole workspace, so a mirrored session's child writes into the
+                                                   // SAME per-repo worktrees instead of materialising its own copies
+                                                   inheritWorkspace: _parent.Workspace)
                 {
                     AutoTitle = false, ModelLookup = _parent.ModelLookup, Auditor = _parent.Auditor, IsChild = true,
                 };

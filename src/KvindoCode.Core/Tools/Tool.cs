@@ -28,10 +28,93 @@ public sealed class ToolContext
     /// <summary>The directory the session's tools may write into (its worktree). Empty when not isolated.</summary>
     public string WorkDir { get; set; } = "";
 
+    /// <summary>
+    /// The session's workspace, when it has one. This is what makes a project that is a CONTAINER of repositories
+    /// work: the root is not a repo, so there is no single worktree — the session's <see cref="WorkDir"/> is a mirror
+    /// holding one worktree per repo, and <see cref="MapWrite"/> places a target in the right one. Null means "no
+    /// mapping" and the guards below behave exactly as before.
+    /// </summary>
+    public SessionWorkspace? Workspace { get; set; }
+
     public string Resolve(string path)
     {
         path = Paths.Expand(path.Trim());
         return Path.GetFullPath(Path.IsPathRooted(path) ? path : Path.Combine(Cwd, path));
+    }
+
+    /// <summary>
+    /// The REAL project path for a path the model named, whichever tree it resolved into: the session's visible root
+    /// (<see cref="Cwd"/>, which for a mirrored session is the mirror) or the project root (an absolute path copied out
+    /// of a Read result). This is the input to the mapping and the key the read tracker uses, so "Read then Write" is
+    /// one file even when the read came from the real checkout and the write goes to the worktree.
+    /// </summary>
+    public string Canonical(string full)
+    {
+        full = Path.GetFullPath(full);
+        if (Workspace is not { Mirrored: true } ws) return full;
+        if (Paths.IsUnder(full, ws.WorkDir)) return Path.GetFullPath(Path.Combine(ws.Root, Path.GetRelativePath(ws.WorkDir, full)));
+        return full;
+    }
+
+    /// <summary>
+    /// Where a READ of <paramref name="path"/> actually goes. A file inside a nested repo may be read straight from the
+    /// real checkout (cheap, always current, and reading must never create a worktree); once the session has a worktree
+    /// for that repo, its own copy is the truth — falling back to the real file when the file is untracked and present
+    /// only there.
+    /// </summary>
+    public string MapRead(string path)
+    {
+        if (Workspace is not { Mirrored: true } ws) return path;
+        var real = Canonical(path);
+        if (Workspaces.FindEnclosingRepo(real, ws.Root, out var isWorktree) is not { } repo) return real;   // loose file
+        if (isWorktree) return real;                                   // a linked worktree inside the project: read as-is
+        if (ws.RepoFor(repo) is not { } link) return real;             // not materialised: reading creates nothing
+        var sessionCopy = Path.Combine(link.SessionPath, Path.GetRelativePath(repo, real));
+        return File.Exists(sessionCopy) ? sessionCopy : real;
+    }
+
+    /// <summary>
+    /// Where a WRITE of <paramref name="path"/> goes, or an error when it must be refused.
+    /// </summary>
+    /// <remarks>
+    /// A file inside a nested repo is written into that repo's session worktree, created on demand. A repo that cannot
+    /// be isolated is REFUSED — falling back to the shared checkout is precisely the bug this exists to fix. A file
+    /// that belongs to no repo (a loose file of the container, or anything outside the project) is written in place,
+    /// which the caller marks with a notice.
+    /// </remarks>
+    public string? MapWrite(string path, out string? error)
+    {
+        error = null;
+        if (Workspace is not { Mirrored: true } ws) return path;
+        var real = Canonical(path);
+        var repo = Workspaces.FindEnclosingRepo(real, ws.Root, out var isWorktree);
+        if (repo is null)
+        {
+            if (isWorktree)
+            {
+                error = $"Refused: {real} is inside a linked git worktree of the project, which a session cannot work in " +
+                        "(a worktree cannot contain another worktree). Open that checkout as its own project instead.";
+                return null;
+            }
+            return real;                                               // a loose file: edited in place
+        }
+        var link = Workspaces.EnsureRepo(ws, repo, SessionId, out var why);
+        if (link is null) { error = "Refused: " + why; return null; }
+        return Path.Combine(link.SessionPath, Path.GetRelativePath(repo, real));
+    }
+
+    /// <summary>The session id, for naming the worktree branch. Set alongside <see cref="Workspace"/>.</summary>
+    public string SessionId { get; set; } = "";
+
+    /// <summary>
+    /// Where a directory-walking tool (Glob, Grep) should search. A mirrored session's own tree only contains the repos
+    /// it has already touched, so searching it would silently omit every other repo in the project — these tools search
+    /// the REAL project tree and return real paths, which a later write then maps into the right worktree.
+    /// </summary>
+    public string SearchRoot(string? path)
+    {
+        if (Workspace is not { Mirrored: true } ws) return string.IsNullOrEmpty(path) ? Cwd : Resolve(path);
+        return string.IsNullOrEmpty(path) ? ws.Root : Canonical(Resolve(path));
     }
 
     /// <summary>
@@ -42,6 +125,9 @@ public sealed class ToolContext
     /// </summary>
     public string? WriteError(string full)
     {
+        // A mirrored session places each file individually (some go to a worktree, loose files stay in place), so the
+        // single-tree rule below does not apply; MapWrite is the guard.
+        if (Workspace is { Mirrored: true }) return null;
         if (!Isolated || WorkDir.Length == 0) return null;
         if (Paths.IsUnder(full, WorkDir)) return null;
         if (Paths.IsUnder(full, Project.MemoryDir) || Paths.IsUnder(full, Paths.PlansDir) || Paths.IsUnder(full, Paths.SecretOutDir)) return null;
@@ -55,6 +141,13 @@ public sealed class ToolContext
     /// </summary>
     public string? ReadError(string full)
     {
+        if (Workspace is { Mirrored: true })
+        {
+            // Within a mirrored session the only read that stays refused is another session's tree.
+            if (Paths.IsUnder(full, Paths.WorktreesDir) && !Paths.IsUnder(full, WorkDir))
+                return $"Refused: {full} is another session's work tree and must not be read from here.";
+            return null;
+        }
         if (!Isolated || WorkDir.Length == 0) return null;
         if (Paths.IsUnder(full, Paths.WorktreesDir) && !Paths.IsUnder(full, WorkDir))
             return $"Refused: {full} is another session's work tree and must not be read from here.";
@@ -65,10 +158,31 @@ public sealed class ToolContext
 /// <summary>Tracks which files the model has read (Edit/Write demand a prior Read, as in Claude Code).</summary>
 public sealed class FileTracker
 {
-    readonly Dictionary<string, DateTime> _read = new();
-    public void MarkRead(string path) => _read[path] = File.GetLastWriteTimeUtc(path);
+    readonly Dictionary<string, (string Served, DateTime Mtime, long Length)> _read = new(StringComparer.Ordinal);
+    public void MarkRead(string path) => MarkRead(path, path);
+    /// <param name="canonical">The real project path — the key.</param>
+    /// <param name="served">The file actually opened, which may be the session's worktree copy.</param>
+    public void MarkRead(string canonical, string served)
+    {
+        try
+        {
+            var fi = new FileInfo(served);
+            _read[canonical] = (served, fi.LastWriteTimeUtc, fi.Exists ? fi.Length : 0);
+        }
+        catch { _read[canonical] = (served, DateTime.MinValue, 0); }
+    }
     public bool WasRead(string path) => _read.ContainsKey(path);
-    public bool ChangedSinceRead(string path) => _read.TryGetValue(path, out var t) && File.GetLastWriteTimeUtc(path) != t;
+    public bool ChangedSinceRead(string path)
+    {
+        if (!_read.TryGetValue(path, out var t)) return false;
+        try
+        {
+            var fi = new FileInfo(t.Served);
+            if (!fi.Exists) return true;                       // the very file we read is gone: re-read
+            return fi.LastWriteTimeUtc != t.Mtime || fi.Length != t.Length;
+        }
+        catch { return true; }
+    }
     public void Forget(string path) => _read.Remove(path);
 }
 

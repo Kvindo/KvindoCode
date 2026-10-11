@@ -34,5 +34,11 @@ public static class TestRunHome
         Directory.CreateDirectory(Dir);
         Environment.SetEnvironmentVariable("KVINDOCODE_HOME", Dir);
         Environment.SetEnvironmentVariable("PVCODE_HOME", Dir);
+        // A test session that completes a user turn calls AgentSession.Notify, which finds the user's OWN
+        // ~/.local/bin/beep and the real notify-send — so running the suite beeped and popped real desktop
+        // notifications titled after the tests' own session names ("sub task", "what was that"). Reported 2026-10-11
+        // as "still beeping without a correct cause". Pinned for the whole process, like the config dir above, so no
+        // test can reach the real desktop however it builds its session. Notifier's own tests opt back in explicitly.
+        Environment.SetEnvironmentVariable("KVINDOCODE_NO_NOTIFY", "1");
     }
 }

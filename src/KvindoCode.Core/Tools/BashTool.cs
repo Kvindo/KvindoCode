@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using KvindoCode.Core.Agent;
 using System.Text;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
@@ -29,11 +30,19 @@ public sealed class BashTool : Tool
     {
         var command = Str(input, "command");
         if (string.IsNullOrWhiteSpace(command)) return Task.FromResult(ToolResult.Err("command is empty"));
+        // A mirrored session (a project folder that CONTAINS repos rather than being one) runs with its cwd in the
+        // mirror, so a relative path lands inside the session's own checkout of that repo — provided the worktree
+        // exists by the time the command runs. Materialise any repo the command names first; a repo that cannot be
+        // materialised simply is not in the mirror, so the command FAILS LOUDLY instead of silently writing the
+        // shared checkout. (Absolute paths in a command are best-effort, as documented: Bash is not a hard sandbox.)
+        var mirror = ctx.Workspace is { Mirrored: true } mws ? mws : null;
+        if (mirror is not null) EnsureReposForCommand(command, ctx, mirror);
         // Best-effort: an isolated session must not `cd` out of its worktree into the shared tree (or a peer's). The
         // durable guard is the cwd-persistence clamp below; this stops the common explicit form before it runs.
-        if (ctx.Isolated && ctx.WorkDir.Length > 0 && CdsOutside(command, ctx.WorkDir, out var target))
+        if ((ctx.Isolated || mirror is not null) && ctx.WorkDir.Length > 0 && CdsOutside(command, ctx.WorkDir, out var target))
             return Task.FromResult(ToolResult.Err(
-                $"Refused: `cd {target}` leaves this session's work tree ({ctx.WorkDir}). Work inside it."));
+                $"Refused: `cd {target}` leaves this session's work tree ({ctx.WorkDir})." +
+                (mirror is not null ? " To work in a repo of this project, use its path RELATIVE to the project root (e.g. `cd APPLICATIONS/svc`)." : " Work inside it.")));
         // The model only ever sees vault values as markers. Expand them here, immediately before the shell runs the text; the
         // transcript keeps the marker, and anything the command prints is masked again by the tool-output audit.
         if (KvindoCode.Core.Secrets.SecretPlaceholders.Contains(command))
@@ -125,6 +134,8 @@ public sealed class BashTool : Tool
                 // otherwise permanently re-point every later tool call at the shared tree (or a peer session's tree).
                 if (nd.Length > 0 && Directory.Exists(nd) && (!ctx.Isolated || Paths.IsUnder(nd, ctx.WorkDir)))
                     ctx.Cwd = nd;
+                // A mirrored session's cwd lives under its own mirror; anything else (a repo it walked into through an
+                // absolute path) is not persisted, so the next call is back inside its own tree.
             }
         }
         catch { }
@@ -138,6 +149,21 @@ public sealed class BashTool : Tool
         int code = proc.HasExited ? proc.ExitCode : -1;
         if (code != 0) return new ToolResult((output.Length > 0 ? output + "\n" : "") + $"Exit code: {code}", true);
         return ToolResult.Ok(output.Length == 0 ? "(command completed with no output)" : output);
+    }
+
+    /// <summary>
+    /// Materialise the worktree of every repo whose path the command mentions, so a relative `cd`/redirect lands in the
+    /// session's own checkout. A repo the scanner does not know about is deliberately left alone: it will not be present
+    /// in the mirror, so the command fails there rather than touching the shared checkout.
+    /// </summary>
+    static void EnsureReposForCommand(string command, ToolContext ctx, SessionWorkspace ws)
+    {
+        foreach (var repo in Workspaces.Nested(ws.Root))
+        {
+            var rel = Path.GetRelativePath(ws.Root, repo).Replace('\\', '/');
+            if (!command.Contains(rel, StringComparison.Ordinal)) continue;
+            Workspaces.EnsureRepo(ws, repo, ctx.SessionId, out _);     // failure => absent => the command fails loudly
+        }
     }
 
     /// <summary>

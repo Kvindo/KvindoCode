@@ -46,6 +46,21 @@ public static class Notifier
     public static bool Available(AppSettings s) => Resolve(s).Exe.Length > 0;
 
     /// <summary>
+    /// True when this process may actually make noise. <c>KVINDOCODE_NO_NOTIFY=1</c> switches every alert off without
+    /// touching any setting, which is what the TEST process pins for its whole lifetime.
+    /// </summary>
+    /// <remarks>
+    /// The test suite was reaching the user's real desktop: a test session that completed a user turn called
+    /// <c>AgentSession.Notify</c>, which found the user's own <c>~/.local/bin/beep</c> and the real <c>notify-send</c>,
+    /// so running the suite fired beeps and desktop popups titled after the test's own session names ("sub task",
+    /// "what was that") — reported 2026-10-11 as "still beeping without a correct cause". Same shape as
+    /// <c>KVINDOCODE_NO_UI_TRACE</c> and for the same reason: a diagnostic must not touch the machine, and a test must
+    /// not either. The resolution helpers stay pure ("what WOULD run") so the Settings window and their tests are
+    /// unaffected; only the functions that actually SPAWN something consult this.
+    /// </remarks>
+    public static bool Enabled => Environment.GetEnvironmentVariable("KVINDOCODE_NO_NOTIFY") is not { Length: > 0 };
+
+    /// <summary>
     /// Where a beep happened, why, and how long it took. Set once at startup so the trace lands in the same file as
     /// everything else; used to explain "I get beeps for no reason" without guessing (reported 2026-10-10).
     /// </summary>
@@ -63,6 +78,7 @@ public static class Notifier
     /// </remarks>
     public static void RequestPlay(AppSettings s)
     {
+        if (!Enabled) { Trace?.Invoke("beep suppressed (KVINDOCODE_NO_NOTIFY)"); return; }
         var now = DateTime.UtcNow;
         if (_lastPlay is { } at && (now - at).TotalSeconds < CoalesceSeconds)
         {
@@ -82,6 +98,7 @@ public static class Notifier
     /// <summary>Play the alert. False when nothing could be started (the caller may say so once).</summary>
     public static bool TryPlay(AppSettings s)
     {
+        if (!Enabled) { Trace?.Invoke("beep suppressed (KVINDOCODE_NO_NOTIFY)"); return false; }
         try
         {
             var (exe, args, why) = Resolve(s);
@@ -124,6 +141,7 @@ public static class Notifier
     /// </summary>
     public static bool TryNotify(AppSettings s, string title, string body)
     {
+        if (!Enabled) { Trace?.Invoke("desktop notification suppressed (KVINDOCODE_NO_NOTIFY)"); return false; }
         try
         {
             var (exe, _) = ResolveNotify(s);

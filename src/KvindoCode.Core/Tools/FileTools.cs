@@ -202,15 +202,19 @@ public sealed class ReadTool : Tool
 
     public override Task<ToolResult> RunAsync(JsonObject input, ToolContext ctx, CancellationToken ct)
     {
-        var path = ctx.Resolve(Str(input, "file_path"));
-        if (ctx.ReadError(path) is { } rerr) return Task.FromResult(ToolResult.Err(rerr));
+        var named = ctx.Resolve(Str(input, "file_path"));
+        if (ctx.ReadError(named) is { } rerr) return Task.FromResult(ToolResult.Err(rerr));
+        // A read is served from the session's own copy of a file once that repo has been materialised, and from the
+        // real checkout before that — reading NEVER creates a worktree, so grepping an untouched repo is free.
+        var path = ctx.MapRead(named);
+        var key = ctx.Canonical(named);
         if (Directory.Exists(path)) return Task.FromResult(ToolResult.Err($"{path} is a directory, not a file. Use `ls` via Bash or Glob to list it."));
         if (!File.Exists(path)) return Task.FromResult(ToolResult.Err($"File does not exist: {path}" + Suggest(path)));
         var ext = Path.GetExtension(path).ToLowerInvariant();
-        if (DocumentReaders.ImageExts.Contains(ext)) { ctx.Files.MarkRead(path); return Task.FromResult(DocumentReaders.ReadImage(path, ctx.Session.ModelSupportsVision)); }
-        if (ext == ".pdf") { ctx.Files.MarkRead(path); return Task.FromResult(DocumentReaders.ReadPdf(path, StrOpt(input, "pages"))); }
-        if (DocumentReaders.OfficeExts.Contains(ext)) { ctx.Files.MarkRead(path); return Task.FromResult(DocumentReaders.ReadOffice(path)); }
-        if (ext == ".ipynb") { ctx.Files.MarkRead(path); return Task.FromResult(DocumentReaders.ReadNotebook(path)); }
+        if (DocumentReaders.ImageExts.Contains(ext)) { ctx.Files.MarkRead(key, path); return Task.FromResult(DocumentReaders.ReadImage(path, ctx.Session.ModelSupportsVision)); }
+        if (ext == ".pdf") { ctx.Files.MarkRead(key, path); return Task.FromResult(DocumentReaders.ReadPdf(path, StrOpt(input, "pages"))); }
+        if (DocumentReaders.OfficeExts.Contains(ext)) { ctx.Files.MarkRead(key, path); return Task.FromResult(DocumentReaders.ReadOffice(path)); }
+        if (ext == ".ipynb") { ctx.Files.MarkRead(key, path); return Task.FromResult(DocumentReaders.ReadNotebook(path)); }
         if (ext is ".zip" or ".gz" or ".tar" or ".exe" or ".dll" or ".so" or ".bin" or ".doc" or ".xls" or ".ppt" || Fs.LooksBinary(path))
         {
             var kind = DocumentReaders.DescribeBinary(path);
@@ -221,7 +225,7 @@ public sealed class ReadTool : Tool
         int offset = Math.Max(1, IntOpt(input, "offset") ?? 1);
         int limit = Math.Clamp(IntOpt(input, "limit") ?? 2000, 1, 5000);
         var lines = File.ReadAllText(path).Replace("\r\n", "\n").Split('\n');
-        ctx.Files.MarkRead(path);
+        ctx.Files.MarkRead(key, path);
         if (lines.Length == 1 && lines[0].Length == 0) return Task.FromResult(ToolResult.Ok("(file exists but is empty)"));
         if (offset > lines.Length) return Task.FromResult(ToolResult.Err($"offset {offset} is beyond the end of the file ({lines.Length} lines)."));
 
@@ -274,7 +278,13 @@ public sealed class WriteTool : Tool
 
     public override Task<ToolResult> RunAsync(JsonObject input, ToolContext ctx, CancellationToken ct)
     {
-        var path = ctx.Resolve(Str(input, "file_path"));
+        var named = ctx.Resolve(Str(input, "file_path"));
+        // In a container-of-repos project this places the file in that repo's session worktree (creating it on demand),
+        // keeps a loose project file in place, and refuses a repo that cannot be isolated. `key` is the real project
+        // path either way, so "Read it first" is about the file the model means, not where it happens to live.
+        var key = ctx.Canonical(named);
+        var path = ctx.MapWrite(named, out var mapError);
+        if (path is null) return Task.FromResult(ToolResult.Err(mapError!));
         if (ctx.WriteError(path) is { } werr) return Task.FromResult(ToolResult.Err(werr));
         var content = Fs.StripLineNumbers(Str(input, "content"));
         // S11: an unknown marker must not abort an unrelated write of ordinary text that merely mentions the syntax
@@ -287,15 +297,16 @@ public sealed class WriteTool : Tool
         }
         if (Directory.Exists(path)) return Task.FromResult(ToolResult.Err($"{path} is a directory."));
         bool exists = File.Exists(path);
-        if (exists && !ctx.Files.WasRead(path))
-            return Task.FromResult(ToolResult.Err($"{path} already exists but has not been read in this session. Read it first, then Write."));
-        if (exists && ctx.Files.ChangedSinceRead(path))
-            return Task.FromResult(ToolResult.Err($"{path} was modified since you last read it. Read it again before writing."));
+        if (exists && !ctx.Files.WasRead(key))
+            return Task.FromResult(ToolResult.Err($"{key} already exists but has not been read in this session. Read it first, then Write."));
+        if (exists && ctx.Files.ChangedSinceRead(key))
+            return Task.FromResult(ToolResult.Err($"{key} was modified since you last read it. Read it again before writing."));
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         File.WriteAllText(path, content);
-        ctx.Files.MarkRead(path);
+        ctx.Files.MarkRead(key, path);
         int lines = content.Length == 0 ? 0 : content.Count(c => c == '\n') + (content.EndsWith('\n') ? 0 : 1);
-        return Task.FromResult(ToolResult.Ok(exists ? $"The file {path} has been overwritten ({lines} lines)." : $"File created successfully at {path} ({lines} lines)."));
+        var where = path == key ? path : $"{path} (this session's checkout of {key})";
+        return Task.FromResult(ToolResult.Ok(exists ? $"The file {where} has been overwritten ({lines} lines)." : $"File created successfully at {where} ({lines} lines)."));
     }
 }
 
@@ -322,7 +333,12 @@ public sealed class EditTool : Tool
 
     public override Task<ToolResult> RunAsync(JsonObject input, ToolContext ctx, CancellationToken ct)
     {
-        var path = ctx.Resolve(Str(input, "file_path"));
+        var named = ctx.Resolve(Str(input, "file_path"));
+        var key = ctx.Canonical(named);
+        // Edit MODIFIES, so it goes through MapWrite: a file that was read from the real checkout is edited in the
+        // session's own worktree (created here on demand), never in the shared one.
+        var path = ctx.MapWrite(named, out var mapError);
+        if (path is null) return Task.FromResult(ToolResult.Err(mapError!));
         if (ctx.WriteError(path) is { } werr) return Task.FromResult(ToolResult.Err(werr));
         var oldS = Fs.StripLineNumbers(Str(input, "old_string"));
         var newS = Fs.StripLineNumbers(Str(input, "new_string"));
@@ -340,13 +356,13 @@ public sealed class EditTool : Tool
             {   // Claude Code semantics: empty old_string on a missing file creates it
                 Directory.CreateDirectory(Path.GetDirectoryName(path)!);
                 File.WriteAllText(path, newS);
-                ctx.Files.MarkRead(path);
+                ctx.Files.MarkRead(key, path);
                 return Task.FromResult(ToolResult.Ok($"Created {path}."));
             }
             return Task.FromResult(ToolResult.Err($"File does not exist: {path}"));
         }
-        if (!ctx.Files.WasRead(path)) return Task.FromResult(ToolResult.Err($"{path} has not been read in this session. Use Read first, then Edit."));
-        if (ctx.Files.ChangedSinceRead(path)) return Task.FromResult(ToolResult.Err($"{path} was modified since you last read it. Read it again, then retry the Edit."));
+        if (!ctx.Files.WasRead(key)) return Task.FromResult(ToolResult.Err($"{key} has not been read in this session. Use Read first, then Edit."));
+        if (ctx.Files.ChangedSinceRead(key)) return Task.FromResult(ToolResult.Err($"{key} was modified since you last read it. Read it again, then retry the Edit."));
         if (oldS.Length == 0) return Task.FromResult(ToolResult.Err("old_string is empty. To create or overwrite a file use Write."));
 
         var raw = File.ReadAllText(path);
@@ -369,7 +385,7 @@ public sealed class EditTool : Tool
         else updated = text[..firstIdx] + newS + text[(firstIdx + oldS.Length)..];
 
         File.WriteAllText(path, crlf ? updated.Replace("\n", "\r\n") : updated);
-        ctx.Files.MarkRead(path);
+        ctx.Files.MarkRead(key, path);
 
         int startLine = text[..firstIdx].Count(c => c == '\n');
         var ul = updated.Split('\n');
@@ -409,7 +425,7 @@ public sealed class GlobTool : Tool
 
     public override Task<ToolResult> RunAsync(JsonObject input, ToolContext ctx, CancellationToken ct)
     {
-        var root = StrOpt(input, "path") is { Length: > 0 } p ? ctx.Resolve(p) : ctx.Cwd;
+        var root = ctx.SearchRoot(StrOpt(input, "path"));
         if (ctx.ReadError(root) is { } gerr) return Task.FromResult(ToolResult.Err(gerr));
         if (!Directory.Exists(root)) return Task.FromResult(ToolResult.Err($"Directory does not exist: {root}"));
         var pattern = Str(input, "pattern");
@@ -466,7 +482,7 @@ public sealed class GrepTool : Tool
 
     public override Task<ToolResult> RunAsync(JsonObject input, ToolContext ctx, CancellationToken ct)
     {
-        var root = StrOpt(input, "path") is { Length: > 0 } p ? ctx.Resolve(p) : ctx.Cwd;
+        var root = ctx.SearchRoot(StrOpt(input, "path"));
         if (ctx.ReadError(root) is { } rerr) return Task.FromResult(ToolResult.Err(rerr));
         var opts = RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.Multiline;
         if (Bool(input, "-i")) opts |= RegexOptions.IgnoreCase;

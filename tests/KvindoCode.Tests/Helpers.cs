@@ -10,6 +10,18 @@ using KvindoCode.Core.Tools;
 namespace KvindoCode.Tests;
 
 /// <summary>Isolated ~/.kvindocode + project dir per test.</summary>
+/// <summary>
+/// The test PROCESS pins <c>KVINDOCODE_NO_NOTIFY=1</c> (see <see cref="TestRunHome"/>) so the suite can never reach the
+/// user's real desktop — running it used to beep and pop notifications titled after the tests' own session names.
+/// A test that asserts what the notifier actually SPAWNS opts back in for its duration with <c>using var _ = new NotifyOptIn();</c>.
+/// </summary>
+public sealed class NotifyOptIn : IDisposable
+{
+    readonly string? _saved = Environment.GetEnvironmentVariable("KVINDOCODE_NO_NOTIFY");
+    public NotifyOptIn() => Environment.SetEnvironmentVariable("KVINDOCODE_NO_NOTIFY", null);
+    public void Dispose() => Environment.SetEnvironmentVariable("KVINDOCODE_NO_NOTIFY", _saved);
+}
+
 public sealed class Sandbox : IDisposable
 {
     public string Root { get; } = Path.Combine(Path.GetTempPath(), "kvindocode-test-" + Guid.NewGuid().ToString("N")[..8]);

@@ -4,14 +4,81 @@ using System.Text.RegularExpressions;
 
 namespace KvindoCode.Core.Agent;
 
+/// <summary>One nested repository a session works in, and where that repo's worktree lives inside the session mirror.</summary>
+public sealed record RepoLink(string RepoRoot, string SessionPath, string Branch);
+
 /// <summary>
-/// Where a session does its work. <see cref="Isolated"/> true = its own git worktree (<see cref="WorkDir"/>, on
-/// <see cref="Branch"/>); false = the shared project tree (<see cref="WorkDir"/> == <see cref="Root"/>) because the
-/// project is not a git repo, has no commit yet, or isolation is switched off.
+/// Where a session does its work.
 /// </summary>
-public sealed record SessionWorkspace(string Root, string WorkDir, string? Branch, bool Isolated)
+/// <remarks>
+/// Three shapes, and the flags that tell them apart are the ones the tool guards read:
+/// <list type="bullet">
+/// <item><see cref="HasRootWorktree"/> — the project root IS a git repo, so the session has a single worktree and
+/// <c>WorkDir</c> is it. This is the original behaviour, unchanged.</item>
+/// <item><see cref="Mirrored"/> — the project root is NOT a repo but CONTAINS repos (the reported case: a folder with
+/// 70 nested checkouts, plus loose files). <c>WorkDir</c> is a mirror directory that holds one real git worktree per
+/// repo the session has written into, each at the repo's path relative to the project root, so a relative path and
+/// <c>cd APPLICATIONS/svc</c> land in the session's own checkout of that repo.</item>
+/// <item>neither — the folder is not a repo and has no repos to mirror: the shared tree, exactly as before.</item>
+/// </list>
+/// <see cref="Isolated"/> is the UI-facing summary ("is anything of mine actually protected?"): false for a mirrored
+/// session that has not touched a repo yet.
+/// </remarks>
+public sealed class SessionWorkspace
 {
+    public string Root { get; }
+    public string WorkDir { get; }
+    public string? Branch { get; }
+    /// <summary>The project root is itself a repo and <see cref="WorkDir"/> is its worktree.</summary>
+    public bool HasRootWorktree { get; }
+    /// <summary>The project root is a container of repos; see the class remarks.</summary>
+    public bool Mirrored { get; }
+
+    /// <summary>The project root is a repo, <see cref="WorkDir"/> is the shared tree.</summary>
     public static SessionWorkspace Shared(string root) => new(root, root, null, false);
+
+    readonly object _reposGate = new();
+    readonly Dictionary<string, RepoLink> _repos = new(StringComparer.Ordinal);
+
+    public SessionWorkspace(string root, string workDir, string? branch, bool isolated)
+    {
+        Root = Path.GetFullPath(root);
+        WorkDir = Path.GetFullPath(workDir);
+        Branch = branch;
+        HasRootWorktree = isolated;
+        Mirrored = false;
+    }
+
+    /// <param name="mirrored">The project root is a container of repos and <paramref name="workDir"/> is the mirror.</param>
+    public SessionWorkspace(string root, string workDir, bool mirrored, bool hasRootWorktree)
+    {
+        Root = Path.GetFullPath(root);
+        WorkDir = Path.GetFullPath(workDir);
+        Mirrored = mirrored;
+        HasRootWorktree = hasRootWorktree;
+    }
+
+    /// <summary>Repos this session has materialised, newest last. A snapshot: the live map grows as repos are touched.</summary>
+    public IReadOnlyList<RepoLink> Repos { get { lock (_reposGate) return _repos.Values.ToList(); } }
+
+    /// <summary>True once anything of the session's work is actually protected.</summary>
+    public bool Isolated => HasRootWorktree || (Mirrored && RepoCount > 0);
+
+    public int RepoCount { get { lock (_reposGate) return _repos.Count; } }
+
+    /// <summary>Record that <paramref name="repoRoot"/>'s worktree for this session is at <paramref name="sessionPath"/>.</summary>
+    public RepoLink NoteRepo(string repoRoot, string sessionPath, string branch)
+    {
+        var link = new RepoLink(Path.GetFullPath(repoRoot), Path.GetFullPath(sessionPath), branch);
+        lock (_reposGate) _repos[link.RepoRoot] = link;
+        return link;
+    }
+
+    /// <summary>The worktree this session uses for <paramref name="repoRoot"/>, or null when it has none yet.</summary>
+    public RepoLink? RepoFor(string repoRoot)
+    {
+        lock (_reposGate) return _repos.TryGetValue(Path.GetFullPath(repoRoot), out var l) ? l : null;
+    }
 }
 
 /// <summary>
@@ -39,14 +106,19 @@ public static class Workspaces
 
     /// <summary>
     /// The workspace for a session: its existing worktree if one is already there (resume / a second turn), otherwise a
-    /// freshly created one seeded from the user's current working tree; or the shared tree when isolation does not apply.
+    /// freshly created one seeded from the user's current working tree; a MIRROR when the project root is a container of
+    /// repos; or the shared tree when isolation does not apply.
     /// Never throws — any failure degrades to the shared tree so a session always runs.
     /// </summary>
     public static SessionWorkspace Ensure(string root, string sessionId, AppSettings settings)
     {
         root = Path.GetFullPath(root);
         if (!settings.IsolateSessions) return SessionWorkspace.Shared(root);
-        if (sessionId.Length == 0 || !ValidRef(sessionId) || !HasHead(root)) return SessionWorkspace.Shared(root);
+        if (sessionId.Length == 0 || !ValidRef(sessionId)) return SessionWorkspace.Shared(root);
+
+        // The project root is not itself a repo, but a container of them (the reported case: a folder of 70 checkouts).
+        // There is nothing to branch the root from, and the mirror holds worktrees per repo instead of one for the root.
+        if (!HasHead(root)) return HaveNestedRepos(root) ? Mirror(root, sessionId, settings) : SessionWorkspace.Shared(root);
 
         var dir = DirFor(root, sessionId);
         var branch = BranchFor(sessionId);
@@ -75,13 +147,114 @@ public static class Workspaces
         }
     }
 
-    /// <summary>The command the user runs to bring this session's work into the project. Empty when not isolated.</summary>
-    public static string MergeCommand(SessionWorkspace ws) =>
-        ws.Isolated && ws.Branch is { Length: > 0 } b ? $"git -C \"{ws.Root}\" merge {b}" : "";
+    /// <summary>
+    /// The mirror for a container root: the session's own directory tree, which starts empty and gains one git worktree
+    /// per repo as the session touches it. Nothing is checked out here (a container of 70 repos would be gigabytes).
+    /// </summary>
+    static SessionWorkspace Mirror(string root, string sessionId, AppSettings settings)
+    {
+        var dir = DirFor(root, sessionId);
+        if (dir.Length > 200) return SessionWorkspace.Shared(root);
+
+        var ws = new SessionWorkspace(root, dir, mirrored: true, hasRootWorktree: false);
+        lock (Gate)
+        {
+            try
+            {
+                Directory.CreateDirectory(dir);
+                // Adopt repos an earlier turn of the SAME session already materialised, so a resumed session keeps
+                // working in the checkouts it created (and their branches) instead of forking new ones. Read from the
+                // mirror itself, which is empty for a fresh session — so this costs nothing until there is something
+                // to adopt, and it does not depend on scanning the (possibly huge) project tree.
+                foreach (var (repo, sessionPath, _) in WorktreesUnder(dir))
+                {
+                    // The owning repo may itself be a worktree-relative path; normalise before registering.
+                    ws.NoteRepo(Path.GetFullPath(repo), sessionPath, BranchFor(sessionId));
+                }
+                // NOTE: the project's WorktreeSetupScript is deliberately NOT run. It is written against a single
+                // worktree of the project; the mirror is not a checkout and has no files to link (node_modules,
+                // .venv, ...), so running it here would do nothing and look like it worked.
+            }
+            catch { }
+        }
+        return ws;
+    }
+
+    /// <summary>Where a repo's worktree lives inside the session mirror: its path relative to the project root.</summary>
+    public static string RepoSessionPath(SessionWorkspace ws, string repoRoot)
+        => Path.Combine(ws.WorkDir, Path.GetRelativePath(ws.Root, Path.GetFullPath(repoRoot)));
 
     /// <summary>
-    /// Remove a deleted session's worktree. Refuses while it is dirty or its branch is ahead of the project (uncommitted
-    /// or unmerged work must never be thrown away); the BRANCH IS NEVER DELETED, so the user can still merge it.
+    /// Materialise (or adopt) the session's worktree for one repo, inside the mirror. Returns null with a reason when
+    /// the repo cannot be isolated — the caller must REFUSE rather than fall back to the shared checkout.
+    /// </summary>
+    public static RepoLink? EnsureRepo(SessionWorkspace ws, string repoRoot, string sessionId, out string? error)
+    {
+        error = null;
+        repoRoot = Path.GetFullPath(repoRoot);
+        if (ws.RepoFor(repoRoot) is { } known) return known;
+
+        if (!HasHead(repoRoot))
+        {
+            error = $"“{repoRoot}” is a git repository without a commit, so there is no HEAD to branch a session worktree " +
+                    "from, and this session will not edit its shared checkout. Make an initial commit in it (or turn session " +
+                    "isolation off in Settings) and try again.";
+            return null;
+        }
+        var sessionPath = RepoSessionPath(ws, repoRoot);
+        var branch = BranchFor(sessionId);
+        if (sessionPath.Length + repoRoot.Length > 350)
+        {
+            error = $"The session worktree path for “{repoRoot}” is too long for the filesystem; this session will not edit " +
+                    "its shared checkout. Open that repository as its own project instead.";
+            return null;
+        }
+
+        lock (Gate)
+        {
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(sessionPath)!);
+                if (!File.Exists(Path.Combine(sessionPath, ".git")))
+                {
+                    var branchExists = Git(repoRoot, "rev-parse", "--verify", "--quiet", "refs/heads/" + branch).code == 0;
+                    var add = branchExists
+                        ? Git(repoRoot, "worktree", "add", sessionPath, branch)
+                        : Git(repoRoot, "worktree", "add", "-b", branch, sessionPath, "HEAD");
+                    if (add.code != 0)
+                    {
+                        error = $"Could not create a session worktree for “{repoRoot}” ({add.stderr.Trim()}). This session will " +
+                                "not edit its shared checkout.";
+                        return null;
+                    }
+                    Submodules(sessionPath);
+                }
+                return ws.NoteRepo(repoRoot, sessionPath, branch);
+            }
+            catch (Exception e)
+            {
+                error = $"Could not create a session worktree for “{repoRoot}” ({e.Message}). This session will not edit its " +
+                        "shared checkout.";
+                return null;
+            }
+        }
+    }
+
+    /// <summary>The command(s) the user runs to bring this session's work into the projects. Empty when not isolated.</summary>
+    public static string MergeCommand(SessionWorkspace ws) => string.Join("\n", MergeCommands(ws));
+
+    /// <summary>One merge command per mirrored repo (a repo has its own branch; git has no cross-repo merge).</summary>
+    public static IReadOnlyList<string> MergeCommands(SessionWorkspace ws)
+    {
+        var list = new List<string>();
+        if (ws.HasRootWorktree && ws.Branch is { Length: > 0 } b) list.Add($"git -C \"{ws.Root}\" merge {b}");
+        foreach (var r in ws.Repos) list.Add($"git -C \"{r.RepoRoot}\" merge {r.Branch}");
+        return list;
+    }
+
+    /// <summary>
+    /// Remove a deleted session's worktree(s). Refuses while one is dirty or its branch is ahead of the project
+    /// (uncommitted or unmerged work must never be thrown away); a BRANCH IS NEVER DELETED, so the user can still merge it.
     /// Returns false with a <paramref name="reason"/> the caller can show.
     /// </summary>
     public static bool Forget(string root, string sessionId, out string reason)
@@ -90,14 +263,37 @@ public static class Workspaces
         root = Path.GetFullPath(root);
         var dir = DirFor(root, sessionId);
         if (!Directory.Exists(dir)) { PruneRegistrations(root); return true; }
-        lock (Gate)
+
+        // A MIRRORED session owns one worktree per repo, and each must be checked against ITS OWN repository before
+        // anything is deleted (`git worktree remove` runs in the repo that owns the worktree). The owning repo is read
+        // out of each worktree's `.git` pointer, so this does not depend on re-scanning for repos — a repo the session
+        // materialised but the scanner would not find (renamed, deeper, added later) is still handled correctly.
+        var nested = WorktreesUnder(dir);
+        if (nested.Count > 0)
         {
-            if (IsDirty(dir)) { reason = "it has uncommitted changes"; return false; }
-            if (IsAhead(root, BranchFor(sessionId))) { reason = "its branch has commits you have not merged"; return false; }
-            Git(root, "worktree", "remove", dir);
-            PruneRegistrations(root);
+            foreach (var (repo, sessionPath, _) in nested)
+                lock (Gate)
+                {
+                    if (IsDirty(sessionPath)) { reason = $"“{repo}” has uncommitted changes"; return false; }
+                    if (IsAhead(repo, BranchFor(sessionId))) { reason = $"“{repo}” has commits you have not merged"; return false; }
+                    Git(repo, "worktree", "remove", sessionPath);
+                    Git(repo, "worktree", "prune");
+                }
+            try { Directory.Delete(dir, recursive: true); } catch { }     // emptied above; any leftover files are ours
             return true;
         }
+
+        lock (Gate)
+        {
+            if (File.Exists(Path.Combine(dir, ".git")))                 // the single-worktree shape
+            {
+                if (IsDirty(dir)) { reason = "it has uncommitted changes"; return false; }
+                if (IsAhead(root, BranchFor(sessionId))) { reason = "its branch has commits you have not merged"; return false; }
+                Git(root, "worktree", "remove", dir);
+                PruneRegistrations(root);
+            }
+        }
+        return true;
     }
 
     /// <summary>
@@ -116,15 +312,148 @@ public static class Workspaces
         {
             var id = Path.GetFileName(d);
             if (!isDeletedSession(id)) continue;
+
+            // A mirrored session's tree holds one worktree per repo; each is removed in (and checked against) its own repo.
+            var nested = WorktreesUnder(d);
+            bool keep = nested.Any(t => IsDirty(t.SessionPath) || IsAhead(t.Repo, BranchFor(id)));
+            if (keep) continue;
+            foreach (var (repo, sessionPath, _) in nested)
+                lock (Gate) { Git(repo, "worktree", "remove", sessionPath); Git(repo, "worktree", "prune"); }
+            if (nested.Count > 0) { try { Directory.Delete(d, recursive: true); } catch { } continue; }
+
             if (IsDirty(d) || IsAhead(root, BranchFor(id))) continue;
             lock (Gate) { Git(root, "worktree", "remove", d); }
         }
         PruneRegistrations(root);
     }
 
+    /// <summary>
+    /// Every git worktree inside <paramref name="dir"/> (the mirror), with the repository that owns it. The owner comes
+    /// from the worktree's own <c>.git</c> pointer — <c>gitdir: &lt;repo&gt;/.git/worktrees/&lt;name&gt;</c> — so no
+    /// repo scan is involved and a repo the scanner would miss is still handled.
+    /// </summary>
+    static List<(string Repo, string SessionPath, string GitDir)> WorktreesUnder(string dir)
+    {
+        var found = new List<(string, string, string)>();
+        foreach (var d in SafeEnumerate(dir, 0, 8))
+        {
+            var dot = Path.Combine(d, ".git");
+            if (!File.Exists(dot)) continue;
+            var pointer = ReadGitFile(dot);
+            if (pointer is null) continue;
+            var slash = pointer.Replace('\\', '/').IndexOf("/.git/worktrees/", StringComparison.Ordinal);
+            if (slash < 0) continue;
+            var repo = pointer[..slash];
+            if (!Path.IsPathRooted(repo)) repo = Path.GetFullPath(Path.Combine(d, repo));
+            found.Add((repo, d, pointer));
+        }
+        return found;
+    }
+
+    // ------------------------------------------------------------------ finding repos
+
+    /// <summary>
+    /// The nearest enclosing git repository of <paramref name="path"/>, searching upwards but never above
+    /// <paramref name="projectRoot"/>. Null when the path belongs to no repo inside the project.
+    /// </summary>
+    /// <param name="notAWorktree">Set when the enclosing repo is itself a LINKED WORKTREE (its <c>.git</c> file points
+    /// under <c>.git/worktrees/</c>). A worktree must not be nested inside a worktree, so the caller refuses it.</param>
+    public static string? FindEnclosingRepo(string path, string projectRoot, out bool notAWorktree)
+    {
+        notAWorktree = false;
+        var root = Path.GetFullPath(projectRoot).TrimEnd(Path.DirectorySeparatorChar);
+        var dir = Directory.Exists(path) ? Path.GetFullPath(path) : Path.GetDirectoryName(Path.GetFullPath(path));
+        for (var d = dir; d is not null && d.Length >= root.Length; d = Path.GetDirectoryName(d))
+        {
+            var dot = Path.Combine(d, ".git");
+            if (Directory.Exists(dot)) return d;                                  // an ordinary repo
+            if (File.Exists(dot))
+            {
+                // A `.git` FILE is either a submodule checkout or a linked worktree. They look identical from outside,
+                // so the pointer is read: `modules/` means a submodule, which IS a real repo and is isolatable;
+                // `worktrees/` means a linked worktree, which cannot be one (a worktree cannot nest in a worktree).
+                var pointer = ReadGitFile(dot);
+                if (pointer is not null && pointer.Replace('\\', '/').Contains("/.git/worktrees/", StringComparison.Ordinal))
+                {
+                    notAWorktree = true;
+                    return null;
+                }
+                return d;                                                          // a submodule: treat as a repo
+            }
+            if (string.Equals(d, root, StringComparison.Ordinal)) break;           // never above the project root
+        }
+        return null;
+    }
+
+    /// <summary>The <c>gitdir:</c> target of a `.git` file, or null when it cannot be read.</summary>
+    static string? ReadGitFile(string path)
+    {
+        try
+        {
+            foreach (var line in File.ReadLines(path))
+            {
+                var t = line.Trim();
+                if (t.StartsWith("gitdir:", StringComparison.Ordinal))
+                    return t["gitdir:".Length..].Trim();
+            }
+        }
+        catch { }
+        return null;
+    }
+
+    /// <summary>Does the folder contain any git repo at all (at any depth), i.e. is it a container worth mirroring?</summary>
+    public static bool HaveNestedRepos(string root) => Nested(root).Count > 0;
+
+    /// <summary>
+    /// Git repositories inside <paramref name="root"/> (not including <paramref name="root"/> itself), ignoring the
+    /// usual noise. Returns a WORKTREE's repo directory too, which is what the session needs to branch from.
+    /// </summary>
+    public static List<string> Nested(string root)
+    {
+        var found = new List<string>();
+        try
+        {
+            foreach (var dir in SafeEnumerate(root, 0, 6))
+            {
+                var dot = Path.Combine(dir, ".git");
+                if (Directory.Exists(dot)) found.Add(dir);
+                else if (File.Exists(dot) && !IsLinkedWorktree(dot)) found.Add(dir);   // a submodule is a real repo
+            }
+        }
+        catch { }
+        found.Sort(StringComparer.Ordinal);
+        return found;
+    }
+
+    static bool IsLinkedWorktree(string gitFile)
+    {
+        var p = ReadGitFile(gitFile);
+        return p is not null && p.Replace('\\', '/').Contains("/.git/worktrees/", StringComparison.Ordinal);
+    }
+
+    /// <summary>Directories under <paramref name="root"/>, skipping the ones that never hold a repo and are huge.</summary>
+    static IEnumerable<string> SafeEnumerate(string root, int depth, int maxDepth)
+    {
+        if (depth > maxDepth) yield break;
+        string[] dirs;
+        try { dirs = Directory.GetDirectories(root); } catch { yield break; }
+        foreach (var d in dirs)
+        {
+            var name = Path.GetFileName(d);
+            if (name is "node_modules" or ".venv" or "venv" or "__pycache__" or "target" or ".cache" or ".terraform" or "site-packages") continue;
+            yield return d;
+            foreach (var sub in SafeEnumerate(d, depth + 1, maxDepth)) yield return sub;
+        }
+    }
+
     // ------------------------------------------------------------------ internals
 
-    static void PruneRegistrations(string root) => Git(root, "worktree", "prune");
+    static void PruneRegistrations(string root)
+    {
+        // `git worktree prune` is meaningless outside a repo and prints an error; a container root is exactly that.
+        if (!Directory.Exists(Path.Combine(root, ".git")) && !File.Exists(Path.Combine(root, ".git"))) return;
+        Git(root, "worktree", "prune");
+    }
 
     static bool IsDirty(string dir) => Git(dir, "status", "--porcelain").stdout.Trim().Length > 0;
 

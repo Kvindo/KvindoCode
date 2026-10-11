@@ -46,6 +46,7 @@ public sealed class BeepDiagnosticsTests(ITestOutputHelper o)
     public async Task Sounds_are_coalesced_app_wide()
     {
         using var sb = new Sandbox();
+        using var notifyOn = new NotifyOptIn();       // this test asserts real spawning
         var s = sb.Settings(x => { x.NotificationSounds = true; x.NativeBeep = true; x.NotificationCommand = "/bin/true"; });
         var lines = new List<string>();
         var saved = Notifier.Trace;
@@ -70,6 +71,7 @@ public sealed class BeepDiagnosticsTests(ITestOutputHelper o)
     public async Task The_sound_is_spawned_off_the_calling_thread()
     {
         using var sb = new Sandbox();
+        using var notifyOn = new NotifyOptIn();       // this test asserts real spawning
         var s = sb.Settings(x => { x.NativeBeep = true; x.NotificationCommand = "/bin/sleep 2"; });
         Notifier.ResetCoalesceForTest();
         var sw = System.Diagnostics.Stopwatch.StartNew();
