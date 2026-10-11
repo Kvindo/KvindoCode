@@ -3,7 +3,13 @@ using System.Text.RegularExpressions;
 namespace KvindoCode.Core.Secrets;
 
 /// <summary>One value recognised in a text, with the exact span it occupies. <see cref="Exact"/> = the human chose these bounds (never trimmed); <see cref="Name"/> = the vault name they chose.</summary>
-public readonly record struct SecretSpan(int Start, int Length, string Type, double Confidence, string? Name = null, bool Exact = false)
+/// <param name="Heuristic">True when this span came from a PROXIMITY rule — "a secret-ish key sits near this token"
+/// (our assignment rule, gitleaks' <c>generic-api-key</c>) rather than from a rule anchored on the value's own format
+/// (a vendor key shape, a PEM block, a JWT, a URL). Only heuristic spans are eligible for the store-time confirmation,
+/// because those are the ones that fire on ordinary words — the vault filled up with plain identifiers and placeholders
+/// (reported 2026-10-11). A format-anchored span is never demoted, so real credentials keep being stored
+/// silently.</param>
+public readonly record struct SecretSpan(int Start, int Length, string Type, double Confidence, string? Name = null, bool Exact = false, bool Heuristic = false)
 {
     public int End => Start + Length;
     public string TypeOrOther => string.IsNullOrWhiteSpace(Type) ? "other" : Type;
@@ -177,6 +183,27 @@ public static partial class DeterministicSecretDetector
     }
 
     static bool IsSecretKeyName(string key) => key.Length > 0 && Regex.IsMatch(key, SecretKeyWords, RegexOptions.IgnoreCase);
+
+    /// <summary>
+    /// True when a value is just a WORD — letters and underscores, no digits, no punctuation.
+    /// </summary>
+    /// <remarks>
+    /// Used at store time to decide whether a <see cref="SecretSpan.Heuristic"/> match is worth asking the human about.
+    /// It is deliberately the narrowest useful test: a credential almost always carries a digit or a symbol, so this
+    /// cannot demote one. It rejects the class that filled the vault — plain identifiers such as a resource-type
+    /// name, and snake_case placeholders — while leaving untouched <c>ghp_…</c>,
+    /// <c>AKIA…</c>, <c>1234:token</c>, <c>550e8400-…</c>, <c>imap.gmail.com:993</c>, hex digests, emails and paths
+    /// (all contain a digit or a symbol). Do NOT widen it to "looks unlike a secret": a real letters-only passphrase
+    /// must still be storable, and this only *asks* — it never deletes (reported 2026-10-11).
+    /// </remarks>
+    public static bool LooksLikeAPlainWord(string? value)
+    {
+        var v = (value ?? "").Trim('"', '\'', '`', ';', ',');
+        if (v.Length is < 3 or > 64) return false;
+        foreach (var c in v)
+            if (!(char.IsAsciiLetter(c) || c == '_')) return false;
+        return !v.All(c => c == '_');        // a bare "___" is not a word
+    }
 
     /// <summary>
     /// Whether a candidate the local model proposed is worth interrupting the user for: not a placeholder, a
@@ -383,7 +410,9 @@ public static partial class DeterministicSecretDetector
             if (IsProseWord(s, v)) continue;                                    // "a secret: excluded from detection" — a sentence, not an assignment
             if (!strong && !LooksSecretish(value)) continue;                    // "auth: basic" is prose, not a secret
             var type = key.Contains("pass", StringComparison.OrdinalIgnoreCase) || key.Contains("парол", StringComparison.OrdinalIgnoreCase) ? "password" : "token";
-            Add(result, v.Index, v.Length, type, strong ? 0.9 : 0.8);
+            // heuristic: this rule fires on the KEY being secret-ish, not on the value's own shape, so an ordinary word
+            // assigned to a secret-ish key matched. Such a span is what the store-time confirmation inspects (2026-10-11).
+            Add(result, v.Index, v.Length, type, strong ? 0.9 : 0.8, heuristic: true);
         }
 
         // The gitleaks default rules (MIT): ~220 vendor token formats + a generic key/secret/password rule with entropy and
@@ -457,10 +486,10 @@ public static partial class DeterministicSecretDetector
 
     // ---------------------------------------------------------------- span bookkeeping
 
-    static void Add(List<SecretSpan> list, int start, int length, string type, double confidence)
+    static void Add(List<SecretSpan> list, int start, int length, string type, double confidence, bool heuristic = false)
     {
         if (length <= 0) return;
-        list.Add(new SecretSpan(start, length, type, confidence));
+        list.Add(new SecretSpan(start, length, type, confidence, null, false, heuristic));
     }
 
     static bool Overlaps(List<SecretSpan> spans, int start, int length)
@@ -488,7 +517,7 @@ public static partial class DeterministicSecretDetector
             {
                 // overlapping: a wider span starting earlier already covers this one
                 if (span.End <= lastEnd) continue;
-                kept.Add(new SecretSpan(lastEnd, span.End - lastEnd, span.Type, span.Confidence));
+                kept.Add(new SecretSpan(lastEnd, span.End - lastEnd, span.Type, span.Confidence, null, false, span.Heuristic));
                 lastEnd = span.End;
                 continue;
             }
