@@ -95,7 +95,11 @@ public static class GitleaksRules
                     var secret = grp.Value;
                     if (rule.Entropy > 0 && Entropy(secret) <= rule.Entropy) continue;
                     if (IsAllowed(global, text, m, secret, gaveUpFlag) || rule.Allows.Any(a => IsAllowed(a, text, m, secret, gaveUpFlag))) continue;
-                    found.Add(new SecretSpan(grp.Index, grp.Length, TypeOf(rule.Id), 0.9));
+                    // Marked heuristic when the rule is the GENERIC one: it matches on a secret-ish key next to almost
+                    // anything, so an ordinary word assigned to one qualified. Every rule emits 0.9, so confidence cannot tell
+                    // them apart — the rule ID is the only honest discriminator (2026-10-11). Named vendor rules
+                    // (AWS, Slack, …) are format-anchored and stay non-heuristic.
+                    found.Add(new SecretSpan(grp.Index, grp.Length, TypeOf(rule.Id), 0.9, null, false, IsGenericRule(rule.Id)));
                 }
             }
             catch (RegexMatchTimeoutException) { gaveUpFlag[0] = true; /* this rule gave up on this text; the others still run */ }
@@ -103,6 +107,10 @@ public static class GitleaksRules
         gaveUp = gaveUpFlag[0];
         return found;
     }
+
+    /// <summary>gitleaks' catch-all key/secret/password rule: it matches on the KEY being secret-ish, so it fires on
+    /// ordinary words and identifiers as well as on values. Its spans are the ones worth confirming before storing.</summary>
+    static bool IsGenericRule(string id) => id.Contains("generic", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>The configured group, else the first non-empty capture group, else the whole match (gitleaks semantics).</summary>
     static Group PickGroup(Match m, int configured)

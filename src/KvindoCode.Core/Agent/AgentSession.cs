@@ -255,6 +255,31 @@ public sealed class AgentSession : IDisposable
         spans = Merge(spans.Concat(confirmed));
         uncertain = Strip(spans, uncertain);
 
+        // A HEURISTIC match that is just a word is confirmed instead of being stored silently. The rule fired because a
+        // secret-ish KEY sat next to it, not because the value is a credential, so the vault filled up with ordinary
+        // identifiers and placeholders — all masked for ever, and wrongly (reported 2026-10-11). Format-anchored matches
+        // (vendor key shapes, PEM, JWT, URL credentials) are never heuristic, so a real secret still stores silently.
+        //
+        // ONLY when interactive. The user's own message takes the `!interactive` branch below, which CLEARS `uncertain`
+        // — moving a span there would therefore leave it neither stored nor masked, sending a typed credential to the
+        // provider in plaintext. That is a leak, not a tidy-up, so a user message keeps storing everything (and is
+        // never asked to classify its own words).
+        if (interactive)
+        {
+            foreach (var span in spans.ToList())
+            {
+                if (!span.Heuristic) continue;
+                var value = span.Exact
+                    ? text.Substring(span.Start, span.Length)
+                    : text.Substring(span.Start, span.Length).Trim('"', '\'', '`', ';', ',');
+                if (value.Length == 0 || vault.IsExcluded(value)) continue;
+                if (!DeterministicSecretDetector.LooksLikeAPlainWord(value)) continue;
+                spans.Remove(span);
+                uncertain.Add(span);
+                TraceUncertain($"“{value}” matched a secret-ish key but reads as a plain word — asking before storing it.");
+            }
+        }
+
         // The human's own message: store and mask what the PATTERNS are sure about, never ask. See `interactive`.
         if (!interactive) uncertain.Clear();
 
@@ -263,6 +288,12 @@ public sealed class AgentSession : IDisposable
 
         return await VaultAsync(vault, text, spans, ct);
     }
+
+    /// <summary>What the store-time confirmation decided, and why. A no-op unless a trace sink is installed (tests).</summary>
+    void TraceUncertain(string what) => _uncertainTrace?.Invoke(what);
+    Action<string>? _uncertainTrace;
+    /// <summary>Test hook: explains what was routed to the confirmation dialog and why.</summary>
+    internal void OnUncertain(Action<string> sink) => _uncertainTrace = sink;
 
     /// <summary>The line holding the value plus one line each side (capped), as stored with a "not a secret" decision.</summary>
     static string ContextAround(string text, int start, int length)

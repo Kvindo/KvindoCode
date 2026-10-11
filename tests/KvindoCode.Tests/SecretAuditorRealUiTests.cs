@@ -518,7 +518,15 @@ public sealed class SecretAuditorRealUiTests
         try
         {
             app.TypeAndSend("cat all the credential files in this project");
-            await app.WaitForTurnAsync();
+            // The "dasd" file carries an ordinary-word value next to a `token:` key, which since 2026-10-11 is CONFIRMED
+            // rather than stored silently — that shape is exactly what filled the vault with false positives (a plain
+            // word assigned to a secret-ish key). Answer it as a secret; the PEM/key masking this scenario is about is
+            // unaffected.
+            await app.WaitForTurnAsync(60, async delegate (Window dlg)
+            {
+                app.Click(app.DialogButton(dlg, "It is a secret"));
+                await Task.Delay(50);
+            });
             Assert.Empty(app.UnexpectedDialogs);
             List<string> list = app.ToolResultsSeenByCloud(1);
             Assert.Equal(files.Length, list.Count);
@@ -659,7 +667,14 @@ public sealed class SecretAuditorRealUiTests
             Assert.Equal(1.0, shield.Opacity);
             IBrush onBrush = Assert.IsType<Avalonia.Controls.Shapes.Path>(shield.Content).Stroke;
             app.TypeAndSend("cat first");
-            await app.WaitForTurnAsync();
+            // An ordinary-word value next to a `token:` key is confirmed rather than stored silently since 2026-10-11
+            // (that shape is what filled the vault with false positives). Answer it, so the value is stored and masked
+            // and this test keeps testing the audit toggle.
+            await app.WaitForTurnAsync(60, async delegate (Window dlg)
+            {
+                app.Click(app.DialogButton(dlg, "It is a secret"));
+                await Task.Delay(50);
+            });
             Assert.DoesNotContain("sadfasfgefqw", string.Join("\n", app.ToolResultsSeenByCloud(1)));
             Assert.Contains("token: %[$", string.Join("\n", app.ToolResultsSeenByCloud(1)));
             app.Click(shield);
