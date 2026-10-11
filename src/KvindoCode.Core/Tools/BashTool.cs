@@ -30,19 +30,31 @@ public sealed class BashTool : Tool
     {
         var command = Str(input, "command");
         if (string.IsNullOrWhiteSpace(command)) return Task.FromResult(ToolResult.Err("command is empty"));
+        var mirror = ctx.Workspace is { Mirrored: true } mws ? mws : null;
+        // An absolute `cd` to a path INSIDE the project is REWRITTEN to the session's mirrored path rather than
+        // refused. Refusing it broke working sessions: the model retried an absolute `cd` for a read-only grep and
+        // burned 123.6 s, and by then a full worktree checkout had already been materialised for a command we then
+        // threw away. Rewriting is what the mirror is for — reads work, and any write still lands in the session's own
+        // worktree. Only a `cd` that leaves the project entirely (or another session's worktree) is still refused.
+        if (mirror is not null)
+        {
+            if (RewriteAbsoluteProjectCds(command, ctx, mirror, out var rewritten) is { } rewriteError)
+                return Task.FromResult(ToolResult.Err(rewriteError));
+            command = rewritten;
+        }
         // A mirrored session (a project folder that CONTAINS repos rather than being one) runs with its cwd in the
         // mirror, so a relative path lands inside the session's own checkout of that repo — provided the worktree
-        // exists by the time the command runs. Materialise any repo the command names first; a repo that cannot be
-        // materialised simply is not in the mirror, so the command FAILS LOUDLY instead of silently writing the
-        // shared checkout. (Absolute paths in a command are best-effort, as documented: Bash is not a hard sandbox.)
-        var mirror = ctx.Workspace is { Mirrored: true } mws ? mws : null;
+        // exists by the time the command runs. Materialise any repo the command names; a repo that cannot be
+        // materialised simply is not in the mirror, so the command FAILS LOUDLY instead of writing the shared checkout.
+        // This runs AFTER the rewrite and AFTER the refusal check below, so we never pay for a checkout we will reject.
+        // Each case gets its own wording: a mirrored session is told that the PROJECT works either way and only the
+        // outside is refused, while a repo-root session keeps the original "leaves this session's work tree".
+        if ((ctx.Isolated || mirror is not null) && ctx.WorkDir.Length > 0 && CdsOutside(command, ctx.WorkDir, out var outsideTarget))
+            return Task.FromResult(ToolResult.Err(mirror is not null
+                ? $"Refused: `cd {outsideTarget}` is outside this project, and this session works in its own copy at {ctx.WorkDir}. " +
+                  "Paths inside the project work directly (absolute or relative); anything outside it does not."
+                : $"Refused: `cd {outsideTarget}` leaves this session's work tree ({ctx.WorkDir}). Work inside it."));
         if (mirror is not null) EnsureReposForCommand(command, ctx, mirror, ct);
-        // Best-effort: an isolated session must not `cd` out of its worktree into the shared tree (or a peer's). The
-        // durable guard is the cwd-persistence clamp below; this stops the common explicit form before it runs.
-        if ((ctx.Isolated || mirror is not null) && ctx.WorkDir.Length > 0 && CdsOutside(command, ctx.WorkDir, out var target))
-            return Task.FromResult(ToolResult.Err(
-                $"Refused: `cd {target}` leaves this session's work tree ({ctx.WorkDir})." +
-                (mirror is not null ? " To work in a repo of this project, use its path RELATIVE to the project root (e.g. `cd APPLICATIONS/svc`)." : " Work inside it.")));
         // The model only ever sees vault values as markers. Expand them here, immediately before the shell runs the text; the
         // transcript keeps the marker, and anything the command prints is masked again by the tool-output audit.
         if (KvindoCode.Core.Secrets.SecretPlaceholders.Contains(command))
@@ -149,6 +161,42 @@ public sealed class BashTool : Tool
         int code = proc.HasExited ? proc.ExitCode : -1;
         if (code != 0) return new ToolResult((output.Length > 0 ? output + "\n" : "") + $"Exit code: {code}", true);
         return ToolResult.Ok(output.Length == 0 ? "(command completed with no output)" : output);
+    }
+
+    /// <summary>
+    /// Rewrite every absolute `cd` that points INTO the project so it points at the session's mirrored path instead.
+    /// </summary>
+    /// <remarks>
+    /// A mirrored session's real files live in the project (readable, and the source of truth for reads), while its
+    /// writes belong in its own worktree. Refusing an absolute `cd` into the project therefore broke ordinary work:
+    /// the reported case was a read-only `grep -ril … APPLICATIONS/…` run from the container root, which the model
+    /// simply retried — 123.6 s — and the refusal came AFTER a full worktree checkout had been materialised for the
+    /// command. Rewriting keeps the command meaningful and keeps writes protected, which is the point of the mirror.
+    /// A target outside the project is left alone for <see cref="CdsOutside"/> to refuse.
+    /// </remarks>
+    /// <returns>An error when the rewrite cannot be trusted, else null; <paramref name="result"/> is the command.</returns>
+    static string? RewriteAbsoluteProjectCds(string command, ToolContext ctx, SessionWorkspace ws, out string result)
+    {
+        result = command;
+        foreach (Match m in Regex.Matches(command, "(?:^|[\\s;&|(])cd\\s+(?:--\\s+)?(\"[^\"]+\"|'[^']+'|\\S+)"))
+        {
+            var raw = m.Groups[1].Value;
+            var token = raw.Trim('"', '\'');
+            if (token.Length == 0 || token.StartsWith("-")) continue;
+            var expanded = Paths.Expand(token);
+            if (!Path.IsPathRooted(expanded)) continue;                       // relative: already inside the mirror
+            var full = Path.GetFullPath(expanded);
+            if (!Paths.IsUnder(full, ws.Root)) continue;                      // outside the project: CdsOutside decides
+            if (Paths.IsUnder(full, ws.WorkDir)) continue;                    // already the mirror
+
+            var mirrored = full == ws.Root
+                ? ws.WorkDir
+                : Path.Combine(ws.WorkDir, Path.GetRelativePath(ws.Root, full));
+            // The model keeps its reference to the project path; we only change where the command executes. Written with
+            // single quotes so a space in a path cannot split into two arguments.
+            result = result.Replace(m.Groups[1].Value, "'" + mirrored.Replace("'", "'\\''") + "'", StringComparison.Ordinal);
+        }
+        return null;
     }
 
     /// <summary>
