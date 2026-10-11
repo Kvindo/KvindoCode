@@ -136,28 +136,50 @@ public sealed class ProtectAllocationTests
     // ---------------------------------------------------------------- the Read path
 
     /// <summary>
-    /// The Read tool used the no-targets overload per line — a locked whole-vault read for EVERY line. This pins that a
-    /// multi-line Read of a big file does not scale its vault reads with the number of lines.
+    /// The Read tool must consult the vault ONCE per file, not once per line.
     /// </summary>
+    /// <remarks>
+    /// Measured by ALLOCATION, not by a counter, and deliberately so. My first version asserted
+    /// <c>vault.RedactorBuilds</c> — which is incremented only inside <c>SecretVault.Redactor()</c>, while the Read path
+    /// calls <c>RedactionTargets()</c> directly. The counter was therefore 0 in BOTH the fixed and the broken code, the
+    /// assertion reduced to <c>0 &lt;= 1</c>, and the test PASSED against the pre-fix implementation it exists to pin
+    /// (found by the allocation-churn session while reviewing 7223f13, 2026-10-11 — I reproduced it by reverting the
+    /// hoist and watching it pass). Allocation cannot lie that way: the old shape built and sorted a fresh 400-entry
+    /// target list on every line, ~68 KB per line, ~34 MB for a 500-line file.
+    /// </remarks>
     [Fact]
-    public async Task Reading_a_file_masks_its_lines_without_a_vault_read_per_line()
+    public async Task Reading_a_file_reads_the_vault_once_not_once_per_line()
     {
         using var sb = new Sandbox();
         var vault = BigVault(sb);
+        var targets = vault.RedactionTargets();
+        Assert.True(targets.Count > 400, "the vault must be big enough for this test to mean anything");
+        // Take the value from the TEST vault rather than writing a literal: a literal secret-shaped string here is
+        // rewritten to its marker by the very masker under test, which makes the assertion assert nothing.
+        var (name, value) = targets[targets.Count / 2];
+
         var session = new AgentSession(sb.Settings(), Script.Client(), sb.Project, new FakeInteraction());
         var ctx = new ToolContext { Cwd = sb.Project, Settings = session.Settings, Project = session.Project, Session = session, Interaction = new FakeInteraction() };
 
-        var lines = Enumerable.Range(0, 500).Select(i => i == 300 ? "secret=generated-value-0300-abcdefghij" : $"ordinary line {i} with nothing of interest").ToList();
+        const int lineCount = 500;
+        var lines = Enumerable.Range(0, lineCount)
+            .Select(i => i == 300 ? $"secret={value}" : $"ordinary line {i} with nothing of interest").ToList();
         var file = sb.Write("big.txt", string.Join("\n", lines));
 
-        var before = vault.RedactorBuilds;
+        // masking must survive the optimisation: the one line that carries a value is replaced by its marker
         var res = await new ReadTool().RunAsync(new JsonObject { ["file_path"] = file }, ctx, default);
-
         Assert.False(res.IsError, res.Output);
         Assert.Contains("ordinary line 0 ", res.Output);
-        Assert.DoesNotContain("generated-value-0300-abcdefghij", res.Output);      // the line that HAS a secret is masked
-        Assert.Contains(SecretPlaceholders.Marker("vault-secret-0300"), res.Output);
-        // the vault is consulted once for the file, not once per line (the old shape read it 500 times)
-        Assert.True(vault.RedactorBuilds - before <= 1, "the Read path is still consulting the vault per line");
+        Assert.DoesNotContain(value, res.Output);
+        Assert.Contains(SecretPlaceholders.Marker(name), res.Output);
+
+        // and the vault is consulted once for the file, not once per line
+        await new ReadTool().RunAsync(new JsonObject { ["file_path"] = file }, ctx, default);   // warm any lazily-built state
+        var before = GC.GetAllocatedBytesForCurrentThread();
+        await new ReadTool().RunAsync(new JsonObject { ["file_path"] = file }, ctx, default);
+        var allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+
+        Assert.True(allocated < 8_000_000,
+            $"reading {lineCount} lines allocated {allocated / 1024.0 / 1024.0:0.0} MB — the Read path is still building the vault's target list per line");
     }
 }
