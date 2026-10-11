@@ -183,6 +183,7 @@ public sealed class SecretVault
             _values.Clear();
             _keyStamp = KeyStamp();
             DecryptAll();
+            _cachedRedactor = null;                 // what can be read may have changed with the key
             return true;
         }
     }
@@ -217,6 +218,7 @@ public sealed class SecretVault
             _key = null;
             _keyStamp = null;
             _values.Clear();
+            _cachedRedactor = null;                 // this epoch is over: a redactor from it must never be served again
         }
     }
 
@@ -658,8 +660,42 @@ public sealed class SecretVault
         }
     }
 
-    /// <summary>A masker for the current contents (built once per model response).</summary>
-    public SecretRedactor Redactor() => new(RedactionTargets().Select(t => (t.Name, t.Value)));
+    /// <summary>
+    /// A masker for the current contents, built once per vault state.
+    /// </summary>
+    /// <remarks>
+    /// Building one walks every stored value (raw AND JSON-escaped) and constructs an Aho-Corasick automaton, so it is
+    /// not free: measured on the live app it was 26.9% of CPU inclusive, and the tool-call masking path called it once
+    /// per tool call (reported by the allocation-churn session 2026-10-11). The contents are a pure function of
+    /// <see cref="Version"/>, which <see cref="SaveFile"/> bumps on EVERY mutation (create, update, delete, reload,
+    /// move-to-non-secret), so caching on it is sound. It is additionally dropped on Lock/Unlock: those do not change
+    /// the target set, but they do change whether a value can be read at all, and keeping the epoch explicit means a
+    /// redactor built while the vault was empty can never outlive an unlock.
+    /// </remarks>
+    public SecretRedactor Redactor()
+    {
+        lock (_lock)
+        {
+            if (_key is null) { RedactorBuilds++; return new SecretRedactor(Array.Empty<(string, string)>()); }   // locked: nothing is known
+            if (_cachedRedactor is null || _cachedRedactorVersion != _version)
+            {
+                _cachedRedactor = new SecretRedactor(RedactionTargets().Select(t => (t.Name, t.Value)));
+                _cachedRedactorVersion = _version;
+                RedactorBuilds++;
+            }
+            else RedactorHits++;
+            return _cachedRedactor!;
+        }
+    }
+
+    /// <summary>Redactors actually constructed, and times a cached one was served. Diagnostics and tests only: a build
+    /// is an Aho-Corasick automaton over every stored value (raw and JSON-escaped), which is why it is cached at all.</summary>
+    public long RedactorBuilds { get; private set; }
+    /// <summary>See <see cref="RedactorBuilds"/>.</summary>
+    public long RedactorHits { get; private set; }
+
+    SecretRedactor? _cachedRedactor;
+    int _cachedRedactorVersion = -1;
 
     public bool IsExcluded(string value) => _data.ExcludedSha256.Contains(Sha256Hex(value), StringComparer.OrdinalIgnoreCase);
 

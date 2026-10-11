@@ -155,8 +155,13 @@ public sealed class AuditingLlmClient : ILlmClient
         // walked the joined 800 KB string once per stored value: ~139 ms of the request, measured 2026-10-11. The
         // per-value loop still runs, but only when the single-pass automaton says a value really is in there.
         var targets = _vault.RedactionTargets();
+        // ONE masker for the whole request, and it is itself cached on the vault's Version, so a request does not
+        // rebuild the automaton at all while the vault is unchanged. It is used for BOTH the single-pass "is any known
+        // value in here" check and the tool-call masking below — previously the latter rebuilt it per TOOL CALL, which
+        // was the hottest remaining code in the app (26.9% inclusive, reported 2026-10-11).
+        var redactor = _vault.Redactor();
         var everything = string.Join("\n", EveryOutboundString(request));
-        bool anyKnown = new SecretRedactor(targets).Contains(everything);
+        bool anyKnown = redactor.Contains(everything);
         if (anyKnown)
             foreach (var (name, value) in targets)
                 if (value.Length > 0 && everything.Contains(value, StringComparison.Ordinal) && !names.Contains(name))
@@ -186,7 +191,7 @@ public sealed class AuditingLlmClient : ILlmClient
         // Said once per value: a secret the vault already holds is masked silently on every later request.
         if (newlyStored.Count > 0)
             _onNotice?.Invoke($"Found {newlyStored.Count} new secret(s) in the conversation and replaced them with placeholders ({string.Join(", ", newlyStored)}). Use Write/Edit or Bash to put them back where they belong.");
-        return await _inner.StreamAsync(ProtectRequest(request, targets), callbacks, ct);
+        return await _inner.StreamAsync(ProtectRequest(request, targets, redactor), callbacks, ct);
     }
 
     /// <summary>Replace a value that could not be turned into a marker with the irreversible redaction text.</summary>
@@ -309,15 +314,17 @@ public sealed class AuditingLlmClient : ILlmClient
     /// tree instead and rewrite only the string values, which is what the read side already does
     /// (<c>SecretRedactor.RedactJson</c>). Unparsable arguments are left untouched rather than mangled.
     /// </remarks>
-    string ProtectArguments(string json)
+    /// <param name="redactor">The request's masker, built ONCE (see the call site). Passing it in is the fix for a
+    /// rebuild per TOOL CALL: the constructor walks every stored value twice (raw and JSON-escaped) and builds an
+    /// Aho-Corasick automaton, which measured 26.9% of CPU inclusive on the live app once the scan memoisation removed
+    /// the other costs (reported by the allocation-churn session 2026-10-11).</param>
+    string ProtectArguments(string json, SecretRedactor redactor)
     {
         // a repeated key must not throw: the parse deferred the key handling, and the redactor below walks the tree
         var node = KvindoCode.Core.JsonText.TryParse(json);
         if (node is null) return json;               // truncated / unparsable arguments: leave them exactly as they are
-        if (node is null) return json;
         // NOT gated on a marker being present: the arguments may carry the RAW value of a stored secret (a tool call
         // from an earlier turn), which must be replaced by its marker exactly as the plain-text path does.
-        var redactor = _vault.Redactor();
         if (redactor.IsEmpty) return json;
         return SecretRedactor.Serialize(redactor.RedactJson(node)!);
     }
@@ -325,14 +332,15 @@ public sealed class AuditingLlmClient : ILlmClient
     /// <param name="targets">The vault's redaction targets, read ONCE for the request. Passing them in is the fix for
     /// 552 locked vault reads per request (one per message, each re-decrypting the whole vault) — measured 119 ms,
     /// against ~10 ms when hoisted (2026-10-11).</param>
-    LlmRequest ProtectRequest(LlmRequest r, IReadOnlyList<(string Name, string Value)> targets)
+    /// <param name="redactor">The request's masker, reused for every tool call instead of rebuilt for each one.</param>
+    LlmRequest ProtectRequest(LlmRequest r, IReadOnlyList<(string Name, string Value)> targets, SecretRedactor redactor)
     {
         var msgs = r.Messages.Select(m => new ChatMessage
         {
             Role = m.Role,
             Content = SecretPlaceholders.Protect(m.Content ?? "", targets),
             Reasoning = SecretPlaceholders.Protect(m.Reasoning ?? "", targets),
-            ToolCalls = m.ToolCalls?.Select(c => new ToolCall { Id = c.Id, Name = c.Name, Arguments = ProtectArguments(c.Arguments) }).ToList(),
+            ToolCalls = m.ToolCalls?.Select(c => new ToolCall { Id = c.Id, Name = c.Name, Arguments = ProtectArguments(c.Arguments, redactor) }).ToList(),
             ToolCallId = m.ToolCallId, IsError = m.IsError, IsSummary = m.IsSummary, IsNotification = m.IsNotification, IsInternal = m.IsInternal,
             Model = m.Model, Ts = m.Ts, DurationMs = m.DurationMs, Images = m.Images?.ToList(),
         }).ToList();
