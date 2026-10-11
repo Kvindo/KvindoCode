@@ -297,8 +297,18 @@ public sealed class MultiRepoWorkspaceTests
         Assert.Equal("", Status(empty));
     }
 
+    /// <summary>
+    /// An absolute `cd` INTO the project is rewritten to the session's mirror, not refused.
+    /// </summary>
+    /// <remarks>
+    /// This test previously asserted the opposite (refusal, with a "use a RELATIVE path" hint), and that behaviour broke
+    /// real sessions: a read-only `grep -ril … APPLICATIONS/…` run from the container root was refused, the model
+    /// retried it and burned 123.6 s, and the refusal came AFTER a full worktree checkout had been materialised for the
+    /// command. A session that cannot navigate to the project it was opened on is not protected, it is broken
+    /// (reported 2026-10-11).
+    /// </remarks>
     [Fact]
-    public async Task Bash_cd_to_an_absolute_shared_path_is_refused_with_a_relative_hint()
+    public async Task Bash_cd_to_an_absolute_project_path_runs_in_the_sessions_mirror()
     {
         using var sb = new Sandbox();
         BuildContainer(sb);
@@ -306,10 +316,76 @@ public sealed class MultiRepoWorkspaceTests
         var ws = Workspaces.Ensure(sb.Project, s.Info.Id, sb.Settings());
         var ctx = MirrorCtx(sb, s, ws);
 
-        var res = await new BashTool().RunAsync(new JsonObject { ["command"] = $"cd {Repo(sb, "APPLICATIONS/alpha")} && ls" }, ctx, default);
+        // the container root, as the model writes it
+        var root = await new BashTool().RunAsync(new JsonObject { ["command"] = $"cd {sb.Project} && pwd" }, ctx, default);
+        Assert.False(root.IsError, root.Output);
+        Assert.Contains(ws.WorkDir, root.Output);
+
+        // and an absolute path down into one of the repos
+        var repo = await new BashTool().RunAsync(new JsonObject { ["command"] = $"cd {Repo(sb, "APPLICATIONS/alpha")} && pwd" }, ctx, default);
+        Assert.False(repo.IsError, repo.Output);
+        Assert.Contains(Path.Combine(ws.WorkDir, "APPLICATIONS", "alpha"), repo.Output);
+    }
+
+    /// <summary>A WRITE after an absolute `cd` must land in the session's worktree, not the shared checkout.</summary>
+    [Fact]
+    public async Task Bash_writing_after_an_absolute_cd_lands_in_the_sessions_worktree()
+    {
+        using var sb = new Sandbox();
+        BuildContainer(sb);
+        var s = new AgentSession(sb.Settings(), Script.Client(), sb.Project, new FakeInteraction());
+        var ws = Workspaces.Ensure(sb.Project, s.Info.Id, sb.Settings());
+        var ctx = MirrorCtx(sb, s, ws);
+
+        var res = await new BashTool().RunAsync(new JsonObject
+        {
+            ["command"] = $"cd {Repo(sb, "APPLICATIONS/alpha")} && echo written > abs-out.txt && git rev-parse --abbrev-ref HEAD",
+        }, ctx, default);
+
+        Assert.False(res.IsError, res.Output);
+        Assert.Contains("kv/" + s.Info.Id, res.Output);                        // git ran against the session's worktree
+        Assert.True(File.Exists(Path.Combine(ws.WorkDir, "APPLICATIONS/alpha/abs-out.txt")));
+        Assert.False(File.Exists(Path.Combine(Repo(sb, "APPLICATIONS/alpha"), "abs-out.txt")));
+        Assert.Equal("", Status(Repo(sb, "APPLICATIONS/alpha")));             // the shared checkout is untouched
+    }
+
+    /// <summary>A `cd` that leaves the project entirely is still refused — the mirror does not widen the session.</summary>
+    [Fact]
+    public async Task Bash_cd_outside_the_project_is_still_refused()
+    {
+        using var sb = new Sandbox();
+        BuildContainer(sb);
+        var s = new AgentSession(sb.Settings(), Script.Client(), sb.Project, new FakeInteraction());
+        var ws = Workspaces.Ensure(sb.Project, s.Info.Id, sb.Settings());
+        var ctx = MirrorCtx(sb, s, ws);
+
+        var res = await new BashTool().RunAsync(new JsonObject { ["command"] = "cd /tmp && ls" }, ctx, default);
 
         Assert.True(res.IsError);
-        Assert.Contains("RELATIVE", res.Output);
+        Assert.Contains("outside this project", res.Output);
+    }
+
+    /// <summary>
+    /// A REFUSED command must not pay for a worktree checkout first. The refusal used to come after the ensure pass, so
+    /// the reported command materialised a large repo before being thrown away — the 123.6 s in the user's screenshot.
+    /// </summary>
+    [Fact]
+    public async Task A_refused_command_does_not_materialise_any_worktree_first()
+    {
+        using var sb = new Sandbox();
+        BuildContainer(sb);
+        var s = new AgentSession(sb.Settings(), Script.Client(), sb.Project, new FakeInteraction());
+        var ws = Workspaces.Ensure(sb.Project, s.Info.Id, sb.Settings());
+        var ctx = MirrorCtx(sb, s, ws);
+
+        // names a repo (so the ensure pass would act) AND cd's outside the project (so it is refused)
+        var res = await new BashTool().RunAsync(new JsonObject
+        {
+            ["command"] = $"cd /tmp && grep -ril x {Repo(sb, "APPLICATIONS/alpha")}",
+        }, ctx, default);
+
+        Assert.True(res.IsError);
+        Assert.Equal(0, ws.RepoCount);                                        // nothing was checked out
     }
 
     // ---------------------------------------------------------------- lifecycle
