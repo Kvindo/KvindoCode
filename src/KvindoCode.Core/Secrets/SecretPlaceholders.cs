@@ -18,18 +18,34 @@ public static partial class SecretPlaceholders
         => Protect(text, (vault ?? SecretVault.Default).RedactionTargets());
 
     /// <summary>
-    /// Replace every value of <paramref name="targets"/> with its marker, longest first.
+    /// Replace every value of <paramref name="targets"/> with its marker. <paramref name="targets"/> must already be
+    /// in longest-value-first order (which is what <c>SecretVault.RedactionTargets()</c> returns).
     /// </summary>
     /// <remarks>
     /// Split out so a caller that masks a whole REQUEST reads the vault once instead of once per message: this method
     /// used to call <c>RedactionTargets()</c> itself, and the audit path calls it for every message, so a 552-message
-    /// history did 552 locked vault reads (measured 2026-10-11). Contents are unchanged — the sort is the same one.
+    /// history did 552 locked vault reads (measured 2026-10-11).
+    ///
+    /// Two things keep this allocation-free for text that carries no secret, which is nearly every call:
+    /// <list type="bullet">
+    /// <item>the <see cref="string.Contains(string, StringComparison)"/> guard — <c>Replace</c> already returns the same
+    /// instance when a value is absent, but its <c>Marker(name)</c> ARGUMENT was built unconditionally, so a 472-entry
+    /// vault allocated 472 markers per call (521,088 for one 552-message request);</item>
+    /// <item>the index loop — a <c>foreach</c> over <c>IReadOnlyList</c> allocates a boxed enumerator on every call,
+    /// and the sort is done once where the list is built rather than once per masked string.</item>
+    /// </list>
+    /// Output is byte-identical to the previous implementation either way.
     /// </remarks>
     public static string Protect(string text, IReadOnlyList<(string Name, string Value)> targets)
     {
+        if (targets.Count == 0 || text.Length == 0) return text;
         var result = text;
-        foreach (var (name, value) in targets.OrderByDescending(x => x.Value.Length))
-            if (value.Length > 0) result = result.Replace(value, Marker(name), StringComparison.Ordinal);
+        for (var i = 0; i < targets.Count; i++)
+        {
+            var (name, value) = targets[i];
+            if (value.Length > 0 && result.Contains(value, StringComparison.Ordinal))
+                result = result.Replace(value, Marker(name), StringComparison.Ordinal);
+        }
         return result;
     }
 

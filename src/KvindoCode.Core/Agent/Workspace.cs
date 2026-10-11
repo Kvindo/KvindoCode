@@ -110,7 +110,7 @@ public static class Workspaces
     /// repos; or the shared tree when isolation does not apply.
     /// Never throws — any failure degrades to the shared tree so a session always runs.
     /// </summary>
-    public static SessionWorkspace Ensure(string root, string sessionId, AppSettings settings)
+    public static SessionWorkspace Ensure(string root, string sessionId, AppSettings settings, CancellationToken ct = default)
     {
         root = Path.GetFullPath(root);
         if (!settings.IsolateSessions) return SessionWorkspace.Shared(root);
@@ -135,12 +135,12 @@ public static class Workspaces
                 Directory.CreateDirectory(Path.GetDirectoryName(dir)!);
                 var branchExists = Git(root, "rev-parse", "--verify", "--quiet", "refs/heads/" + branch).code == 0;
                 var add = branchExists
-                    ? Git(root, "worktree", "add", dir, branch)             // re-create from the kept branch (resume after Forget)
-                    : Git(root, "worktree", "add", "-b", branch, dir, "HEAD");
+                    ? Git(root, ct, "worktree", "add", dir, branch)         // re-create from the kept branch (resume after Forget)
+                    : Git(root, ct, "worktree", "add", "-b", branch, dir, "HEAD");
                 if (add.code != 0) return SessionWorkspace.Shared(root);
 
                 Submodules(dir);
-                RunSetupScript(root, dir, settings.WorktreeSetupScript);
+                RunSetupScript(root, dir, settings.WorktreeSetupScript, ct);
                 return new SessionWorkspace(root, dir, branch, true);
             }
             catch { return SessionWorkspace.Shared(root); }
@@ -188,7 +188,7 @@ public static class Workspaces
     /// Materialise (or adopt) the session's worktree for one repo, inside the mirror. Returns null with a reason when
     /// the repo cannot be isolated — the caller must REFUSE rather than fall back to the shared checkout.
     /// </summary>
-    public static RepoLink? EnsureRepo(SessionWorkspace ws, string repoRoot, string sessionId, out string? error)
+    public static RepoLink? EnsureRepo(SessionWorkspace ws, string repoRoot, string sessionId, out string? error, CancellationToken ct = default)
     {
         error = null;
         repoRoot = Path.GetFullPath(repoRoot);
@@ -219,8 +219,8 @@ public static class Workspaces
                 {
                     var branchExists = Git(repoRoot, "rev-parse", "--verify", "--quiet", "refs/heads/" + branch).code == 0;
                     var add = branchExists
-                        ? Git(repoRoot, "worktree", "add", sessionPath, branch)
-                        : Git(repoRoot, "worktree", "add", "-b", branch, sessionPath, "HEAD");
+                        ? Git(repoRoot, ct, "worktree", "add", sessionPath, branch)
+                        : Git(repoRoot, ct, "worktree", "add", "-b", branch, sessionPath, "HEAD");
                     if (add.code != 0)
                     {
                         error = $"Could not create a session worktree for “{repoRoot}” ({add.stderr.Trim()}). This session will " +
@@ -470,17 +470,21 @@ public static class Workspaces
         Git(dir, "submodule", "update", "--init", "--recursive");
     }
 
-    static void RunSetupScript(string root, string dir, string script)
+    static void RunSetupScript(string root, string dir, string script, CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(script)) return;
         try
         {
             var path = Path.IsPathRooted(script) ? script : Path.Combine(root, script);
             if (!File.Exists(path)) return;
-            var psi = new ProcessStartInfo("/bin/bash") { WorkingDirectory = dir, UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true };
+            // NOT redirected: the output was never read, and redirecting both pipes without draining them deadlocks as
+            // soon as a setup script writes past the OS pipe buffer (~64 KB) — the child blocks on write while we block
+            // on the wait, for the full two minutes. `npm install` output is far past that.
+            var psi = new ProcessStartInfo("/bin/bash") { WorkingDirectory = dir, UseShellExecute = false };
             psi.ArgumentList.Add(path);
             using var p = Process.Start(psi);
-            p?.WaitForExit(120_000);
+            // 120 s is the cap for a slow setup (linking node_modules, .venv …), but a Stop must not wait it out.
+            if (p is not null) WaitHonouring(p, ct, 120_000);
         }
         catch { }
     }
@@ -488,7 +492,11 @@ public static class Workspaces
     /// <summary>A session id must be usable as a git ref component and a single path segment.</summary>
     static bool ValidRef(string id) => Regex.IsMatch(id, "^[A-Za-z0-9][A-Za-z0-9._-]{0,80}$");
 
-    static (int code, string stdout, string stderr) Git(string cwd, params string[] args)
+    static (int code, string stdout, string stderr) Git(string cwd, params string[] args) => Git(cwd, default, args);
+
+    /// <param name="ct">The session's cancellation token. Honoured on the WORKTREE-CREATING calls, so pressing Stop
+    /// during a slow `git worktree add` is not held behind a 60-second untokened wait.</param>
+    static (int code, string stdout, string stderr) Git(string cwd, CancellationToken ct, params string[] args)
     {
         try
         {
@@ -503,12 +511,46 @@ public static class Workspaces
             };
             foreach (var a in args) psi.ArgumentList.Add(a);
             using var p = Process.Start(psi)!;
+            // Drain BOTH pipes concurrently and only then bound the wait. Reading stdout synchronously first (the old
+            // shape) made the timeout unreachable: a git that hangs — a credential prompt, a network fetch, index.lock
+            // contention — never closes its stdout, so `ReadToEnd()` blocked for ever and Stop could not be observed.
+            var outTask = p.StandardOutput.ReadToEndAsync();
             var errTask = p.StandardError.ReadToEndAsync();
-            var outp = p.StandardOutput.ReadToEnd();
-            p.WaitForExit(60_000);
-            return (p.HasExited ? p.ExitCode : -1, outp, errTask.GetAwaiter().GetResult());
+            bool exited = WaitHonouring(p, ct, 60_000);
+            return (exited && p.HasExited ? p.ExitCode : -1, Drained(outTask), Drained(errTask));
         }
         catch { return (-1, "", ""); }
+    }
+
+    /// <summary>
+    /// Wait for a child process in short slices so a cancelled session is not held for the full timeout. This used to be
+    /// a single <c>WaitForExit(60_000)</c> (and 120 s for the setup script) with no cancellation at all, which is on the
+    /// turn's path: <c>EnsureRepo</c> runs a real <c>git worktree add</c> the first time a session writes into a nested
+    /// repo, so a slow checkout made Stop look dead for the whole call — reported 2026-10-11 as "stop doesn't work, or
+    /// fires a couple of minutes after I press it".
+    /// </summary>
+    /// <returns>True when the process exited on its own; false when it was killed for the token or the deadline.</returns>
+    static bool WaitHonouring(Process p, CancellationToken ct, int timeoutMs)
+    {
+        var deadline = Environment.TickCount64 + timeoutMs;
+        while (!p.WaitForExit(50))
+        {
+            if (ct.IsCancellationRequested) { Kill(p); return false; }
+            if (Environment.TickCount64 > deadline) { Kill(p); return false; }
+        }
+        return true;
+    }
+
+    /// <summary>A pipe read that cannot outlive the process: killed children close their ends, but never wait for ever
+    /// on a task that will not finish.</summary>
+    static string Drained(Task<string> read)
+    {
+        try { return read.Wait(TimeSpan.FromSeconds(3)) ? read.Result : ""; } catch { return ""; }
+    }
+
+    static void Kill(Process p)
+    {
+        try { p.Kill(entireProcessTree: true); } catch { }
     }
 
 }
