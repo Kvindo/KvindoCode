@@ -644,7 +644,17 @@ public sealed class SecretVault
         }
     }
 
-    /// <summary>Plaintexts that must be masked while this vault is unlocked.</summary>
+    /// <summary>
+    /// Plaintexts that must be masked while this vault is unlocked, <b>longest value first</b>.
+    /// </summary>
+    /// <remarks>
+    /// The ordering is part of the contract, so that masking can be a straight pass with no per-call sort. It matters
+    /// for correctness, not just tidiness: when one stored value is a prefix of another, replacing the short one first
+    /// would eat the head of the long one and leave a marker glued to the remainder. <see cref="Protect"/> therefore
+    /// relies on this order rather than sorting, and sorting here costs one OrderBy per VAULT READ instead of one per
+    /// masked string (measured: 400 targets re-sorted on every one of 552 messages, ~10 KB per call — reported by the
+    /// allocation-churn session 2026-10-11).
+    /// </remarks>
     public IReadOnlyList<(string Name, string Value)> RedactionTargets()
     {
         lock (_lock)
@@ -656,6 +666,7 @@ public sealed class SecretVault
                 // left out of every masking path, and then sent to the provider in plaintext while the notice claimed
                 // the values in the request had been replaced.
                 if (s.Redact && _values.TryGetValue(s.Id, out var v) && v.Length >= SecretRedactor.MinLength && !SecretPlaceholders.Contains(v) && !SecretPlaceholders.Contains(s.Name)) res.Add((s.Name, v));
+            res.Sort((a, b) => b.Item2.Length.CompareTo(a.Item2.Length));
             return res;
         }
     }

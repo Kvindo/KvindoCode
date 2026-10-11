@@ -231,9 +231,14 @@ public sealed class ReadTool : Tool
 
         var sb = new StringBuilder();
         int end = Math.Min(lines.Length, offset - 1 + limit);
+        // The vault's targets are read ONCE for the file, not once per line. The no-targets overload reads (and locks)
+        // the whole vault on every call, so a 2000-line Read did 2000 vault reads: measured at the real vault size that
+        // was 132.9 MB and 334 ms for one Read, against 101.3 MB / 128 ms with the targets hoisted out of the loop
+        // (reported by the allocation-churn session 2026-10-11).
+        var protectTargets = KvindoCode.Core.Secrets.SecretVault.Default.RedactionTargets();
         for (int i = offset - 1; i < end; i++)
         {
-            var l = KvindoCode.Core.Secrets.SecretPlaceholders.Protect(lines[i]);
+            var l = KvindoCode.Core.Secrets.SecretPlaceholders.Protect(lines[i], protectTargets);
             if (l.Length > 2000) l = l[..2000] + "… [line truncated]";
             sb.Append((i + 1).ToString().PadLeft(6)).Append('\t').Append(l).Append('\n');
             if (sb.Length > 120_000) { sb.Append($"… [output truncated at line {i + 1}; use offset/limit to continue]\n"); end = i + 1; break; }
