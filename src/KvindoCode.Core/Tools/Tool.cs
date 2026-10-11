@@ -82,7 +82,7 @@ public sealed class ToolContext
     /// that belongs to no repo (a loose file of the container, or anything outside the project) is written in place,
     /// which the caller marks with a notice.
     /// </remarks>
-    public string? MapWrite(string path, out string? error)
+    public string? MapWrite(string path, out string? error, CancellationToken ct = default)
     {
         error = null;
         if (Workspace is not { Mirrored: true } ws) return path;
@@ -98,7 +98,7 @@ public sealed class ToolContext
             }
             return real;                                               // a loose file: edited in place
         }
-        var link = Workspaces.EnsureRepo(ws, repo, SessionId, out var why);
+        var link = Workspaces.EnsureRepo(ws, repo, SessionId, out var why, ct);
         if (link is null) { error = "Refused: " + why; return null; }
         return Path.Combine(link.SessionPath, Path.GetRelativePath(repo, real));
     }

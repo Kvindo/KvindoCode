@@ -288,7 +288,7 @@ public sealed class WriteTool : Tool
         // keeps a loose project file in place, and refuses a repo that cannot be isolated. `key` is the real project
         // path either way, so "Read it first" is about the file the model means, not where it happens to live.
         var key = ctx.Canonical(named);
-        var path = ctx.MapWrite(named, out var mapError);
+        var path = ctx.MapWrite(named, out var mapError, ct);
         if (path is null) return Task.FromResult(ToolResult.Err(mapError!));
         if (ctx.WriteError(path) is { } werr) return Task.FromResult(ToolResult.Err(werr));
         var content = Fs.StripLineNumbers(Str(input, "content"));
@@ -342,7 +342,7 @@ public sealed class EditTool : Tool
         var key = ctx.Canonical(named);
         // Edit MODIFIES, so it goes through MapWrite: a file that was read from the real checkout is edited in the
         // session's own worktree (created here on demand), never in the shared one.
-        var path = ctx.MapWrite(named, out var mapError);
+        var path = ctx.MapWrite(named, out var mapError, ct);
         if (path is null) return Task.FromResult(ToolResult.Err(mapError!));
         if (ctx.WriteError(path) is { } werr) return Task.FromResult(ToolResult.Err(werr));
         var oldS = Fs.StripLineNumbers(Str(input, "old_string"));

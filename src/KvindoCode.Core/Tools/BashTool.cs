@@ -36,7 +36,7 @@ public sealed class BashTool : Tool
         // materialised simply is not in the mirror, so the command FAILS LOUDLY instead of silently writing the
         // shared checkout. (Absolute paths in a command are best-effort, as documented: Bash is not a hard sandbox.)
         var mirror = ctx.Workspace is { Mirrored: true } mws ? mws : null;
-        if (mirror is not null) EnsureReposForCommand(command, ctx, mirror);
+        if (mirror is not null) EnsureReposForCommand(command, ctx, mirror, ct);
         // Best-effort: an isolated session must not `cd` out of its worktree into the shared tree (or a peer's). The
         // durable guard is the cwd-persistence clamp below; this stops the common explicit form before it runs.
         if ((ctx.Isolated || mirror is not null) && ctx.WorkDir.Length > 0 && CdsOutside(command, ctx.WorkDir, out var target))
@@ -156,13 +156,13 @@ public sealed class BashTool : Tool
     /// session's own checkout. A repo the scanner does not know about is deliberately left alone: it will not be present
     /// in the mirror, so the command fails there rather than touching the shared checkout.
     /// </summary>
-    static void EnsureReposForCommand(string command, ToolContext ctx, SessionWorkspace ws)
+    static void EnsureReposForCommand(string command, ToolContext ctx, SessionWorkspace ws, CancellationToken ct)
     {
         foreach (var repo in Workspaces.Nested(ws.Root))
         {
             var rel = Path.GetRelativePath(ws.Root, repo).Replace('\\', '/');
             if (!command.Contains(rel, StringComparison.Ordinal)) continue;
-            Workspaces.EnsureRepo(ws, repo, ctx.SessionId, out _);     // failure => absent => the command fails loudly
+            Workspaces.EnsureRepo(ws, repo, ctx.SessionId, out _, ct);   // failure => absent => the command fails loudly
         }
     }
 

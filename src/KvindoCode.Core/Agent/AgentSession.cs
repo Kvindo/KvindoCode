@@ -700,7 +700,7 @@ public sealed class AgentSession : IDisposable
             else if (!_settings.IsolateSessions)
                 ws = SessionWorkspace.Shared(Project.Cwd);
             else
-                ws = await Task.Run(() => Workspaces.Ensure(Project.Cwd, Info.Id, _settings), ct);
+                ws = await Task.Run(() => Workspaces.Ensure(Project.Cwd, Info.Id, _settings, ct), ct);
 
             _ws = ws;
             _ctx.Workspace = ws;
@@ -710,6 +710,7 @@ public sealed class AgentSession : IDisposable
             _ctx.Cwd = ws.WorkDir;
             Emit(new WorkspaceReadyEvent(ws));
         }
+        catch (OperationCanceledException) { throw; }   // a Stop DURING setup is a stop, not a reason to fall back
         catch (Exception e)
         {
             // never let workspace setup break the turn: fall back to the shared tree and say so

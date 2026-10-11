@@ -1005,7 +1005,23 @@ public partial class MainWindow : Window
         if (_current is { Running: true }) Stop(); else Send();
     }
 
-    void Stop() => _current?.Cts?.Cancel();
+    /// <summary>
+    /// Stop the running turn. The trace lines are here because "stop doesn't work, or fires minutes later" cannot be
+    /// answered from the code alone: they record WHEN the press happened and WHEN the turn actually ended, so the next
+    /// occurrence is a number rather than a feeling (reported 2026-10-11).
+    /// </summary>
+    void Stop()
+    {
+        var sv = _current;
+        if (sv?.Cts is not { } cts) return;
+        _stopPressed = DateTime.UtcNow;
+        _stopSession = sv.Id;
+        UiTrace.Line($"stop pressed (session {sv.Id[..Math.Min(8, sv.Id.Length)]}, running={sv.Running})");
+        cts.Cancel();
+    }
+
+    DateTime? _stopPressed;
+    string? _stopSession;
 
     void Send()
     {
@@ -1058,6 +1074,13 @@ public partial class MainWindow : Window
         try { await Task.Run(() => text is null ? sv.Session.RunWakeAsync(cts.Token) : sv.Session.RunTurnAsync(text, cts.Token, images, scheduled)); }
         catch (Exception e) { sv.Transcript.Handle(new NoticeEvent("Internal error: " + e.Message, true)); }
         finally { if (sv.Cts == cts) sv.Cts = null; }
+        // How long Stop actually took to be observed. If this is large, the turn was inside something that does not
+        // check the token (a child process, a hook, a tool) — the trace names the wait, not the press.
+        if (_stopPressed is { } at && _stopSession == sv.Id)
+        {
+            UiTrace.Line($"stop took {(DateTime.UtcNow - at).TotalMilliseconds:0} ms to end the turn (session {sv.Id[..Math.Min(8, sv.Id.Length)]}, cancelled={cts.IsCancellationRequested})");
+            _stopPressed = null; _stopSession = null;
+        }
 
         if (cts.IsCancellationRequested)
         {
