@@ -22,6 +22,20 @@ public class ReadOnlyCommandTests
     [InlineData("printenv PATH")]
     [InlineData("ls | grep cs")]
     [InlineData("cat a.txt && grep b a.txt")]
+    // newly allowed on 2026-10-13 when the gate became a deny-list: the read-only work that used to be refused
+    [InlineData("cd src && grep foo .")]
+    [InlineData("git -C /tmp status")]
+    [InlineData("git show HEAD:file")]
+    [InlineData("awk '{print $1}' f")]
+    [InlineData("sed -n '1,5p' f")]
+    [InlineData("pushd . && popd")]
+    [InlineData("cd /tmp")]
+    [InlineData("git stash list")]
+    [InlineData("git config --get user.name")]
+    [InlineData("git branch -a")]
+    [InlineData("rg token src")]
+    [InlineData("xxd f")]
+    [InlineData("ls -la | sort | uniq -c")]
     public void Safe(string cmd) => Assert.True(ReadOnlyCommand.IsSafe(cmd), cmd);
 
     [Theory]
@@ -52,6 +66,40 @@ public class ReadOnlyCommandTests
     [InlineData("builtin rm")]
     [InlineData("sort -o out in")]
     [InlineData("git config user.name x")]
+    // found by the adversarial review of the deny-list rewrite (2026-10-13)
+    [InlineData("\\rm -rf /tmp/x")]                          // leading backslash
+    [InlineData("$'rm' -rf /tmp/x")]                        // ANSI-C quoting
+    [InlineData("rm${IFS}-rf /tmp/x")]                      // IFS splitting
+    [InlineData("s=rm; $s -rf /tmp/x")]                     // indirect via a variable
+    [InlineData("a=rm; ${a} -rf /tmp/x")]                   // indirect via braces
+    [InlineData("git -c alias.p='!sh -c \"rm x\"' p")]       // git config sets a shell alias
+    [InlineData("git -c core.pager=rm log")]
+    [InlineData("dotnet build")]                            // builds/runs arbitrary code
+    [InlineData("dotnet run")]
+    [InlineData("watch rm x")]
+    [InlineData("timeout 5 rm -rf x")]
+    [InlineData("nice rm x")]
+    [InlineData("busybox rm x")]
+    [InlineData("gcc -o out in.c")]
+    [InlineData("objcopy in out")]
+    [InlineData("openssl req -out f")]
+    [InlineData("chroot / x")]
+    [InlineData("unshare -r x")]
+    [InlineData("rg --pre 'rm x' pat")]
+    [InlineData("xxd -r - out.bin")]
+    [InlineData("tar -xf a.tar")]
+    [InlineData("less -o log f")]
+    [InlineData("git stash")]
+    [InlineData("git cherry-pick x")]
+    [InlineData("git worktree add d")]
+    [InlineData("mkdir x")]
+    [InlineData("cp a b")]
+    [InlineData("sed -e 'w out' f")]
+    [InlineData("xargs rm")]
+    [InlineData("echo x 2>f")]
+    [InlineData("echo x &>f")]
+    [InlineData("/bin/rm -rf x")]                            // absolute path
+    [InlineData("./rm -rf x")]                              // relative path
     public void Unsafe(string cmd) => Assert.False(ReadOnlyCommand.IsSafe(cmd), cmd);
 }
 
