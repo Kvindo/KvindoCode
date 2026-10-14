@@ -355,6 +355,17 @@ public sealed class LlmClient : ILlmClient
             if (n == 0 && result.Content.Length == 0 && result.Reasoning.Length == 0 && result.FinishReason is "stop" or "")
                 throw new LlmException("Empty response from API", null, true);
             if (result.FinishReason.Length == 0) result.FinishReason = n > 0 ? "tool_calls" : "stop";
+
+            // A model that wrote its tool call as TEXT (the DSML markup) instead of structured tool_calls: the gateway
+            // did not convert it, so the call would never run and the markup would be shown as the answer (reported
+            // 2026-10-14). Recover it, and keep the prose.
+            if (n == 0 && DsmlToolCalls.TryParse(result.Content, out var recovered, out var prose))
+            {
+                result.Content = prose;
+                foreach (var c in recovered) result.ToolCalls.Add(c);
+                result.FinishReason = "tool_calls";
+                cb?.OnNotice?.Invoke($"The model wrote {recovered.Count} tool call(s) as text instead of a tool call; they were recovered and run: {string.Join(", ", recovered.Select(c => c.Name))}.");
+            }
             return result;
         }
     }

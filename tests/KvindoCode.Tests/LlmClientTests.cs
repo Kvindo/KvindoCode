@@ -69,6 +69,40 @@ public class LlmClientTests
         Assert.Equal("ok", r.Content);
     }
 
+    /// <summary>
+    /// A tool call written as TEXT (the DSML markup) is recovered and run, not returned as the answer.
+    /// </summary>
+    /// <remarks>
+    /// Integration level on purpose: the parser has its own unit tests, but only this pins that LlmClient actually calls
+    /// it. Disabling the call site leaves the unit tests green, so without this the recovery could silently stop
+    /// working. The delimiter is a full-width bar (U+FF5C), which is why an ASCII-| scan misses it.
+    /// </remarks>
+    [Fact]
+    public async Task Recovers_a_tool_call_written_as_text()
+    {
+        const string bar = "\uFF5C";
+        var dsml = $"<{bar}DSML{bar}tool_calls><{bar}DSML{bar}invoke name=\"Read\">" +
+                   $"<{bar}DSML{bar}parameter name=\"arguments\" string=\"false\">{{\"file_path\":\"a.py\",\"limit\":130}}</{bar}DSML{bar}parameter>" +
+                   $"</{bar}DSML{bar}invoke></{bar}DSML{bar}tool_calls>";
+        var h = new FakeHandler();
+        h.Responses.Enqueue(_ => FakeHandler.Sse(
+            "{\"choices\":[{\"delta\":{\"content\":\"Let me look.\\n" + dsml.Replace("\"", "\\\"") + "\"}}]}",
+            "{\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}",
+            "[DONE]"));
+        var notices = new List<string>();
+        var r = await new LlmClient(S(), h).StreamAsync(Req(new ChatMessage { Content = "hi" }), new LlmCallbacks { OnNotice = notices.Add }, default);
+
+        var call = Assert.Single(r.ToolCalls);
+        Assert.Equal("Read", call.Name);
+        var args = JsonText.Object(call.Arguments)!;
+        Assert.Equal("a.py", (string?)args["file_path"]);
+        Assert.Equal(130, (int?)args["limit"]);
+        Assert.Equal("tool_calls", r.FinishReason);
+        Assert.DoesNotContain("DSML", r.Content);                    // the markup is not the answer
+        Assert.Contains("Let me look.", r.Content);                  // the prose is kept
+        Assert.Contains(notices, n => n.Contains("wrote 1 tool call"));
+    }
+
     [Fact]
     public async Task Retries_transient_errors_then_succeeds()
     {
