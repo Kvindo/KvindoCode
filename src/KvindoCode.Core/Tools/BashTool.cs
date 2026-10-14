@@ -14,7 +14,10 @@ public sealed class BashTool : Tool
         "Default timeout 120000 ms (max 600000). Stdin is closed, so never run interactive commands. " +
         "Do not start long-running servers in the foreground — they will hit the timeout; background them with nohup/& and redirect their output. " +
         "Prefer the dedicated tools (Read, Glob, Grep, Edit, Write) over cat/find/grep/sed/echo > file. Quote paths containing spaces. " +
-        "In plan mode only read-only commands (ls, cat, grep, git status/log/diff, …) are allowed.";
+        "In plan mode most commands run, but destructive ones are refused (rm/mv/cp/tee/mkdir/…, output redirection, " +
+        "command substitution, package managers, network tools, interpreters) along with the mutating git subcommands " +
+        "(commit/push/checkout/stash/…). Read-only work — including `cd dir && grep …`, `git -C dir status`, `awk`, " +
+        "`sed -n`, pipes and `2>&1` — is allowed.";
     public override JsonNode Schema => JsonNode.Parse("""
     {"type":"object","properties":{
       "command":{"type":"string","description":"The command to execute"},
@@ -234,31 +237,67 @@ public sealed class BashTool : Tool
     }
 }
 
-/// <summary>Conservative "is this command read-only?" check used to allow Bash in plan mode.</summary>
+/// <summary>
+/// "May this command run while in plan mode?" — a DENY-LIST.
+/// </summary>
+/// <remarks>
+/// <b>Read this before relying on it.</b> Plan mode used to be fail-closed: a command ran only if its program was on an
+/// allow-list, so anything unrecognised was refused. It is now the opposite — a command runs unless it matches a
+/// dangerous pattern — which means it <b>runs anything the list does not know about</b>: a program nobody thought of, a
+/// flag nobody anticipated, a spelling of an unremarkable command that the normalisation above cannot resolve. Shell
+/// makes that set unbounded, so this is a CONVENTION about the commands we anticipated, not a safety boundary. It was
+/// changed deliberately (2026-10-13) because the allow-list refused ordinary read-only work — <c>cd</c>, <c>awk</c>,
+/// <c>git -C dir status</c> — and the user accepted the trade. If it ever needs to be a boundary again, the answer is a
+/// real sandbox (<c>unshare</c>/bubblewrap), not a longer list: the previous fail-closed guard is what caught
+/// <c>command rm</c>, <c>env -S</c>, <c>sort -o</c> and <c>git config</c> execution (audit H-1).
+/// </remarks>
 public static class ReadOnlyCommand
 {
-    static readonly HashSet<string> Safe = new()
+    /// <summary>Programs refused by name. Basename-matched, so <c>/bin/rm</c> and <c>./rm</c> are caught too.</summary>
+    static readonly HashSet<string> Denied = new(StringComparer.Ordinal)
     {
-        "ls","cat","head","tail","wc","grep","egrep","fgrep","rg","tree","pwd","echo","stat","file","du","df","which","whoami",
-        "uname","date","sort","uniq","cut","tr","basename","dirname","realpath","readlink","hostname","id","ps","jq","nl","column",
-        "diff","cmp","md5sum","sha256sum","sha1sum","printf","true","false","test","[","env","printenv","type","less","more","locale",
-        "lsb_release","nproc","free","uptime","lscpu","tac","rev","fold","expand","od","xxd","hexdump","strings","seq","sleep","git-lfs",
+        // writers, packers, anything that changes bytes on disk
+        "rm","rmdir","shred","mv","cp","install","dd","truncate","tee","mkdir","touch","ln","link","mkfifo",
+        "chmod","chown","chgrp","chattr","setfacl","wipefs","mkfs","mkswap","swapon","swapoff","mount","umount",
+        "fdisk","sgdisk","parted","patch","rename","split","csplit","tar","zip","unzip","gzip","bzip2","xz","zstd",
+        "sqlite3","psql","mysql","redis-cli","gpg","ssh-keygen","openssl","objcopy","strip","gcc","cc","clang","g++","ld",
+        "ed","ex","vi","vim","nano","emacs",
+        // process and system control
+        "kill","pkill","killall","reboot","shutdown","poweroff","halt","init","systemctl","service","sudo","su","doas",
+        // namespace / container escapes
+        "chroot","unshare","nsenter","setpriv","bwrap",
+        // package and infrastructure managers
+        "apt","apt-get","yum","dnf","pacman","snap","dpkg","pip","pip3","npm","yarn","pnpm","gem","cargo","go","make",
+        "docker","podman","kubectl","terraform","ansible",
+        // network
+        "curl","wget","nc","ncat","netcat","socat","telnet","ftp","ssh","scp","sftp","rsync","aria2c",
+        // interpreters, and the wrappers that execute a command handed to them
+        "sh","bash","zsh","dash","ksh","python","python3","perl","ruby","node","php","lua",
+        "eval","exec","source","xargs","command","builtin","nohup","timeout","nice","ionice","stdbuf","setsid",
+        "busybox","watch","strace",
     };
 
-    static readonly HashSet<string> GitSafe = new()
+    /// <summary>git subcommands that change the repository, its refs or its working tree.</summary>
+    static readonly HashSet<string> GitDenied = new(StringComparer.Ordinal)
     {
-        "status","log","diff","show","ls-files","rev-parse","blame","describe","shortlog","grep","cat-file","ls-tree","reflog",
-        "rev-list","name-rev","whatchanged","for-each-ref","count-objects","check-ignore","show-ref","help","version",
+        "add","commit","push","pull","fetch","checkout","switch","restore","reset","clean","merge","rebase",
+        "cherry-pick","revert","apply","am","rm","mv","init","clone","gc","prune","worktree","submodule","stash",
+        "commit-tree","hash-object","update-ref","update-index","read-tree","write-tree","checkout-index","pack-refs",
+        "symbolic-ref","replace","filter-branch","notes","sparse-checkout","branch","tag","remote","config",
     };
 
     static readonly Regex Subst = new(@"\$\(|`|<\(|>\(", RegexOptions.Compiled);
+    /// <summary>A program name the guard can resolve: letters, digits, dot, dash, underscore. No <c>$</c>, braces,
+    /// brackets, quotes or escapes — those are how a shell hides what will actually run (<c>$'\x72\x6d'</c>,
+    /// <c>rm${IFS}-rf</c>, <c>$X</c>), so an unresolvable name is refused rather than guessed at.</summary>
+    static readonly Regex PlainName = new(@"^[A-Za-z0-9_][A-Za-z0-9._-]*$", RegexOptions.Compiled);
 
     public static bool IsSafe(string command)
     {
         if (string.IsNullOrWhiteSpace(command)) return false;
         if (Subst.IsMatch(command)) return false;
         var cleaned = Regex.Replace(command, @"\d?>\s*/dev/null|2>&1|>&2|1>&2", " ");
-        if (cleaned.Contains('>')) return false;                  // output redirection
+        if (cleaned.Contains('>')) return false;                  // output redirection (incl. 2> and &>)
         if (cleaned.Contains("<<")) return false;                 // heredocs
         // split into simple commands on ; && || | & (newline)
         foreach (var seg0 in Regex.Split(cleaned, @"&&|\|\||[;|&\n]"))
@@ -269,20 +308,30 @@ public static class ReadOnlyCommand
             int i = 0;
             while (i < words.Count && Regex.IsMatch(words[i], @"^[A-Za-z_][A-Za-z0-9_]*=")) i++;   // VAR=val prefixes
             if (i >= words.Count) continue;
-            var cmd = words[i].TrimStart('\\');
-            if (cmd.Contains('/')) cmd = cmd[(cmd.LastIndexOf('/') + 1)..];
+            var cmd = Normalise(words[i]);
+            if (cmd.Length == 0) return false;                    // a name we cannot resolve: refuse, never guess
             var args = words.Skip(i + 1).ToList();
+
+            if (Denied.Contains(cmd)) return false;
 
             if (cmd == "git")
             {
-                var sub = args.FirstOrDefault(a => !a.StartsWith('-') );
+                // A flag's VALUE must never be read as the subcommand: `git -C /tmp status` used to take "/tmp" for the
+                // subcommand and be refused. Flags that EXECUTE something (-c, --config-env) are refused instead of
+                // skipped, because `git -c alias.x='!sh -c …' x` runs a command.
+                var sub = GitSubcommand(args, out var execFlag);
+                if (execFlag) return false;
                 if (sub is null) return false;
-                if (sub == "branch") { if (args.Any(a => a is "-d" or "-D" or "-m" or "-M" or "-c" or "-C" or "--delete" or "--move" or "--copy")) return false; continue; }
-                if (sub == "remote") { if (args.Any(a => a is "add" or "remove" or "rm" or "rename" or "set-url" or "prune" or "update")) return false; continue; }
-                if (sub == "tag") { if (args.Any(a => !a.StartsWith('-') && a != "tag" ) && !args.Contains("-l") && !args.Contains("--list")) return false; continue; }
-                if (sub == "config") { if (!args.Any(a => a is "--get" or "--list" or "-l" or "--get-all")) return false; continue; }
-                if (sub == "stash") { if (!args.Contains("list") && !args.Contains("show")) return false; continue; }
-                if (!GitSafe.Contains(sub)) return false;
+                if (GitDenied.Contains(sub))
+                {
+                    // `git stash list|show`, `git config --get`, `git tag -l`, `git branch -a` and `git remote -v` are reads
+                    if (sub == "stash" && args.Any(a => a is "list" or "show")) continue;
+                    if (sub == "config" && args.Any(a => a is "--get" or "--get-all" or "--get-regexp" or "--list" or "-l")) continue;
+                    if (sub == "tag" && (args.Contains("-l") || args.Contains("--list") || args.Count(a => !a.StartsWith('-')) <= 1)) continue;
+                    if (sub == "branch" && !args.Any(a => a is "-d" or "-D" or "-m" or "-M" or "-c" or "-C" or "--delete" or "--move" or "--copy")) continue;
+                    if (sub == "remote" && !args.Any(a => a is "add" or "remove" or "rm" or "rename" or "set-url" or "prune" or "update")) continue;
+                    return false;
+                }
                 if (args.Any(a => a is "--output" || a.StartsWith("--output="))) return false;
                 continue;
             }
@@ -293,22 +342,68 @@ public static class ReadOnlyCommand
             }
             if (cmd == "sed") { if (args.Any(a => a.StartsWith("-i") || a == "--in-place" || a.Contains("w "))) return false; continue; }
             if (cmd == "sort") { if (args.Any(a => a == "-o" || a.StartsWith("--output"))) return false; continue; }
-            if (cmd == "dotnet") { if (args.Count > 0 && (args[0] is "--info" or "--version" or "--list-sdks" or "--list-runtimes")) continue; return false; }
+            // `rg --pre 'cmd' pat` runs cmd per file; `xxd -r - out` writes a file; `less -o log` writes a log.
+            if (cmd == "rg") { if (args.Any(a => a is "--pre" || a.StartsWith("--pre=") || a == "--pre-glob" || a.StartsWith("--pre-glob="))) return false; continue; }
+            if (cmd == "xxd") { if (args.Any(a => a == "-r" || a.StartsWith("-r") && a.Length == 2)) return false; continue; }
+            if (cmd is "less" or "more") { if (args.Any(a => a == "-o" || a.StartsWith("--log-file"))) return false; continue; }
+            // `env` only as a bare assignment list: GNU env can split (-S) or chdir (-C) and execute its argument.
             if (cmd == "env")
             {
-                // `env -S'rm -rf x'` / `env -C dir …` / `env SOME=1 rm x`: GNU env can split and execute its
-                // argument, so only a bare assignment list followed by nothing else is safe. Verified bypassable
-                // before this check (audit H-1).
                 if (args.Any(a => a.StartsWith("-S") || a.StartsWith("--split") || a.StartsWith("-C") || a.StartsWith("--chdir"))) return false;
                 if (args.Any(a => !a.StartsWith('-') && !a.Contains('='))) return false;
                 continue;
             }
-            // `command` and `type` take a program name and run/inspect it: never read-only in this sense
-            if (cmd is "command" or "type" or "builtin" or "hash") return false;
+            // `dotnet` only for the informational switches: build/run/restore execute arbitrary code, and
+            // `dotnet --list-*`/`--info`/`--version` are the read-only ones. (No inline interpreters otherwise: the user
+            // chose text tools only, since a script is opaque to this guard.)
+            if (cmd == "dotnet")
+            {
+                if (args.Count > 0 && (args[0] is "--info" or "--version" or "--list-sdks" or "--list-runtimes")) continue;
+                return false;
+            }
+            if (cmd == "awk" || cmd == "gawk" || cmd == "mawk")
+            {
+                // awk's two ways to run or write: system(), and a pipe/redirect.
+                var body = string.Join(' ', args);
+                if (body.Contains("system(") || body.Contains("|\"") || body.Contains("| \"") || body.Contains("|'")
+                    || body.Contains("getline") || Regex.IsMatch(body, @"print[f]?\s*>")) return false;
+                continue;
+            }
+            // `type`/`builtin`/`hash` inspect or invoke a program by name; not read-only in this sense. (`command` is
+            // denied by name above, with the other wrappers that execute their argument.)
+            if (cmd is "type" or "builtin" or "hash") return false;
             if (cmd == "ps" || cmd == "tree" || cmd == "less" || cmd == "more") continue;
-            if (!Safe.Contains(cmd)) return false;
         }
         return true;
+    }
+
+    /// <summary>
+    /// The git subcommand, skipping flags AND their values so <c>-C /tmp status</c> yields <c>status</c>.
+    /// </summary>
+    /// <param name="execFlag">True for a flag that can execute a program (<c>-c</c>, <c>--config-env</c>): the caller
+    /// refuses rather than skipping its value, because that value is a command or a config that can name one.</param>
+    static string? GitSubcommand(List<string> args, out bool execFlag)
+    {
+        execFlag = false;
+        for (var i = 0; i < args.Count; i++)
+        {
+            var a = args[i];
+            if (a is "-c" or "--config-env" || a.StartsWith("--config-env=") || (a.StartsWith("-c") && a.Length > 2))
+            { execFlag = true; return null; }
+            if (a == "-C" || a == "--git-dir" || a == "--work-tree" || a == "--namespace" || a == "--exec-path") { i++; continue; }
+            if (a.StartsWith("--git-dir=") || a.StartsWith("--work-tree=") || a.StartsWith("--exec-path=")) continue;
+            if (a.StartsWith('-')) continue;
+            return a;
+        }
+        return null;
+    }
+
+    /// <summary>Strip quotes and leading backslashes, take the basename; empty when the name cannot be resolved.</summary>
+    static string Normalise(string word)
+    {
+        var w = word.Trim().Trim('\'', '"').TrimStart('\\');
+        if (w.Contains('/')) w = w[(w.LastIndexOf('/') + 1)..];
+        return PlainName.IsMatch(w) ? w : "";
     }
 
     static List<string> Tokenize(string s)
