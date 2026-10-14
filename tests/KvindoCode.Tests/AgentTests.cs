@@ -130,6 +130,58 @@ public class PlanModeTests
         Assert.Single(ui.Asked);
         Assert.Contains("\"Which?\" = \"B\"", llm.Requests[1].Messages.Last(m => m.Role == "tool").Content);
     }
+
+    /// <summary>
+    /// A question with no `question` text must be refused, not asked.
+    /// </summary>
+    /// <remarks>
+    /// The answer comes back keyed by the question TEXT, so three questions sent with only their `header` set collapsed
+    /// to the single key "" and the model was handed one answer under an empty label it could not match — so it re-asked
+    /// the same questions (reported 2026-10-14: "SS Private cloud asked the same question twice"). The tool used to
+    /// accept that input silently.
+    /// </remarks>
+    [Fact]
+    public async Task AskUserQuestion_without_the_question_text_is_refused_not_asked()
+    {
+        using var sb = new Sandbox();
+        var ui = new FakeInteraction();
+        var llm = Script.Client(
+            Script.Tools("", ("AskUserQuestion", new { questions = new[]
+            {
+                new { header = "Region name", options = new[] { new { label = "A", description = "a" }, new { label = "B", description = "b" } } },
+            } })),
+            Script.Text("ok"));
+        var s = new AgentSession(sb.Settings(), llm, sb.Project, ui);
+        await s.RunTurnAsync("ask", default);
+
+        Assert.Empty(ui.Asked);                                     // nothing was put to the user
+        var result = llm.Requests[1].Messages.Last(m => m.Role == "tool").Content;
+        Assert.Contains("needs its `question` text", result);
+        Assert.Contains("'Region name'", result);                    // and it says which header was incomplete
+    }
+
+    /// <summary>A partially-filled call is refused too, naming only the blank ones.</summary>
+    [Fact]
+    public async Task AskUserQuestion_refuses_only_the_blank_entries()
+    {
+        using var sb = new Sandbox();
+        var ui = new FakeInteraction();
+        var llm = Script.Client(
+            Script.Tools("", ("AskUserQuestion", new { questions = new object[]
+            {
+                new { question = "Good one?", header = "Ok", options = new[] { new { label = "A", description = "a" }, new { label = "B", description = "b" } } },
+                new { header = "Blank", options = new[] { new { label = "A", description = "a" }, new { label = "B", description = "b" } } },
+            } })),
+            Script.Text("ok"));
+        var s = new AgentSession(sb.Settings(), llm, sb.Project, ui);
+        await s.RunTurnAsync("ask", default);
+
+        Assert.Empty(ui.Asked);
+        var result = llm.Requests[1].Messages.Last(m => m.Role == "tool").Content;
+        Assert.Contains("1 of 2", result);
+        Assert.Contains("'Blank'", result);
+        Assert.DoesNotContain("'Ok'", result);
+    }
 }
 
 public class AgentLoopTests

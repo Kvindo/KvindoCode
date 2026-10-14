@@ -157,6 +157,17 @@ public sealed class AskUserQuestionTool : Tool
             qs.Add(new Question((string?)q["question"] ?? "", (string?)q["header"] ?? "", opts, q["multiSelect"] is { } ms && (bool)ms));
         }
         if (qs.Count == 0) return ToolResult.Err("No questions provided.");
+        // Every question must carry its TEXT. It is the key the answer comes back under (the UI builds the answer map
+        // from it), so a missing `question` is not a cosmetic gap: three questions sent with only their `header` set
+        // all collapsed to the key "" and the model was handed one answer under an empty label, which it could not
+        // match — so it re-asked the same questions (reported 2026-10-14). Refuse rather than ask something unusable.
+        var blank = qs.Where(q => string.IsNullOrWhiteSpace(q.Text)).ToList();
+        if (blank.Count > 0)
+            return ToolResult.Err(
+                "Each question needs its `question` text (the full question, ending with '?'); " +
+                (blank.Count == qs.Count ? "none of the " + qs.Count + " you sent had one" : $"{blank.Count} of {qs.Count} did not") +
+                $". You set only the `header` ({string.Join(", ", blank.Select(q => $"'{q.Header}'"))}), which is just the short label. " +
+                "Send the same call again with `question` filled in for every entry.");
         ctx.Session.Notify("KvindoCode has a question for you");
         ctx.Session.NoteWaitingForUser("question");
         var answers = await ctx.Interaction.AskAsync(qs, ct);
