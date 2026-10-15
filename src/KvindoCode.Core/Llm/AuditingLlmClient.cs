@@ -7,6 +7,12 @@ namespace KvindoCode.Core.Llm;
 /// <summary>Where a per-request finding should be reported: <c>sessionId</c> first, then the message.</summary>
 public delegate void SessionNotice(string sessionId, string message);
 
+/// <summary>An image the local auditor flagged, as the human must see it to decide: the picture itself, which kinds of
+/// secret were reported, and the message the picture came with.</summary>
+/// <param name="Data">The image (base64), so the dialog can SHOW it — asking about a picture nobody can see would just
+/// train the human to approve everything.</param>
+public sealed record FlaggedImage(string Data, IReadOnlyList<string> Types, string Source);
+
 /// <summary>
 /// Wraps the cloud LLM so that every outbound request is first audited by the local secret-auditor model.
 /// When a secret is found it is added to the encrypted vault (the plaintext is extracted from the request text by the
@@ -25,6 +31,28 @@ public sealed class AuditingLlmClient : ILlmClient
     /// dropped from the request" into an unrelated transcript — typically a session that had already finished, so the
     /// message read as if IT had just sent the image (reported 2026-10-11).</summary>
     public Action<string, string>? OnSessionNotice { get; set; }
+
+    /// <summary>Ask the human whether an image the local auditor flagged may still be sent (the UI shows the picture and
+    /// what was reported). Nobody to ask — headless runs, tests, no window — keeps the fail-closed drop.</summary>
+    public Func<FlaggedImage, Task<bool>>? ReviewImageAsync { get; set; }
+
+    /// <summary>Per-image verdicts, keyed by the image's SHA-256. Every request re-sends the two most recent
+    /// image-bearing messages, so without this the same picture was handed to the local model again on every request
+    /// (one VLM call per image per request) and the human would have been asked about it again and again. Bounded: a
+    /// long session cannot grow it without limit.</summary>
+    readonly Dictionary<string, bool> _imageVerdicts = new();
+    void RememberImage(string key, bool maySend)
+    {
+        lock (_imageVerdicts)
+        {
+            if (_imageVerdicts.Count >= 256) _imageVerdicts.Clear();
+            _imageVerdicts[key] = maySend;
+        }
+    }
+    bool TryRememberedImage(string key, out bool maySend)
+    {
+        lock (_imageVerdicts) return _imageVerdicts.TryGetValue(key, out maySend);
+    }
 
     public AuditingLlmClient(ILlmClient inner, SecretAuditor? auditor, SecretVault? vault, Action<string>? onNotice = null, Func<bool>? globalEnabled = null)
     {
@@ -53,26 +81,59 @@ public sealed class AuditingLlmClient : ILlmClient
         if (text.Length == 0 && images.Count == 0) return await _inner.StreamAsync(request, callbacks, ct);
 
         // A picture cannot be matched by a pattern, so images stay with the local model — the only thing here that can
-        // look at them. Only images the auditor flags are dropped; a failure fails closed.
+        // look at them. But a finding on an image is not the same as a real secret: on the user's own benign screenshots
+        // the auditor flagged one in four, and always quoting something structural — a host name, an address, a ULID, an
+        // identifier — because a screenshot is full of those. The silent drop that followed made a session look blind:
+        // the model received the text without the picture and told the user it could not see it (reported 2026-10-15).
+        // So the finding is first put through the SAME plausibility filter the text path uses, which is what the auditor
+        // cannot do for pixels. A quote that reads as structural is not a credential: the picture goes, with a notice.
+        // A quote that does look like a value IS a question — the human sees the picture and decides; with nobody to ask
+        // (headless, tests) the fail-closed drop stands.
         var unsafeImages = new HashSet<(ChatMessage Message, int Index)>();
         foreach (var image in _auditor.Enabled ? images : new List<AuditedImage>())
         {
+            var key = SecretVault.Sha256Hex(image.Data);
+            if (TryRememberedImage(key, out var remembered))
+            {
+                if (!remembered) unsafeImages.Add((image.Message, image.Index));
+                continue;
+            }
             // the MIME was hardcoded to PNG, so a JPEG/GIF/WEBP screenshot was declared wrong to the auditor
             var im = await _auditor.AuditImageAsync(image.Data, LlmClient.MimeOf(image.Data), ct);
             if (im.IsError) return AuditUnavailable(im.Error);
-            if (im.HasSecret)
+            if (!im.HasSecret) { RememberImage(key, true); continue; }
+
+            // The kinds come from the auditor's own findings; the VALUE is never included.
+            var kinds = im.Findings.Select(f => f.Type).Where(t => !string.IsNullOrWhiteSpace(t)).Distinct().ToList();
+            var label = kinds.Count > 0 ? $" ({string.Join(", ", kinds)})" : "";
+            // "structural" = nothing the auditor quoted can be a credential. No findings at all is NOT structural: the
+            // model said has_secret without saying what, so there is nothing to weigh and the human is asked.
+            var quoted = im.Findings.Where(f => !string.IsNullOrWhiteSpace(f.Quote)).ToList();
+            var structural = quoted.Count > 0 && quoted.All(f => !DeterministicSecretDetector.IsPlausibleSecretValue(f.Quote));
+
+            var send = true;
+            if (!structural)
             {
-                unsafeImages.Add((image.Message, image.Index));
-                // Said plainly, and in the session the picture belongs to. It used to be a window-global "The secret
-                // auditor found a secret in an image…", which landed in whatever transcript was on screen — including
-                // one that had already finished, where it read as an alarm about a picture it never sent (reported
-                // 2026-10-11). The kinds come from the auditor's own findings; the VALUE is never included.
-                var kinds = im.Findings.Select(f => f.Type).Where(t => !string.IsNullOrWhiteSpace(t)).Distinct().ToList();
-                Notice(request, "The secret scan flagged an image in this request" +
-                    (kinds.Count > 0 ? $" ({string.Join(", ", kinds)})" : "") +
-                    ", so it was left out of the request — the model sees the text but not that picture. " +
-                    "The file is untouched on disk: remove or blank the secret in it (or ask me to crop that part) and attach it again to send it deliberately.");
+                send = false;
+                if (ReviewImageAsync is not null)
+                    try { send = await ReviewImageAsync(new FlaggedImage(image.Data, kinds, (image.Message.Content ?? "").Trim())); }
+                    catch { send = false; }                      // a prompt that failed must not send the picture
             }
+            RememberImage(key, send);
+
+            if (send)
+            {
+                if (!structural) Notice(request, $"The secret scan flagged an image in this request{label}; you chose to send it as it is.");
+                continue;
+            }
+            unsafeImages.Add((image.Message, image.Index));
+            // Said plainly, and in the session the picture belongs to. It used to be a window-global "The secret
+            // auditor found a secret in an image…", which landed in whatever transcript was on screen — including
+            // one that had already finished, where it read as an alarm about a picture it never sent (reported
+            // 2026-10-11).
+            Notice(request, "The secret scan flagged an image in this request" + label +
+                ", so it was left out of the request — the model sees the text but not that picture. " +
+                "The file is untouched on disk: remove or blank the secret in it (or ask me to crop that part) and attach it again to send it deliberately.");
         }
         if (unsafeImages.Count > 0) request = WithImagesStripped(request, unsafeImages);
 

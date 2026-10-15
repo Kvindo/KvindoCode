@@ -108,13 +108,14 @@ public sealed class SecretAuditorTests
     /// <summary>A fake auditor that returns a canned answer for any input, so the decorator can be tested offline.</summary>
     sealed class FakeAuditor(bool hasSecret, params (string type, string quote)[] findings) : SecretAuditor(enabled: true)
     {
+        public int ImageCalls;
         readonly AuditResult _result = new()
         {
             HasSecret = hasSecret,
             Findings = findings.Select(f => new SecretFinding(f.type, f.quote)).ToList(),
         };
         public override Task<AuditResult> AuditTextAsync(string text, CancellationToken ct = default) => Task.FromResult(_result);
-        public override Task<AuditResult> AuditImageAsync(string base64Image, string mime = "image/png", CancellationToken ct = default) => Task.FromResult(_result);
+        public override Task<AuditResult> AuditImageAsync(string base64Image, string mime = "image/png", CancellationToken ct = default) { ImageCalls++; return Task.FromResult(_result); }
     }
 
     /// <summary>AuditTextAsync / AuditImageAsync are virtual on SecretAuditor so the fake can override them. Make them so.</summary>
@@ -176,5 +177,154 @@ public sealed class SecretAuditorTests
         var dir = Path.Combine(sb.Root, "v-" + Guid.NewGuid().ToString("N")[..6]);
         Directory.CreateDirectory(dir);
         return new SecretVault(Path.Combine(dir, "secrets.vault.json"), Path.Combine(dir, "secrets.key"));
+    }
+
+    // ------------------------------------------------------------------ a flagged image is the human's call
+
+    static LlmRequest ImageRequest(params string[] images) => new()
+    {
+        Model = "m", System = "s",
+        Messages = new[] { new ChatMessage { Role = "user", Content = "look at this", Images = images.ToList() } },
+    };
+
+    /// <summary>The auditor flags images on a guess — it has no pattern fallback for pixels — and on the user's own
+    /// benign screenshots it always quoted something structural (a host name, an address, a ULID, an identifier). Those
+    /// must NOT cost the session its picture and must NOT raise a dialog: that combination is what made a session look
+    /// blind while the user was never asked anything (reported 2026-10-15).</summary>
+    [Theory]
+    [InlineData("mskserver.ru")]
+    [InlineData("10.219.0.5:8432")]
+    [InlineData("01kk767b5q2m9g0f4g2a6z4rnv")]
+    [InlineData("130: 1787")]
+    [InlineData("publicKeyToken=null")]
+    public async Task An_image_flagged_only_with_a_structural_value_is_sent_without_asking(string quote)
+    {
+        using var sb = new Sandbox();
+        var vault = NewVault(sb); vault.Unlock();
+        var inner = new ScriptedLlmClient(new JsonArray { Script.Text("ok") });
+        var asked = 0;
+        var notices = new List<string>();
+        var audit = new AuditingLlmClient(inner, new FakeAuditor(true, ("credentials_in_url", quote)), vault, notices.Add)
+        {
+            ReviewImageAsync = _ => { asked++; return Task.FromResult(true); },
+        };
+
+        await audit.StreamAsync(ImageRequest("iVBORw0KGgo="), null, default);
+
+        Assert.Equal(0, asked);
+        Assert.Same("iVBORw0KGgo=", inner.Requests.Single().Messages[0].Images!.Single());
+        Assert.Empty(notices);                      // and no chatter about it either
+    }
+
+    /// <summary>A quote that looks like a real credential is a question, and the human must see the picture to answer.</summary>
+    [Fact]
+    public async Task An_image_flagged_with_a_credential_shaped_value_is_sent_when_the_human_approves_it()
+    {
+        using var sb = new Sandbox();
+        var vault = NewVault(sb); vault.Unlock();
+        var inner = new ScriptedLlmClient(new JsonArray { Script.Text("ok") });
+        var auditor = new FakeAuditor(true, ("api_key", "Qz7vR2mK9pT4wX8bL1cN6hJ3"));
+        FlaggedImage? asked = null;
+        var notices = new List<string>();
+        var audit = new AuditingLlmClient(inner, auditor, vault, notices.Add) { ReviewImageAsync = f => { asked = f; return Task.FromResult(true); } };
+
+        await audit.StreamAsync(ImageRequest("iVBORw0KGgo="), null, default);
+
+        // the dialog gets the KINDS and the picture, never the quoted value
+        Assert.NotNull(asked);
+        Assert.Equal(new[] { "api_key" }, asked!.Types);
+        Assert.Equal("iVBORw0KGgo=", asked.Data);
+        Assert.Same("iVBORw0KGgo=", inner.Requests.Single().Messages[0].Images!.Single());
+        Assert.Contains(notices, n => n.Contains("you chose to send it"));
+    }
+
+    /// <summary>A bare has_secret with nothing quoted has nothing to weigh, so it is a question rather than a silent
+    /// send: the model did flag the picture, it just did not say what it saw.</summary>
+    [Fact]
+    public async Task A_flag_with_no_quote_at_all_is_asked_about()
+    {
+        using var sb = new Sandbox();
+        var vault = NewVault(sb); vault.Unlock();
+        var inner = new ScriptedLlmClient(new JsonArray { Script.Text("ok") });
+        var asked = 0;
+        var audit = new AuditingLlmClient(inner, new FakeAuditor(true), vault) { ReviewImageAsync = _ => { asked++; return Task.FromResult(false); } };
+
+        await audit.StreamAsync(ImageRequest("iVBORw0KGgo="), null, default);
+
+        Assert.Equal(1, asked);
+        Assert.Empty(inner.Requests.Single().Messages[0].Images!);
+    }
+
+    /// <summary>...and "leave it out" must leave it out, with the notice that says so.</summary>
+    [Fact]
+    public async Task An_image_the_human_declines_is_left_out()
+    {
+        using var sb = new Sandbox();
+        var vault = NewVault(sb); vault.Unlock();
+        var inner = new ScriptedLlmClient(new JsonArray { Script.Text("ok") });
+        var auditor = new FakeAuditor(true, ("other", "Qz7vR2mK9pT4wX8bL1cN6hJ3"));
+        var notices = new List<string>();
+        var audit = new AuditingLlmClient(inner, auditor, vault, notices.Add) { ReviewImageAsync = _ => Task.FromResult(false) };
+
+        await audit.StreamAsync(ImageRequest("iVBORw0KGgo="), null, default);
+
+        Assert.Empty(inner.Requests.Single().Messages[0].Images!);
+        Assert.Contains(notices, n => n.Contains("left out of the request"));
+    }
+
+    /// <summary>Nobody to ask (headless, tests, no window): the drop stands, silently sending nothing the human never
+    /// saw approved.</summary>
+    [Fact]
+    public async Task With_nobody_to_ask_a_flagged_image_stays_out()
+    {
+        using var sb = new Sandbox();
+        var vault = NewVault(sb); vault.Unlock();
+        var inner = new ScriptedLlmClient(new JsonArray { Script.Text("ok") });
+        var audit = new AuditingLlmClient(inner, new FakeAuditor(true, ("api_key", "ghp_1234qwerty")), vault);
+
+        await audit.StreamAsync(ImageRequest("iVBORw0KGgo="), null, default);
+
+        Assert.Empty(inner.Requests.Single().Messages[0].Images!);
+    }
+
+    /// <summary>The same picture rides every later request in the session (the two most recent image messages are
+    /// re-sent), so the local model must be asked about it ONCE, not once per request — and the human must not be
+    /// re-prompted about a picture they already answered for.</summary>
+    [Fact]
+    public async Task A_picture_is_audited_and_asked_about_once()
+    {
+        using var sb = new Sandbox();
+        var vault = NewVault(sb); vault.Unlock();
+        var inner = new ScriptedLlmClient(new JsonArray { Script.Text("one"), Script.Text("two") });
+        var auditor = new FakeAuditor(true, ("credentials_in_url", "Qz7vR2mK9pT4wX8bL1cN6hJ3"));
+        var asked = 0;
+        var audit = new AuditingLlmClient(inner, auditor, vault) { ReviewImageAsync = _ => { asked++; return Task.FromResult(true); } };
+
+        await audit.StreamAsync(ImageRequest("iVBORw0KGgo="), null, default);
+        await audit.StreamAsync(ImageRequest("iVBORw0KGgo="), null, default);
+
+        Assert.Equal(1, auditor.ImageCalls);
+        Assert.Equal(1, asked);
+        Assert.Same("iVBORw0KGgo=", inner.Requests[1].Messages[0].Images!.Single());
+    }
+
+    /// <summary>A clean image is never a question, and it is remembered as clean: the picture does not re-enter the
+    /// local model on every following request (that was one VLM call per image per request).</summary>
+    [Fact]
+    public async Task A_clean_picture_is_audited_once_per_picture()
+    {
+        using var sb = new Sandbox();
+        var vault = NewVault(sb); vault.Unlock();
+        var inner = new ScriptedLlmClient(new JsonArray { Script.Text("one"), Script.Text("two") });
+        var auditor = new FakeAuditor(false);
+        var asked = 0;
+        var audit = new AuditingLlmClient(inner, auditor, vault) { ReviewImageAsync = _ => { asked++; return Task.FromResult(true); } };
+
+        await audit.StreamAsync(ImageRequest("iVBORw0KGgo="), null, default);
+        await audit.StreamAsync(ImageRequest("iVBORw0KGgo="), null, default);
+
+        Assert.Equal(1, auditor.ImageCalls);
+        Assert.Equal(0, asked);
+        Assert.Same("iVBORw0KGgo=", inner.Requests[1].Messages[0].Images!.Single());
     }
 }

@@ -5,6 +5,7 @@ using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Layout;
 using Avalonia.Media;
+using Avalonia.Media.Imaging;
 using Avalonia.Platform.Storage;
 using Avalonia.Threading;
 using Avalonia.VisualTree;
@@ -73,6 +74,10 @@ public partial class MainWindow : Window
                 if (_live.TryGetValue(sessionId, out var sv)) { sv.Transcript.Handle(new NoticeEvent(msg, false)); if (sv == _current) RebuildSidebar(); }
                 else ShowInfo(msg);   // no open view for it: the old behaviour is still better than dropping it
             }),
+            // An image the local scan flagged is the human's call, and they must SEE the picture to make it. Asking a
+            // blind yes/no would just teach them to approve everything (the auditor flags ordinary screenshots often
+            // enough that its findings cannot decide alone — reported 2026-10-15).
+            ReviewImageAsync = f => Dispatcher.UIThread.InvokeAsync(() => ReviewFlaggedImageAsync(f)),
         };
         _storage = CreateStorage();
         SessionStorage.Default = _storage;
@@ -1819,6 +1824,56 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
+    /// The local scan flagged an image with something that looks like a credential. It is the only judge of pictures (no
+    /// pattern can match pixels) and it is often wrong about screenshots, so the human decides — and to decide they must
+    /// SEE the picture, which is why it is shown here rather than a blind yes/no (reported 2026-10-15).
+    /// Default = leave it out (the fail-closed behaviour this replaces).
+    /// </summary>
+    async Task<bool> ReviewFlaggedImageAsync(FlaggedImage f)
+    {
+        var send = false;
+        var dlg = new Window
+        {
+            Title = "Image flagged by the secret scan", Width = 720, Height = 640, MinWidth = 460, MinHeight = 380,
+            WindowStartupLocation = WindowStartupLocation.CenterOwner, CanResize = true,
+        };
+        var kinds = f.Types.Count > 0 ? string.Join(", ", f.Types) : "unspecified";
+        var head = new TextBlock
+        {
+            TextWrapping = TextWrapping.Wrap,
+            Text = $"The local secret scan flagged this image ({kinds}) and what it quoted looks like a real value. " +
+                   "Send it to the model anyway?",
+        };
+        var preview = new Image { Stretch = Stretch.Uniform, MaxHeight = 380 };
+        try { preview.Source = new Bitmap(new MemoryStream(Convert.FromBase64String(f.Data))); }
+        catch { preview.Source = null; }
+        var source = new TextBlock
+        {
+            Name = "FlaggedImageSource", TextWrapping = TextWrapping.Wrap, MaxLines = 3, FontSize = 11.5, Opacity = 0.7,
+            Text = string.IsNullOrWhiteSpace(f.Source) ? "" : "Attached with: " + f.Source,
+        };
+        var yes = new Button { Name = "FlaggedImageSend", Content = "Send it anyway", Classes = { "accent" } };
+        var no = new Button { Name = "FlaggedImageSkip", Content = "Leave it out", Classes = { "outline" } };
+        yes.Click += (_, _) => { send = true; dlg.Close(); };
+        no.Click += (_, _) => dlg.Close();
+        dlg.Content = new DockPanel
+        {
+            Margin = new Thickness(20),
+            Children =
+            {
+                new StackPanel
+                {
+                    [DockPanel.DockProperty] = Dock.Bottom, Spacing = 10,
+                    Children = { source, new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, HorizontalAlignment = HorizontalAlignment.Right, Children = { no, yes } } },
+                },
+                new ScrollViewer { Content = new StackPanel { Spacing = 12, Children = { head, new Border { Classes = { "card" }, Padding = new Thickness(8), Child = preview } } } },
+            },
+        };
+        await dlg.ShowDialog(this);
+        return send;
+    }
+
+    /// <summary>
     /// The "possible secret" review window. Shows the WHOLE text (any number of lines) with the proposed secret pre-selected.
     /// The user marks the parts that are secret: the current selection can be added as a part (each part gets its own vault name),
     /// or split into one part per line when a block holds several credentials. "It is a secret" stores every marked part.
@@ -2484,7 +2539,12 @@ public partial class MainWindow : Window
         }
 
         // ---- "needs attention" section: entries persist until explicitly dismissed by the user
-        var attention = all.Where(x => !x.Archived && !IsPinned(x) && _settings.AttentionSessions.Contains(x.Id)).OrderByDescending(x => x.Updated).ToList();
+        // Pinned (starred) sessions are listed here TOO. They used to be filtered out, on the theory that the Pinned
+        // group already shows them — but the group is usually collapsed and all it shows then is a 7px dot, so a
+        // pinned session that finished in the background was effectively invisible in the one place that is a to-do
+        // list. Reported twice for the session that happened to be pinned ("your session is not shown in Needs
+        // attention", 2026-10-15).
+        var attention = all.Where(x => !x.Archived && _settings.AttentionSessions.Contains(x.Id)).OrderByDescending(x => x.Updated).ToList();
         if (attention.Count > 0)
         {
             var head = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto") };

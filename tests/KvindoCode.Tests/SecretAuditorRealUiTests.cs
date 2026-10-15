@@ -1471,6 +1471,29 @@ public sealed class SecretAuditorRealUiTests
         Assert.DoesNotContain(other.Id, (IEnumerable<string>)settings.AttentionAcknowledged);   // both lists are cleaned
     }
 
+    /// <summary>
+    /// A PINNED session that finished in the background must still be listed in "Needs attention". It used to be
+    /// filtered out (the Pinned group already shows it) — but that group is usually collapsed and all it shows then is
+    /// a 7px dot, so the one place that is a to-do list hid it. Reported 2026-10-15 for the session that happened to be
+    /// pinned while the user was looking for it there.
+    /// </summary>
+    [AvaloniaFact]
+    public async Task A_pinned_session_that_finished_is_still_listed_in_needs_attention()
+    {
+        using Sandbox sb = new Sandbox();
+        using App app = Start(sb, new JsonArray { Says("one") });
+        AppSettings settings = Field<AppSettings>(app.Window, "_settings");
+        StackPanel sidebar = app.Window.FindControl<StackPanel>("ProjectsPanel");
+        SessionInfo other = new SessionInfo { Id = "pinned-attn-7788", Title = "PINNEDFIN", Cwd = sb.Project, Updated = DateTimeOffset.UtcNow, Created = DateTimeOffset.UtcNow, Path = System.IO.Path.Combine(sb.Root, "p.jsonl"), Starred = true };
+        Field<List<SessionInfo>>(app.Window, "_all").Add(other);
+        settings.AttentionSessions.Add(other.Id);
+        Invoke(app.Window, "RebuildSidebar");
+        Dispatcher.UIThread.RunJobs();
+
+        Assert.Contains("Needs attention", string.Join("\n", sidebar.GetVisualDescendants().OfType<TextBlock>().Select(t => t.Text ?? "")));
+        Assert.Contains(sidebar.GetVisualDescendants().OfType<TextBlock>(), t => t.Text == "PINNEDFIN");
+    }
+
     [AvaloniaFact]
     public async Task Clicking_a_session_that_is_still_running_keeps_it_in_needs_attention()
     {
@@ -2889,6 +2912,78 @@ public sealed class SecretAuditorRealUiTests
     {
         return string.Join(" | ", from t in dlg.GetVisualDescendants().OfType<TextBlock>()
             select t.Text);
+    }
+
+    /// <summary>A 1x1 PNG: the smallest thing the dialog can actually decode and show.</summary>
+    private const string OnePixelPng = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+
+    private static Task<bool> OpenFlaggedImageDialogAsync(App app, FlaggedImage flagged)
+    {
+        var method = typeof(MainWindow).GetMethod("ReviewFlaggedImageAsync", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        return (Task<bool>)method.Invoke(app.Window, new object[] { flagged })!;
+    }
+
+    private static async Task<Window> WaitForImageDialogAsync(App app)
+    {
+        for (int i = 0; i < 40; i++)
+        {
+            Dispatcher.UIThread.RunJobs();
+            var found = app.Window.OwnedWindows.FirstOrDefault(w => w.Title == "Image flagged by the secret scan");
+            if (found is not null) return found;
+            await Task.Delay(25);
+        }
+        throw new TimeoutException("the flagged-image dialog never appeared");
+    }
+
+    /// <summary>
+    /// An image the local scan flagged with a credential-shaped value is a question, not a silent drop: the dialog must
+    /// SHOW the picture (asking about something the human cannot see would only train them to approve), and "Send it
+    /// anyway" must answer yes.
+    /// </summary>
+    [AvaloniaFact]
+    public async Task A_flagged_image_is_shown_and_sent_when_the_human_approves_it()
+    {
+        using var sb = new Sandbox();
+        using var app = Start(sb, new JsonArray { Says("hi") });
+        var task = OpenFlaggedImageDialogAsync(app, new FlaggedImage(OnePixelPng, new[] { "api_key" }, "look at this"));
+
+        var dlg = await WaitForImageDialogAsync(app);
+        var text = DialogTextFor(dlg);
+        Assert.Contains("api_key", text);
+        Assert.Contains("look at this", text);       // the message it came with
+        var shown = dlg.GetVisualDescendants().OfType<Image>().FirstOrDefault();
+        Assert.NotNull(shown);
+        Assert.NotNull(shown!.Source);               // the picture really decoded
+
+        app.Click(dlg.GetVisualDescendants().OfType<Button>().First(b => b.Name == "FlaggedImageSend"));
+        Assert.True(await task);
+    }
+
+    /// <summary>And the other answer leaves it out — the fail-closed default is what the button means.</summary>
+    [AvaloniaFact]
+    public async Task A_flagged_image_the_human_declines_is_not_sent()
+    {
+        using var sb = new Sandbox();
+        using var app = Start(sb, new JsonArray { Says("hi") });
+        var task = OpenFlaggedImageDialogAsync(app, new FlaggedImage(OnePixelPng, new[] { "other" }, ""));
+
+        var dlg = await WaitForImageDialogAsync(app);
+        app.Click(dlg.GetVisualDescendants().OfType<Button>().First(b => b.Name == "FlaggedImageSkip"));
+        Assert.False(await task);
+    }
+
+    /// <summary>The app's own client is what the window actually uses, so the dialog must be wired onto it: without
+    /// <c>ReviewImageAsync</c> every finding is a silent drop and the session cannot see the screenshots it was sent.</summary>
+    [AvaloniaFact]
+    public void The_window_wires_the_flagged_image_dialog_onto_the_llm_client()
+    {
+        using var sb = new Sandbox();
+        var fresh = new MainWindow();
+        try
+        {
+            Assert.NotNull(Field<AuditingLlmClient>(fresh, "_llm").ReviewImageAsync);
+        }
+        finally { fresh.Close(); }
     }
 
     private static string DialogTextFor(Window dlg)
