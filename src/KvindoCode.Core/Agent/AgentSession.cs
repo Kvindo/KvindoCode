@@ -321,6 +321,12 @@ public sealed class AgentSession : IDisposable
                 var candidate = new SecretCandidate(span.TypeOrOther, text, start, proposed.Length,
                     SecretFinding.MakeName(span.TypeOrOther, proposed), source,
                     SessionTitle: Info.Title, SessionId: Info.Id, Project: Project.Cwd, FromSubagent: IsChild);
+                // The secret-confirmation dialog is another "the session is waiting for you" moment, so it alerts like
+                // the question and plan tools already do. Without this the dialog opened silently and the session sat
+                // there until the human happened to look at it (asked 2026-10-15: "i want beeping on secret ask dialog
+                // open"). Notify is a no-op for a session that is on screen, is throttled per session and coalesced
+                // app-wide, so a burst of candidates is one sound.
+                Notify("KvindoCode is asking about a possible secret");
                 NoteWaitingForUser("secret confirmation");
                 var review = await _ctx.Interaction.ReviewSecretAsync(candidate, ct);
                 if (review.Decision == SecretConfirmation.Cancelled)

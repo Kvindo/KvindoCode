@@ -209,4 +209,35 @@ public sealed class HeuristicStoreTests(ITestOutputHelper o)
         var shape = DeterministicSecretDetector.LooksLikeAPlainWord(value);
         if (value.StartsWith("ghp_")) Assert.True(shape); else Assert.Equal(expected, shape);
     }
+
+    /// <summary>
+    /// Opening the secret-confirmation dialog must ALERT (a Notification hook, or the native beep), exactly like the
+    /// question and plan tools already do. It used to open silently: the session was parked on the human but the turn
+    /// had not ended, so nothing beeped and the human could sit unaware indefinitely (asked 2026-10-15: "i want beeping
+    /// on secret ask dialog open").
+    /// </summary>
+    [Fact]
+    public async Task Opening_the_secret_dialog_alerts()
+    {
+        using var sb = new Sandbox();
+        var log = Path.Combine(sb.Root, "notified.log");
+        var dir = Path.Combine(sb.Project, ".kvindocode"); Directory.CreateDirectory(dir);
+        File.WriteAllText(Path.Combine(dir, "hooks.json"), new JsonObject
+        {
+            ["Notification"] = new JsonArray(new JsonObject { ["hooks"] = new JsonArray(new JsonObject { ["type"] = "command", ["command"] = $"cat >> '{log}'; echo >> '{log}'" }) }),
+        }.ToJsonString());
+        NewVault(sb);
+        var inter = new FakeInteraction();
+        for (var i = 0; i < 4; i++) inter.SecretConfirmationDecisions.Enqueue(SecretConfirmation.Cancelled);
+        var settings = sb.Settings(x => { x.AuditSecrets = true; x.RunHooks = true; x.NotificationSounds = true; x.PlanReview = false; });
+        var llm = Script.Client(Script.Tools("", ("Bash", new { command = "printf '%s' " + ShellQuote("secret = certificates") })), Script.Text("done"));
+        using var session = new AgentSession(settings, llm, sb.Project, inter);
+
+        await session.RunTurnAsync("run it", CancellationToken.None);
+        for (var i = 0; i < 20 && (!File.Exists(log) || !File.ReadAllText(log).Contains("possible secret")); i++) await Task.Delay(50);
+
+        Assert.Contains(inter.SecretPrompts, c => c.Text.Contains("certificates"));   // the dialog really opened
+        Assert.True(File.Exists(log), "no alert was fired at all");
+        Assert.Contains("asking about a possible secret", File.ReadAllText(log));
+    }
 }

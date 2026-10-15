@@ -1840,6 +1840,10 @@ public partial class MainWindow : Window
     /// </summary>
     async Task<bool> ReviewFlaggedImageAsync(FlaggedImage f)
     {
+        // This dialog is raised from the LLM decorator, which has no session object to run AgentSession.Notify through,
+        // so it alerts here. Coalesced app-wide by RequestPlay and off unless alerts are on in Settings (asked
+        // 2026-10-15: "i want beeping on secret ask dialog open").
+        if (_settings.NotificationSounds && _settings.NativeBeep) Notifier.RequestPlay(_settings);
         var send = false;
         var dlg = new Window
         {
