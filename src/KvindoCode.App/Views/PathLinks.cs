@@ -79,13 +79,38 @@ public static class PathLinks
             var colon = token.LastIndexOf(':');
             if (colon > 0 && int.TryParse(token[(colon + 1)..], out var n)) { line = n; token = token[..colon]; }
             if (token.Length < 4 || token.IndexOf('/') < 0) continue;
-            var full = resolve(token.Trim('"', '\''));
+            var full = resolve(LocalPathOf(token).Trim('"', '\''));
             if (full is null) continue;                                    // only what really exists becomes a link
             map.Spans.Add(new Span(start, token.Length, full, line));
         }
 
         if (map.Spans.Count == 0) return;
         Wire(host, map);
+    }
+
+    /// <summary>
+    /// The local path a token names: itself, or what its <c>file://</c> URL points at.
+    /// </summary>
+    /// <remarks>
+    /// A link pasted as <c>file:///home/…/report.md</c> produced a token the resolver could not match ("file:///home/…"
+    /// is not a path), so it was not clickable in plain text — tool output, notices, a user's own message. Only the
+    /// URL form is translated; a plain path is returned unchanged. The SPAN still covers the whole token, so the
+    /// visible <c>file://</c> prefix stays part of what the hand cursor and the click refer to.
+    /// </remarks>
+    public static string LocalPathOf(string token)
+    {
+        if (!token.StartsWith("file://", StringComparison.OrdinalIgnoreCase)) return token;
+        var rest = token[7..];
+        if (!rest.StartsWith('/'))
+        {
+            var slash = rest.IndexOf('/');
+            if (slash < 0) return token;
+            var hostPart = rest[..slash];
+            // a real host ("file://server/share") is not a local file; only an empty host or "localhost" is
+            if (hostPart.Length > 0 && !hostPart.Equals("localhost", StringComparison.OrdinalIgnoreCase)) return token;
+            rest = rest[slash..];
+        }
+        try { return Uri.UnescapeDataString(rest); } catch { return rest; }
     }
 
     /// <summary>
@@ -207,6 +232,16 @@ public static class PathLinks
     /// <summary>For tests: is the character at this offset inside a clickable path?</summary>
     public static bool SpanAt(Control host, int charIndex)
         => Maps.TryGetValue(host, out var m) && m.Spans.Any(s => charIndex >= s.Start && charIndex < s.Start + s.Length);
+
+    /// <summary>For tests: the path registered at this offset, and whether there is one.</summary>
+    public static bool SpanAt(Control host, int charIndex, out string full)
+    {
+        full = "";
+        if (!Maps.TryGetValue(host, out var m)) return false;
+        foreach (var s in m.Spans)
+            if (charIndex >= s.Start && charIndex < s.Start + s.Length) { full = s.Full; return true; }
+        return false;
+    }
 
     /// <summary>For tests: how many clickable paths this control has.</summary>
     public static int CountAt(Control host) => Maps.TryGetValue(host, out var m) ? m.Spans.Count : 0;

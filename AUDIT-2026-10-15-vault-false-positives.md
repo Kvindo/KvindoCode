@@ -23,6 +23,22 @@ on the **bulk purge**, not on the detector.
 
 ## 2. What they are (shape reason → count)
 
+The names, exactly as they appear in the Secrets list (24 from the guard + `audited-token-a1c58f74a01e`, which the
+first draft of this file called a defect — see §3):
+
+```
+audited-password-07d97f65a6eb   audited-password-6efdca836ced   audited-password-8fc27d1e1a4a
+audited-password-af89dc4ac01e   audited-password-b63fede1644f   audited-password-b84f3b061910
+audited-password-b878d7ad7c68   audited-password-db52ca2260bd   audited-password-f9e6cd68f985
+
+audited-token-04abb085cbcc      audited-token-06a5d25b834b      audited-token-21c9b930da83
+audited-token-2f12d0e2e795      audited-token-348fb4e89ac8      audited-token-42bd34b2e3b1
+audited-token-505b88699a41      audited-token-7a75352f474e      audited-token-a1c58f74a01e
+audited-token-a407732cb82b      audited-token-a96ad3fca960      audited-token-b180730e0e89
+audited-token-c1c3a968032e      audited-token-c7290f43c3c9      audited-token-d5c363a1be3e
+audited-token-f3329665a6ab
+```
+
 | `Describe` reason | count | what that means |
 |---|---|---|
 | `a path or name, not a secret value` | 16 | starts with `/`, or `NNname/`, or `word/word/word` |
