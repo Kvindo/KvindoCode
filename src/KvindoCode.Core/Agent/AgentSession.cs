@@ -1571,10 +1571,14 @@ public sealed class AgentSession : IDisposable
     /// <summary>How many times one turn may ask the model to carry on after the provider cut the stream mid-answer.</summary>
     const int MaxStreamContinuations = 2;
 
+    /// <summary>How many times one turn re-asks after a call that came back with no answer at all.</summary>
+    const int MaxEmptyResponseRetries = 2;
+
     async Task<string> LoopAsync(CancellationToken ct)
     {
         int stopRounds = 0;
         int streamContinuations = 0;
+        int emptyRetries = 0;
         int cap = Math.Max(50, _settings.MaxIterations);
         for (int iter = 0; iter < cap; iter++)
         {
@@ -1715,6 +1719,21 @@ public sealed class AgentSession : IDisposable
                 return "error";
             }
 
+            // A completed call that came back with NO answer at all — no text and no tool call, while the stream itself
+            // finished cleanly — is a gateway hiccup, not a reply. It used to end the turn with "The model returned an
+            // empty response." and leave the human to press Send again. The client already retries a stream that is
+            // empty from end to end; this covers the rest (a reply carrying only hidden reasoning, say). Bounded, so a
+            // model that keeps answering nothing cannot loop for ever (asked 2026-10-15). Placed BEFORE the assistant
+            // message is stored, so a retried attempt does not leave an empty turn in the history.
+            if (res.ToolCalls.Count == 0 && string.IsNullOrWhiteSpace(res.Content)
+                && emptyRetries < MaxEmptyResponseRetries && !ct.IsCancellationRequested)
+            {
+                emptyRetries++;
+                Emit(new NoticeEvent($"The model returned an empty response; asking again ({emptyRetries}/{MaxEmptyResponseRetries}).", false));
+                await Task.Delay(500 * emptyRetries, ct);
+                continue;
+            }
+
             if (redactor.Contains(res.Content) || redactor.Contains(res.Reasoning)) NoteMasked();
             // a model could still send a value in an argument the schema does not define — never persist that either
             foreach (var tc in res.ToolCalls) WithholdSecretArgs(tc);
@@ -1749,7 +1768,9 @@ public sealed class AgentSession : IDisposable
                 if (res.FinishReason == "length")
                     Emit(new NoticeEvent("The response was cut off by the output token limit.", true));
                 else if (string.IsNullOrWhiteSpace(res.Content))
-                    Emit(new NoticeEvent("The model returned an empty response.", true));
+                    Emit(new NoticeEvent(emptyRetries > 0
+                        ? $"The model returned an empty response {emptyRetries + 1} times; not asking again. Send a message to retry, or switch model."
+                        : "The model returned an empty response.", true));
                 else if (Hooks.Any("Stop") && stopRounds < 3)
                 {   // Stop hooks may reject the answer ("block") — the model then revises it
                     var hs = await Hooks.RunAsync("Stop", HookPayload(new JsonObject { ["stop_hook_active"] = stopRounds > 0 }), null, ct, st => Emit(new PhaseEvent(st)));

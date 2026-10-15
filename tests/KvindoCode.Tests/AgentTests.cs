@@ -568,4 +568,39 @@ public class SubagentModelTests
         Assert.Single(llm.Requests);                                             // no continuation round
         Assert.DoesNotContain(llm.Requests[0].Messages, m => (m.Content ?? "").Contains("Continue EXACTLY where you left off"));
     }
+
+    /// <summary>
+    /// "The model returned an empty response." used to end the turn, leaving the human to press Send again. It is a
+    /// gateway hiccup, so the turn asks once more before giving up (asked 2026-10-15).
+    /// </summary>
+    [Fact]
+    public async Task An_empty_response_is_retried_before_the_turn_gives_up()
+    {
+        using var sb = new Sandbox();
+        var llm = Script.Client(Script.Text(""), Script.Text("the real answer"));
+        var s = new AgentSession(sb.Settings(), llm, sb.Project, new FakeInteraction());
+        var events = Helpers.Collect(s);
+
+        await s.RunTurnAsync("go", default);
+
+        Assert.Equal(2, llm.Requests.Count);                                     // one retry
+        Assert.Contains(events.OfType<TextDeltaEvent>(), d => d.Text.Contains("the real answer"));
+        Assert.Contains(events.OfType<NoticeEvent>(), n => n.Text.Contains("asking again"));
+        Assert.Null(s.LastTurnError);
+    }
+
+    /// <summary>...but only so many times: a model that keeps answering nothing must not loop for ever.</summary>
+    [Fact]
+    public async Task Repeated_empty_responses_stop_after_the_retry_budget()
+    {
+        using var sb = new Sandbox();
+        var llm = Script.Client(Script.Text(""), Script.Text(""), Script.Text(""), Script.Text(""), Script.Text("never reached"));
+        var s = new AgentSession(sb.Settings(), llm, sb.Project, new FakeInteraction());
+        var events = Helpers.Collect(s);
+
+        await s.RunTurnAsync("go", default);
+
+        Assert.Equal(3, llm.Requests.Count);                                     // the attempt plus two retries
+        Assert.Contains(events.OfType<NoticeEvent>(), n => n.Text.Contains("not asking again"));
+    }
 }
