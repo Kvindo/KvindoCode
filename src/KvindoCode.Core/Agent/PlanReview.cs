@@ -94,8 +94,6 @@ public sealed class PlanReviewGate
         // the value in force (a silent Math.Max(30, …) clamp made a configured 1 s behave as 30 s).
         var seconds = _settings.PlanReviewTimeoutSeconds <= 0 ? 900 : _settings.PlanReviewTimeoutSeconds;
         var timeout = TimeSpan.FromSeconds(seconds);
-        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        deadline.CancelAfter(timeout);
         var started = DateTime.UtcNow;
         session.NotifyPlanReview(new PlanReviewEvent(round, total, "", true, false));
         var live = new StringBuilder();
@@ -117,25 +115,62 @@ public sealed class PlanReviewGate
             if (text.Length > 4000) text = text[^4000..];
             session.NotifyPlanReview(new PlanReviewEvent(round, total, text, true, false));
         }
-        string critique;
-        try { critique = await PlanReviewer.ReviewAsync(plan, session, llm, _settings, deadline.Token, Progress); }
-        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+
+        // A FAILED round is retried before the gate gives up. Presenting a plan that was never reviewed is worse than
+        // waiting, and the reviewer fails for ordinary reasons (a gateway blip, a transient API error, a stalled
+        // stream) — the same reasons main-call retries exist for. It used to fail open on the FIRST error, so the plan
+        // went to the human unreviewed and the round was never redone (reported 2026-10-15).
+        //
+        // The budget comes from the CONFIGURED timeout, never from the number of attempts: the round deadline is what
+        // keeps "while a round runs there is no Approve button" from turning a retrying reviewer into an hour-long
+        // hang. So the setting is still an upper bound on the round — a retry can only ever use the time that is left.
+        const int maxAttempts = 2;
+        var attempt = 0;
+        string? critique = null;
+        string? failure = null;
+        while (true)
         {
-            // OUR deadline expired, not the user's Esc: abandon the round and present the plan. Rethrowing here would
-            // kill the whole turn on a slow reviewer, which is worse than presenting an unreviewed plan.
-            var mins = Math.Round((DateTime.UtcNow - started).TotalMinutes, 1);
-            session.NotifyPlanReview(new PlanReviewEvent(round, total,
-                $"This review round hit its {timeout.TotalMinutes:0}-minute limit after {mins} min and was abandoned — presenting the plan now. " +
-                "Raise or lower “Plan-review round timeout” in settings.json (PlanReviewTimeoutSeconds).", false, true));
-            _count = Math.Max(_count, Rounds); _lastReviewedHash = Hash(plan); _presented = false;
-            return GateDecision.Ok;
-        }
-        catch (OperationCanceledException) { throw; }               // the user interrupted: propagate
-        catch (Exception e)
-        {   // a broken reviewer must not deadlock planning: fail open and tell the user
-            session.NotifyPlanReview(new PlanReviewEvent(round, total, "Reviewer failed: " + e.Message + " — presenting the plan without this review round.", false, true));
-            _count = Math.Max(_count, Rounds); _lastReviewedHash = Hash(plan); _presented = false;
-            return GateDecision.Ok;
+            attempt++;
+            var remaining = timeout - (DateTime.UtcNow - started);
+            if (attempt > 1 && remaining <= TimeSpan.FromSeconds(5))
+            {
+                failure = $"the round ran out of its {timeout.TotalMinutes:0}-minute budget before a retry could run";
+                break;
+            }
+            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            deadline.CancelAfter(remaining > TimeSpan.Zero ? remaining : TimeSpan.Zero);
+            live.Clear(); lastEmit = DateTime.MinValue;      // the card shows THIS attempt
+            if (attempt > 1)
+                session.NotifyPlanReview(new PlanReviewEvent(round, total,
+                    $"Retrying the review round ({attempt}/{maxAttempts}) — the previous attempt failed: {failure}", true, true));
+            try
+            {
+                critique = await PlanReviewer.ReviewAsync(plan, session, llm, _settings, deadline.Token, Progress);
+                break;
+            }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+            {
+                // The ROUND deadline expired (not the user's Esc): there is no budget left to retry, so present the
+                // plan. Kept distinct from a failure because the message is different and more actionable.
+                var mins = Math.Round((DateTime.UtcNow - started).TotalMinutes, 1);
+                session.NotifyPlanReview(new PlanReviewEvent(round, total,
+                    $"This review round hit its {timeout.TotalMinutes:0}-minute limit after {mins} min and was abandoned — presenting the plan now. " +
+                    "Raise or lower “Plan-review round timeout” in settings.json (PlanReviewTimeoutSeconds).", false, true));
+                _count = Math.Max(_count, Rounds); _lastReviewedHash = Hash(plan); _presented = false;
+                return GateDecision.Ok;
+            }
+            catch (OperationCanceledException) { throw; }               // the user interrupted: propagate
+            catch (Exception e)
+            {
+                failure = e.Message;
+                if (attempt < maxAttempts) continue;                    // retried above, within the same budget
+                // Out of attempts: a broken reviewer must not deadlock planning, so fail open — and say that it was
+                // retried, so a human can tell this apart from a first-attempt failure.
+                session.NotifyPlanReview(new PlanReviewEvent(round, total,
+                    $"Reviewer failed on {attempt} attempt(s): {failure} — presenting the plan without this review round.", false, true));
+                _count = Math.Max(_count, Rounds); _lastReviewedHash = Hash(plan); _presented = false;
+                return GateDecision.Ok;
+            }
         }
         RecordReview(plan);
         session.NotifyPlanReview(new PlanReviewEvent(round, total, critique, false, false));
