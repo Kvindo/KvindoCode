@@ -21,4 +21,10 @@
     <None Include="..\..\tools\update_scores.py" Link="tools\update_scores.py" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <AvaloniaResource Include="Assets\**" />
   </ItemGroup>
+  <ItemGroup>
+    <!-- Same as Core: the test project asserts on counters and internal seams that exist only so behaviour can be
+         measured (dispatcher posts, masker builds, vault writes). Without this they are unreachable and a test for
+         exactly the regression it exists to pin would have to go through reflection. -->
+    <InternalsVisibleTo Include="KvindoCode.Tests" />
+  </ItemGroup>
 </Project>

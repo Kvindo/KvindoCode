@@ -184,6 +184,13 @@ public sealed class SecretVault
             _keyStamp = KeyStamp();
             DecryptAll();
             _cachedRedactor = null;                 // what can be read may have changed with the key
+            DropCachedTargets();
+            // Version must move too: `_values` just changed from empty-to-full (or the reverse), and Version is the
+            // token every cache in the app keys on. Without this, a session whose FIRST Unlock failed built an empty
+            // masker against the same version and kept it for ever — its transcript and outbound masking silently
+            // stopped working after a later successful unlock, while the audit path (which asks a fresh redactor each
+            // request) healed itself. Found by the concurrency review, 2026-10-15.
+            _version++;
             return true;
         }
     }
@@ -219,6 +226,8 @@ public sealed class SecretVault
             _keyStamp = null;
             _values.Clear();
             _cachedRedactor = null;                 // this epoch is over: a redactor from it must never be served again
+            DropCachedTargets();
+            _version++;                             // ...and it is a new epoch: see the note in Unlock
         }
     }
 
@@ -357,6 +366,12 @@ public sealed class SecretVault
         File.WriteAllText(tmp, JsonSerializer.Serialize(_data, VaultJson.Opts));
         OwnerOnly(tmp);
         File.Move(tmp, FilePath, true);
+        // The blobs on disk are now encrypted with a different key while `_version` — the token every cache in the app
+        // keys on — had not moved, so a redactor or target list built before the rotation could be served after it
+        // (found by the concurrency review, 2026-10-15).
+        _cachedRedactor = null;
+        DropCachedTargets();
+        _version++;
     }
 
     void WriteKeyFile(byte[] key)
@@ -402,6 +417,12 @@ public sealed class SecretVault
             _loadFailed = false;
             _data = LoadFileOnly();
             DecryptAll();
+            // A restore replaces the whole vault with the backup: any cache keyed on Version describes the state that
+            // was just rolled back, and handing it out would mask against values the file no longer holds. Neither this
+            // nor WriteVaultFile used to move the version at all (found by the concurrency review, 2026-10-15).
+            _cachedRedactor = null;
+            DropCachedTargets();
+            _version++;
         }
         catch { /* restore is best-effort; the backup directory still holds everything */ }
     }
@@ -476,8 +497,48 @@ public sealed class SecretVault
         }
     }
 
+    /// <summary>
+    /// While a caller is making several related changes, hold the file writes until it finishes (see <see cref="Batch"/>).
+    /// </summary>
+    /// <remarks>
+    /// One detected secret is stored by <see cref="Set"/> (save #1) and then registered as a leak by
+    /// <see cref="RecordLeak"/> (save #2), and each save serialises ~2000 records, writes ~1.7 MB, copies another
+    /// ~1.7 MB to `.bak` and clears the process-wide scan memo — all while HOLDING <c>_lock</c>, so every other
+    /// session's masker and every event of every session waits behind it (found while investigating "many sessions at
+    /// once are slow", 2026-10-15). Batching makes it one save and one memo clear per finding.
+    ///
+    /// It must not be left set: a marker in a transcript means the value is on disk (see the "Unknown or unavailable
+    /// secret placeholder" path), so the file is flushed before the request that stored it can send anything.
+    /// </remarks>
+    public IDisposable Batch()
+    {
+        lock (_lock) _batchDepth++;
+        return new SaveBatch(this);
+    }
+
+    sealed class SaveBatch(SecretVault vault) : IDisposable
+    {
+        public void Dispose()
+        {
+            lock (vault._lock)
+            {
+                vault._batchDepth--;
+                if (vault._batchDepth == 0 && vault._savePending) vault.SaveFile();
+            }
+        }
+    }
+    int _batchDepth;
+    bool _savePending;
+
     void SaveFile()
     {
+        if (_batchDepth > 0) { _savePending = true; return; }        // inside a batch: one write at the end
+        SaveFileCore();
+    }
+
+    void SaveFileCore()
+    {
+        _savePending = false;
         if (_loadFailed)
             throw new InvalidOperationException(
                 $"{LoadError} KvindoCode will not overwrite it — restore the file (a {Path.GetFileName(FilePath)}.bak copy may exist), or delete it deliberately, then retry.");
@@ -485,9 +546,16 @@ public sealed class SecretVault
         var tmp = FilePath + ".tmp";
         File.WriteAllText(tmp, JsonSerializer.Serialize(_data, VaultJson.Opts));
         OwnerOnly(tmp);
-        // keep one previous version, so a bad write is recoverable
-        if (File.Exists(FilePath)) { try { File.Copy(FilePath, FilePath + ".bak", true); OwnerOnly(FilePath + ".bak"); } catch { } }
-        File.Move(tmp, FilePath, true);
+        // Keep one previous version, so a bad write is recoverable — WITHOUT copying it. File.Replace moves the
+        // existing file to the backup name as part of the rename, so a 1.7 MB vault no longer costs another 1.7 MB of
+        // I/O inside the lock. Kept as the fallback when there is nothing to replace yet.
+        if (File.Exists(FilePath))
+        {
+            try { File.Replace(tmp, FilePath, FilePath + ".bak", ignoreMetadataErrors: true); OwnerOnly(FilePath + ".bak"); }
+            catch { File.Move(tmp, FilePath, true); }                // e.g. a filesystem without rename-over support
+        }
+        else File.Move(tmp, FilePath, true);
+        DropCachedTargets();          // the set of values a request must mask changed with this save
         _version++;
         // Storing a value REWRITES already-sent text into a marker, so the outbound scan's memo can no longer be
         // trusted for those strings (verified 2026-10-11: a 150-byte line became 130 bytes). Invalidate it here — one
@@ -524,7 +592,38 @@ public sealed class SecretVault
 
     public List<SecretRecord> List()
     {
-        lock (_lock) return _data.Secrets.OrderBy(s => s.Name, StringComparer.OrdinalIgnoreCase).Select(Clone).ToList();
+        lock (_lock) { ListCalls++; return _data.Secrets.OrderBy(s => s.Name, StringComparer.OrdinalIgnoreCase).Select(Clone).ToList(); }
+    }
+
+    /// <summary>Calls to <see cref="List"/> — a sort plus a clone of every record, under the lock. Diagnostics and tests
+    /// only: the audit path must not do this once per detected value (2026-10-15).</summary>
+    public long ListCalls { get; private set; }
+
+    /// <summary>
+    /// The record holding <paramref name="sha256"/>, chosen the way <c>List().FirstOrDefault(sha)</c> chooses it.
+    /// </summary>
+    /// <remarks>
+    /// For the audit path, which used to call <see cref="List"/> — a sort plus a clone of every record (749 on this
+    /// machine) — once per DETECTED VALUE, under the vault lock, on every outbound request (reviewed 2026-10-15).
+    ///
+    /// The tie-break matters and is not "the first one found": a value CAN be stored under more than one name (only
+    /// name uniqueness is enforced), and 8 duplicate-sha groups exist in the live vault. The old call sorted by name
+    /// first, so it picked the ALPHABETICALLY FIRST name, and that name is what appears in the marker the model sees.
+    /// Reproducing it here keeps the marker name stable; an insertion-order scan would silently rename a marker
+    /// depending on which session happened to store it.
+    /// </remarks>
+    public SecretRecord? FindBySha256(string sha256)
+    {
+        lock (_lock)
+        {
+            SecretRecord? best = null;
+            foreach (var s in _data.Secrets)
+            {
+                if (!string.Equals(s.Sha256, sha256, StringComparison.OrdinalIgnoreCase)) continue;
+                if (best is null || string.Compare(s.Name, best.Name, StringComparison.OrdinalIgnoreCase) < 0) best = s;
+            }
+            return best is null ? null : Clone(best);
+        }
     }
 
     public int Count { get { lock (_lock) return _data.Secrets.Count; } }
@@ -659,6 +758,11 @@ public sealed class SecretVault
     {
         lock (_lock)
         {
+            // Built once per vault state, exactly like Redactor() and under the same discipline: keyed on Version, and
+            // the cache is dropped in Lock/Unlock (and on a key rotation or a restore) rather than relying on Version
+            // alone. Version was NOT a complete token before 2026-10-15 — Lock() cleared _values without moving it — and
+            // caching on it then would have served the target list of a vault that was no longer unlocked.
+            if (_cachedTargets is not null && _cachedTargetsVersion == _version && _key is not null) { TargetHits++; return _cachedTargets; }
             var res = new List<(string, string)>();
             foreach (var s in _data.Secrets)
                 // `>= MinLength`, not `> 6`: SecretRedactor masks values of exactly MinLength (6) characters and the
@@ -667,9 +771,24 @@ public sealed class SecretVault
                 // the values in the request had been replaced.
                 if (s.Redact && _values.TryGetValue(s.Id, out var v) && v.Length >= SecretRedactor.MinLength && !SecretPlaceholders.Contains(v) && !SecretPlaceholders.Contains(s.Name)) res.Add((s.Name, v));
             res.Sort((a, b) => b.Item2.Length.CompareTo(a.Item2.Length));
-            return res;
+            // Frozen: the list is now SHARED by every session, and an IReadOnlyList is a cast away from a List. The
+            // same "store it frozen" discipline OutboundScanCache already documents for the spans it hands out.
+            var frozen = res.ToArray();
+            _cachedTargets = frozen;
+            _cachedTargetsVersion = _version;
+            TargetBuilds++;
+            return frozen;
         }
     }
+
+    (string Name, string Value)[]? _cachedTargets;
+    int _cachedTargetsVersion = -1;
+    /// <summary>Target lists actually built, and times a cached one was served. Diagnostics and tests only.</summary>
+    public long TargetBuilds { get; private set; }
+    /// <summary>See <see cref="TargetBuilds"/>.</summary>
+    public long TargetHits { get; private set; }
+
+    void DropCachedTargets() { _cachedTargets = null; }
 
     /// <summary>
     /// A masker for the current contents, built once per vault state.
@@ -708,7 +827,19 @@ public sealed class SecretVault
     SecretRedactor? _cachedRedactor;
     int _cachedRedactorVersion = -1;
 
-    public bool IsExcluded(string value) => _data.ExcludedSha256.Contains(Sha256Hex(value), StringComparer.OrdinalIgnoreCase);
+    /// <summary>
+    /// Whether the human already said this value is not a secret.
+    /// </summary>
+    /// <remarks>
+    /// Takes the lock. It used to read <c>_data.ExcludedSha256</c> with no lock at all, while <see cref="Exclude"/>,
+    /// <see cref="ExcludeWithContext"/> and <see cref="Reload"/> mutate that same list (and Reload replaces <c>_data</c>
+    /// outright) — a `List.Contains` racing an `Add`/`RemoveAll` can throw or read a torn list, and it runs on every
+    /// outbound request (found by the concurrency review of 2026-10-15).
+    /// </remarks>
+    public bool IsExcluded(string value)
+    {
+        lock (_lock) return _data.ExcludedSha256.Contains(Sha256Hex(value), StringComparer.OrdinalIgnoreCase);
+    }
 
     public void Exclude(string value)
     {

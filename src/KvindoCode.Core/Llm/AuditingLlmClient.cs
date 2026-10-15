@@ -168,6 +168,12 @@ public sealed class AuditingLlmClient : ILlmClient
         if (detected.Count > 0)
         {
             if (!_vault.Unlock(out var unlockError)) return AuditUnavailable("Could not unlock the secret vault: " + unlockError);
+            // One whole-file write per REQUEST rather than two per FINDING: storing a value and registering it as a leak
+            // both save, and a save serialises the whole vault, writes it and clears the process-wide scan memo while
+            // holding the vault lock — so every other session waited on both (found while investigating "many sessions
+            // at once are slow", 2026-10-15). The batch is scoped to this loop and flushes on dispose, before anything
+            // is sent.
+            using var saveBatch = _vault.Batch();
             foreach (var (value, type) in detected)
             {
                 if (_vault.IsExcluded(value)) continue;                     // the human said this one is not a secret
@@ -176,7 +182,7 @@ public sealed class AuditingLlmClient : ILlmClient
                 if (SecretPlaceholders.Contains(value)) continue;
                 try
                 {
-                    var existing = _vault.List().FirstOrDefault(r => r.Sha256 == SecretVault.Sha256Hex(value));
+                    var existing = _vault.FindBySha256(SecretVault.Sha256Hex(value));
                     var name = existing?.Name ?? SecretFinding.MakeName(type, value);
                     if (existing is null)
                     {
@@ -247,12 +253,32 @@ public sealed class AuditingLlmClient : ILlmClient
             }
         }
 
-        if (names.Count == 0) return await _inner.StreamAsync(request, callbacks, ct);
+        // FAIL CLOSED. Until now this sent the request unmasked whenever `names` was empty — and `names` is filled by
+        // a plain `Contains` over the JOINED text, which misses the spellings the automaton does catch: a value sitting
+        // in tool-call arguments in its JSON-ESCAPED form (a quote or a backslash in it) makes `redactor.Contains`
+        // true while `everything.Contains(value)` is false. The result was `anyKnown == true`, `names.Count == 0`, and
+        // an unmasked send with the credential in it (found by the security review of 2026-10-15). So "nothing is
+        // known" is the only condition under which the request may skip masking, and a value that is known but could
+        // not be turned into a name is an error, not a licence to send it.
+        if (names.Count == 0 && !anyKnown) return await _inner.StreamAsync(request, callbacks, ct);
+        if (names.Count == 0)
+            return AuditUnavailable("A stored secret appears in this request but could not be identified for masking, " +
+                                    "so the request was not sent.");
 
         // Said once per value: a secret the vault already holds is masked silently on every later request.
         if (newlyStored.Count > 0)
             _onNotice?.Invoke($"Found {newlyStored.Count} new secret(s) in the conversation and replaced them with placeholders ({string.Join(", ", newlyStored)}). Use Write/Edit or Bash to put them back where they belong.");
-        return await _inner.StreamAsync(ProtectRequest(request, targets, redactor), callbacks, ct);
+        var protectedRequest = ProtectRequest(request, targets, redactor);
+        // ...and PROVE it: the masking above replaces values by name, so a value the automaton can still find afterwards
+        // means the replacement did not cover every spelling of it. One automaton pass over the result, only when the
+        // vault had something to mask, and the request is refused rather than sent with the value in it.
+        //
+        // Markers are stripped before the check: a marker's NAME may legitimately contain a stored value as a substring
+        // (the word "audited" inside a generated name), which is a name, not a leaked value. Stripping markers keeps the
+        // check about values only, so a correctly masked request can never be refused.
+        if (redactor.Contains(string.Join("\n", EveryOutboundString(protectedRequest).Select(SecretPlaceholders.StripMarkers))))
+            return AuditUnavailable("A secret value could not be reliably masked, so the request was not sent.");
+        return await _inner.StreamAsync(protectedRequest, callbacks, ct);
     }
 
     /// <summary>Replace a value that could not be turned into a marker with the irreversible redaction text.</summary>
@@ -399,13 +425,13 @@ public sealed class AuditingLlmClient : ILlmClient
         var msgs = r.Messages.Select(m => new ChatMessage
         {
             Role = m.Role,
-            Content = SecretPlaceholders.Protect(m.Content ?? "", targets),
-            Reasoning = SecretPlaceholders.Protect(m.Reasoning ?? "", targets),
+            Content = SecretPlaceholders.Protect(m.Content ?? "", targets, redactor),
+            Reasoning = SecretPlaceholders.Protect(m.Reasoning ?? "", targets, redactor),
             ToolCalls = m.ToolCalls?.Select(c => new ToolCall { Id = c.Id, Name = c.Name, Arguments = ProtectArguments(c.Arguments, redactor) }).ToList(),
             ToolCallId = m.ToolCallId, IsError = m.IsError, IsSummary = m.IsSummary, IsNotification = m.IsNotification, IsInternal = m.IsInternal,
             Model = m.Model, Ts = m.Ts, DurationMs = m.DurationMs, Images = m.Images?.ToList(),
         }).ToList();
-        return new LlmRequest { SessionId = r.SessionId, AuditSecrets = r.AuditSecrets, Model = r.Model, System = SecretPlaceholders.Protect(r.System, targets), Messages = msgs, Tools = r.Tools, MaxTokens = r.MaxTokens, ReasoningEffort = r.ReasoningEffort };
+        return new LlmRequest { SessionId = r.SessionId, AuditSecrets = r.AuditSecrets, Model = r.Model, System = SecretPlaceholders.Protect(r.System, targets, redactor), Messages = msgs, Tools = r.Tools, MaxTokens = r.MaxTokens, ReasoningEffort = r.ReasoningEffort };
     }
 
 }

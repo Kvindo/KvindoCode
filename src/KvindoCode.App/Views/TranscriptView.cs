@@ -29,6 +29,9 @@ public sealed class TranscriptView : UserControl
     readonly List<QuestionCard> _questionOrder = new();
 
     MarkdownView? _text; StringBuilder _textBuf = new(); bool _textDirty;
+    /// <summary>Characters buffered from the current stream. For tests: the session ON SCREEN must absorb its events
+    /// SYNCHRONOUSLY, while a hidden one is deferred to a batched drain.</summary>
+    internal int BufferedChars => _textBuf.Length;
     SelectableTextBlock? _thinkBody; StringBuilder _thinkBuf = new(); Border? _thinkBlock; TextBlock? _thinkHeader;
     bool _stick = true;
     double _bodyFontSize = 14;
@@ -313,7 +316,28 @@ public sealed class TranscriptView : UserControl
 
     void SetPhase(string phase) { _phase = phase; UpdateStatus(); }
 
-    void ScrollToEndSoon() => Dispatcher.UIThread.Post(() => _scroll.ScrollToEnd(), DispatcherPriority.Background);
+    /// <summary>
+    /// Ask for a scroll to the end, ONCE per pending job.
+    /// </summary>
+    /// <remarks>
+    /// Every <see cref="Add"/> posted its own job, so a burst of tool cards became a burst of posted scroll jobs — and
+    /// each <c>ScrollToEnd</c> runs a full layout of the column, which feeds back through <c>ScrollChanged</c>. A
+    /// 40-event round therefore queued up to 40 full layouts on the UI thread for one visible change (found while
+    /// investigating "many sessions at once are slow": this is the per-event cost that grows with the number of
+    /// sessions, 2026-10-15). One flag makes it idempotent: the job that is already pending will scroll to wherever the
+    /// end is by the time it runs.
+    /// </remarks>
+    void ScrollToEndSoon()
+    {
+        if (_scrollPosted) return;
+        _scrollPosted = true;
+        ScrollPosts++;
+        Dispatcher.UIThread.Post(() => { _scrollPosted = false; if (_stick) _scroll.ScrollToEnd(); }, DispatcherPriority.Background);
+    }
+    bool _scrollPosted;
+    /// <summary>Dispatcher posts that scroll to the end. For tests: it must be one per pending change, not one per
+    /// added control (see <see cref="ScrollToEndSoon"/>).</summary>
+    internal int ScrollPosts;
     public void ScrollToEnd() { _stick = true; ScrollToEndSoon(); }
 
     void Add(Control c)
