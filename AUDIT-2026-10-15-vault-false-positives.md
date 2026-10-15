@@ -83,16 +83,29 @@ detector rules as well.
 
 What is left is therefore a plain human judgement call about masking, not a correctness bug.
 
-## 4. Options (your call — the purge is one click away in the UI)
+## 4. Decision taken (user, 2026-10-15)
 
-| Option | Effect | Risk |
+**All 24 were marked "not a secret"; `audited-token-a1c58f74a01e` was marked as a secret and kept.**
+
+Verified in the vault afterwards:
+
+| | before | after |
 |---|---|---|
-| **A. Delete all 25** | ~25 of 717 entries go; the review list is clean; the guard test passes. | If one of the 16 path-like values is a credential that merely looks like a path, it stops being masked in new requests. |
-| **B. Keep them, mark reviewed** | Add them to a reviewed allow-list the test honours (as it already does for two entries the user confirmed on 2026-10-10). | The test keeps needing hand-maintained exceptions; the list stays dirty. |
-| **C. Leave as is** | Nothing changes; the guard test keeps failing on every full run. | The failure hides a new one if it ever appears. |
-| **D. Inspect before deciding** | Open **Secrets**, filter "looks like false positives", and check the handful you recognise (I can walk you through it, or print lengths/prefix-classes per row). | Takes your time; safest. |
+| `secrets` | 713 | 739 (the 24 removed, new ones detected since) |
+| `excludedSha256` | 1001 | 1045 |
+| `nonSecrets` | 959 | 1003 |
+| of the 25 named here, still in the vault | 25 | **1** (`audited-token-a1c58f74a01e`) |
 
-My recommendation: **D for the 16 path-like ones, A for the rest** — an `audited-password` whose value is
-`${VAR}` or `name(...)` cannot be a password, so deleting it is free. The path-like batch is the only group where a
-wrong call costs masking.
+The one kept entry is also the one case worth knowing about: it is matched by our own detector (the `sos…eos`
+start/end-marker rule), so with it still stored it is masked outbound, and the review list will keep offering it for
+deletion — its *shape* (52 chars, contains a backslash) is what the shape rule objects to. That is now an explicit,
+named allowance in the live-vault guard test
+(`SecretAuditorRealUiTests.No_secret_currently_stored_is_described_as_a_false_positive`), alongside the two entries
+confirmed on 2026-10-10, so the guard stays honest for everything else.
+
+`audited-token-a1c58f74a01e` is also a good illustration of why the detector's plausibility filter, not the shape
+rule, decides what is real: the detector matches it, the plausibility filter rejects it (it carries a backslash, a
+code-ish fragment), and only the human could say which was right. They said keep.
+
+Nothing else was changed in the vault.
 

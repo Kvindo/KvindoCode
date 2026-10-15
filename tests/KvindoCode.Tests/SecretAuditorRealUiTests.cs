@@ -2547,6 +2547,12 @@ public sealed class SecretAuditorRealUiTests
             // vault's own "delete false positives" action has purged them; anything ELSE this long being flagged is
             // still a failure, which is the point of the test.
             if (record.Name is "audited-token-36c1e3bf05cb" or "audited-password-c24d01506538") continue;
+            // Kept deliberately by the user on 2026-10-15, after the false-positive review: 24 of the 25 entries it
+            // named then were purged, and this one — a 52-character token our OWN detector matches (the start/end
+            // marker rule) — was marked as a SECRET to keep. It is therefore expected to be offered for review (its
+            // shape is unhelpful: it carries a backslash) and must not fail the guard. Named, so the allowance stays
+            // visible rather than turning into a widened rule.
+            if (record.Name is "audited-token-a1c58f74a01e") continue;
             if (credentialLike && SecretShapes.Describe(value).Suspicious) wrong.Add($"{record.Name} ({value.Length} chars)");
         }
         System.Console.WriteLine("=== names + reasons (no values) ===");
