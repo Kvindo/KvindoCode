@@ -276,7 +276,7 @@ public partial class MainWindow : Window
 
     async Task OnOpenedAsync()
     {
-        _all = await Task.Run(() => SafeList());
+        _all = await Task.Run(() => SafeList()) ?? new List<SessionInfo>();
         var args = Environment.GetCommandLineArgs();
         string? requested = args.Length > 1 && Directory.Exists(args[1]) ? Path.GetFullPath(args[1]) : null;
         var project = requested ?? (_settings.LastProject is { } lp && Directory.Exists(lp) ? lp : null);
@@ -407,7 +407,15 @@ public partial class MainWindow : Window
         }
     }
 
-    List<SessionInfo> SafeList()
+    /// <summary>Every session the storage knows about, or <c>null</c> when it could not be listed at all.</summary>
+    /// <remarks>
+    /// The distinction matters: <c>ListAll</c> can throw on a transient IO problem (a directory being rewritten, a
+    /// locked registry file), and replacing the sidebar's contents with the EMPTY list that used to be returned in that
+    /// case made every session — and with them the whole “Needs attention” block — vanish for a refresh, for no reason
+    /// the user could see (reported 2026-10-15: "sometimes all Needs attention sessions disappear"). Callers keep what
+    /// they already had instead.
+    /// </remarks>
+    List<SessionInfo>? SafeList()
     {
         try
         {
@@ -416,12 +424,13 @@ public partial class MainWindow : Window
             // sidebar, the search index and the restart prompt unless the user asks for it (reported 2026-10-04).
             return _settings.ShowSubagentSessions ? all : all.Where(s => !s.Subagent).ToList();
         }
-        catch { return new List<SessionInfo>(); }
+        catch { return null; }
     }
 
     async Task RefreshSessionsAsync()
     {
         var fresh = await Task.Run(() => SafeList());
+        if (fresh is null) return;                  // could not list: keep what is on screen (see SafeList)
         // order, titles, pins and membership matter; a bumped activity time that does not reorder anything does not
         bool changed = fresh.Count != _all.Count || fresh.Zip(_all).Any(p => p.First.Id != p.Second.Id || p.First.Title != p.Second.Title || p.First.Starred != p.Second.Starred || p.First.Archived != p.Second.Archived);
         foreach (var f in fresh)
@@ -2552,16 +2561,27 @@ public partial class MainWindow : Window
             left.Children.Add(Ui.Icon("IconCheck", "KvOk", 14));
             left.Children.Add(new TextBlock { Text = $"Needs attention  ·  {attention.Count}", FontWeight = FontWeight.Medium, FontSize = 13, VerticalAlignment = VerticalAlignment.Center });
             var hb = new Button { Classes = { "ghost" }, Content = left, HorizontalAlignment = HorizontalAlignment.Stretch, HorizontalContentAlignment = HorizontalAlignment.Left, Padding = new Thickness(8, 6), Margin = new Thickness(0, 2, 0, 0) };
-            var dismissAll = new Button { Classes = { "ghost" }, Content = Ui.Icon("IconX", "KvMuted", 11, 2), Padding = new Thickness(6, 4), VerticalAlignment = VerticalAlignment.Center };
-            ToolTip.SetTip(dismissAll, "Remove every session from this list (Entries come back when they finish again)");
-            dismissAll.Click += (_, _) =>
+            // "Remove every session" is DESTRUCTIVE and irreversible (nothing puts the entries back until those
+            // sessions finish another turn), and it used to sit as a small ✕ in this header that fired on a single
+            // stray click with no confirmation and no notice — a whole to-do list could be wiped without the user
+            // noticing how (reported 2026-10-15: "sometimes all Needs attention sessions disappear and i dont know
+            // how"). It now follows the app's own bulk-delete pattern: the control exists only while Alt is held.
+            head.Children.Add(hb);
+            if (_altDown)
             {
-                _settings.AttentionSessions.RemoveAll(id => attention.Any(s => s.Id == id));
-                _settings.AttentionAcknowledged.RemoveAll(id => attention.Any(s => s.Id == id));
-                TrySaveSettings(); RebuildSidebar();
-            };
-            Grid.SetColumn(dismissAll, 1);
-            head.Children.Add(hb); head.Children.Add(dismissAll);
+                var dismissAll = new Button { Name = "AttentionClearAll", Classes = { "ghost" }, Content = Ui.Icon("IconX", "KvMuted", 11, 2), Padding = new Thickness(6, 4), VerticalAlignment = VerticalAlignment.Center };
+                ToolTip.SetTip(dismissAll, $"Remove all {attention.Count} session(s) from this list (hold Alt for this button; entries come back when those sessions finish another turn)");
+                dismissAll.Click += (_, _) =>
+                {
+                    var gone = attention.Select(s => s.Title).ToList();
+                    _settings.AttentionSessions.RemoveAll(id => attention.Any(s => s.Id == id));
+                    _settings.AttentionAcknowledged.RemoveAll(id => attention.Any(s => s.Id == id));
+                    TrySaveSettings(); RebuildSidebar();
+                    ShowInfo($"Removed {gone.Count} session(s) from “Needs attention”: {string.Join(", ", gone)}. They come back when they finish another turn.");
+                };
+                Grid.SetColumn(dismissAll, 1);
+                head.Children.Add(dismissAll);
+            }
             ProjectsPanel.Children.Add(head);
             foreach (var s in attention)
             {

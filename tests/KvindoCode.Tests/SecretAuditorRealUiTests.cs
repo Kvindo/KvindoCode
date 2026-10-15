@@ -1494,6 +1494,78 @@ public sealed class SecretAuditorRealUiTests
         Assert.Contains(sidebar.GetVisualDescendants().OfType<TextBlock>(), t => t.Text == "PINNEDFIN");
     }
 
+    /// <summary>
+    /// "Remove every session from Needs attention" wipes the whole to-do list and nothing brings the entries back until
+    /// those sessions finish another turn. It used to be a small ✕ in the block header that fired on one stray click
+    /// with no confirmation and no notice — a plausible explanation of the reported "sometimes all Needs attention
+    /// sessions disappear and i dont know how" (2026-10-15). It must not be reachable by a plain click any more: it
+    /// appears only while Alt is held, like the app's other bulk-delete controls.
+    /// </summary>
+    [AvaloniaFact]
+    public async Task The_remove_all_button_only_exists_while_alt_is_held()
+    {
+        using Sandbox sb = new Sandbox();
+        using App app = Start(sb, new JsonArray { Says("one") });
+        AppSettings settings = Field<AppSettings>(app.Window, "_settings");
+        StackPanel sidebar = app.Window.FindControl<StackPanel>("ProjectsPanel");
+        SessionInfo other = new SessionInfo { Id = "attn-clearall-1", Title = "KEEPME", Cwd = sb.Project, Updated = DateTimeOffset.UtcNow, Created = DateTimeOffset.UtcNow, Path = System.IO.Path.Combine(sb.Root, "k.jsonl") };
+        Field<List<SessionInfo>>(app.Window, "_all").Add(other);
+        settings.AttentionSessions.Add(other.Id);
+        Invoke(app.Window, "RebuildSidebar");
+        Dispatcher.UIThread.RunJobs();
+
+        bool ClearAll() => sidebar.GetVisualDescendants().OfType<Button>().Any(b => b.Name == "AttentionClearAll");
+        Assert.False(ClearAll());                          // a plain click cannot reach it
+
+        typeof(MainWindow).GetMethod("SetAlt", BindingFlags.NonPublic | BindingFlags.Instance)!.Invoke(app.Window, new object[] { true, true });
+        Dispatcher.UIThread.RunJobs();
+        Assert.True(ClearAll());                           // Alt reveals it, with the entry still listed
+        Assert.Contains(other.Id, (IEnumerable<string>)settings.AttentionSessions);
+
+        typeof(MainWindow).GetMethod("SetAlt", BindingFlags.NonPublic | BindingFlags.Instance)!.Invoke(app.Window, new object[] { false, (bool?)null });
+        Dispatcher.UIThread.RunJobs();
+        Assert.False(ClearAll());
+        Assert.Contains(other.Id, (IEnumerable<string>)settings.AttentionSessions);   // nothing was removed
+    }
+
+    /// <summary>A session list that could not be read must not empty the sidebar: the whole "Needs attention" block
+    /// vanished with it ("sometimes all Needs attention sessions disappear", 2026-10-15).</summary>
+    [AvaloniaFact]
+    public async Task A_failed_session_refresh_keeps_what_is_on_screen()
+    {
+        using Sandbox sb = new Sandbox();
+        using App app = Start(sb, new JsonArray { Says("one") });
+        AppSettings settings = Field<AppSettings>(app.Window, "_settings");
+        StackPanel sidebar = app.Window.FindControl<StackPanel>("ProjectsPanel");
+        SessionInfo other = new SessionInfo { Id = "attn-keep-9", Title = "STAYHERE", Cwd = sb.Project, Updated = DateTimeOffset.UtcNow, Created = DateTimeOffset.UtcNow, Path = System.IO.Path.Combine(sb.Root, "s.jsonl") };
+        Field<List<SessionInfo>>(app.Window, "_all").Add(other);
+        settings.AttentionSessions.Add(other.Id);
+        Invoke(app.Window, "RebuildSidebar");
+        Dispatcher.UIThread.RunJobs();
+
+        // the storage cannot list anything (a transient IO failure is what this stands in for)
+        typeof(MainWindow).GetField("_storage", BindingFlags.NonPublic | BindingFlags.Instance)!
+            .SetValue(app.Window, new ThrowingStorage(Field<ISessionStorage>(app.Window, "_storage")));
+        await InvokeUiAsync(app.Window, "RefreshSessionsAsync");
+        Dispatcher.UIThread.RunJobs();
+
+        var text = string.Join("\n", sidebar.GetVisualDescendants().OfType<TextBlock>().Select(t => t.Text ?? ""));
+        Assert.Contains("Needs attention", text);
+        Assert.Contains("STAYHERE", text);
+    }
+
+    /// <summary>Stands in for a storage that throws while listing (a locked registry file, a directory being rewritten).</summary>
+    sealed class ThrowingStorage(ISessionStorage inner) : ISessionStorage
+    {
+        public string Name => inner.Name;
+        public List<SessionInfo> ListAll() => throw new IOException("the registry could not be enumerated");
+        public SessionInfo Create(string cwd, string? model) => inner.Create(cwd, model);
+        public LoadedSession Load(SessionInfo info) => inner.Load(info);
+        public void Append(SessionInfo info, Entry e) => inner.Append(info, e);
+        public void SaveMeta(SessionInfo info) => inner.SaveMeta(info);
+        public void Delete(SessionInfo info) => inner.Delete(info);
+    }
+
     [AvaloniaFact]
     public async Task Clicking_a_session_that_is_still_running_keeps_it_in_needs_attention()
     {
