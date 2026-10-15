@@ -115,4 +115,56 @@ public sealed class TranscriptLoadCacheTests(ITestOutputHelper o)
         var loaded = storage.Load(info);
         Assert.Equal(20, loaded.Entries.Count(e => e.Kind == "msg"));
     }
+
+    /// <summary>
+    /// A TORN line holds a truncated record with the next append glued straight onto it, on one line. That line does
+    /// not parse as a whole, but the second record in it is complete — and the records after it chain onto IT. So
+    /// dropping the whole line broke the parent walk at that point and the session opened with only the tail of its
+    /// conversation ("Dropdown click opens orgs modal" looked broken, 2026-10-15): the history before the torn line
+    /// was silently gone. Only the torn prefix may be lost.
+    /// </summary>
+    [Fact]
+    public void A_torn_line_loses_only_the_truncated_record_and_keeps_the_rest_of_the_history()
+    {
+        using var sb = new Sandbox();
+        var path = Path.Combine(sb.Project, "t.jsonl");
+        int lines = 30;
+        WriteTranscript(path, lines);
+
+        // tear line 15 in half and glue the SAME record (rewritten, as a retry would) behind the fragment
+        var all = File.ReadAllLines(path).ToList();
+        var victim = all[14];
+        all[14] = victim[..(victim.Length / 2)] + victim;
+        File.WriteAllLines(path, all);
+
+        var storage = new ClaudeStorage(null, sb.Project);
+        var info = new SessionInfo { Id = "c", Path = path, Cwd = sb.Project, Exists = true };
+        var loaded = storage.Load(info);
+
+        // the first message and the torn one's own record are both still there: the walk reached the root
+        Assert.Contains(loaded.Entries, e => e.M?.Content == "message 0");
+        Assert.Contains(loaded.Entries, e => e.M?.Content == "message 14");
+        Assert.Contains(loaded.Entries, e => e.M?.Content == "reply 29");
+        Assert.Equal(lines, loaded.Entries.Count(e => e.Kind == "msg"));
+    }
+
+    /// <summary>The other torn shape: the fragment is the LAST thing in the file (nothing to salvage after it). That
+    /// must keep everything before it, not throw or truncate.</summary>
+    [Fact]
+    public void A_torn_final_line_keeps_the_history_before_it()
+    {
+        using var sb = new Sandbox();
+        var path = Path.Combine(sb.Project, "t.jsonl");
+        WriteTranscript(path, 12);
+        var all = File.ReadAllLines(path).ToList();
+        all[^1] = all[^1][..(all[^1].Length / 2)];
+        File.WriteAllLines(path, all);
+
+        var storage = new ClaudeStorage(null, sb.Project);
+        var info = new SessionInfo { Id = "c", Path = path, Cwd = sb.Project, Exists = true };
+        var loaded = storage.Load(info);
+
+        Assert.Contains(loaded.Entries, e => e.M?.Content == "message 10");
+        Assert.DoesNotContain(loaded.Entries, e => e.M?.Content == "reply 11");
+    }
 }

@@ -505,4 +505,102 @@ public class SubagentModelTests
         await s.RunTurnAsync("second", default);
         Assert.Null(s.LastTurnError);                                    // a fresh turn starts clean
     }
+
+    /// <summary>A step that shows part of the answer and THEN cuts the stream — the gateway's
+    /// "Поток ответа завершился до окончания генерации".</summary>
+    static JsonObject CutMidAnswer(string text, int after) =>
+        new() { ["text"] = text, ["failAfter"] = after, ["streamError"] = "Поток ответа завершился до окончания генерации. Повторите запрос.", ["delay"] = 1, ["chunkDelay"] = 0 };
+
+    /// <summary>
+    /// A stream cut mid-answer must not end the turn with an error — that was the reported failure loop: the answer was
+    /// half shown, an error appeared, and the human had to paste "continue" every time. The turn continues on its own,
+    /// keeps what arrived, and the continuation request tells the model not to repeat itself.
+    /// </summary>
+    [Fact]
+    public async Task A_stream_cut_mid_answer_continues_instead_of_failing_the_turn()
+    {
+        using var sb = new Sandbox();
+        var llm = Script.Client(CutMidAnswer("I will now the-", 12), Script.Text("rest and done"));
+        var s = new AgentSession(sb.Settings(), llm, sb.Project, new FakeInteraction());
+        var events = Helpers.Collect(s);
+
+        await s.RunTurnAsync("go", default);
+
+        Assert.Null(s.LastTurnError);
+        Assert.Equal(2, llm.Requests.Count);
+        // what arrived is kept, and the second request asks for the rest of it
+        var followUp = llm.Requests[1].Messages;
+        Assert.Contains(followUp, m => m.Role == "assistant" && (m.Content ?? "").Contains("I will now"));
+        Assert.Contains(followUp, m => m.IsInternal && (m.Content ?? "").Contains("Continue EXACTLY where you left off"));
+        Assert.Contains(events.OfType<NoticeEvent>(), n => n.Text.Contains("continuing where it stopped"));
+        Assert.Contains(events.OfType<TextDeltaEvent>(), d => d.Text.Contains("rest and done"));
+    }
+
+    /// <summary>...but only so many times: a provider that keeps cutting the stream must not spin for ever.</summary>
+    [Fact]
+    public async Task Repeated_stream_cuts_stop_after_the_continuation_budget()
+    {
+        using var sb = new Sandbox();
+        var llm = Script.Client(CutMidAnswer("one ", 4), CutMidAnswer("two ", 4), CutMidAnswer("three ", 6), CutMidAnswer("four ", 5));
+        var s = new AgentSession(sb.Settings(), llm, sb.Project, new FakeInteraction());
+
+        await s.RunTurnAsync("go", default);
+
+        Assert.NotNull(s.LastTurnError);
+        Assert.Contains("Поток ответа", s.LastTurnError!);
+        Assert.Equal(3, llm.Requests.Count);            // the first attempt plus two continuations
+    }
+
+    /// <summary>A cut BEFORE any output is the client's own retry case ("produced no output → retry"), so the turn-level
+    /// continuation must not take it over: it exists only for the case a blind retry cannot handle, where text was
+    /// already shown. With a client that does not retry (as here) the turn reports the error instead.
+    /// Nothing was shown, so the request must not be re-sent as a "continue where you left off" either.</summary>
+    [Fact]
+    public async Task A_cut_with_no_output_is_not_treated_as_a_mid_answer_cut()
+    {
+        using var sb = new Sandbox();
+        var llm = Script.Client(CutMidAnswer("nothing yet", 0));
+        var s = new AgentSession(sb.Settings(), llm, sb.Project, new FakeInteraction());
+
+        await s.RunTurnAsync("go", default);
+
+        Assert.NotNull(s.LastTurnError);
+        Assert.Single(llm.Requests);                                             // no continuation round
+        Assert.DoesNotContain(llm.Requests[0].Messages, m => (m.Content ?? "").Contains("Continue EXACTLY where you left off"));
+    }
+
+    /// <summary>
+    /// "The model returned an empty response." used to end the turn, leaving the human to press Send again. It is a
+    /// gateway hiccup, so the turn asks once more before giving up (asked 2026-10-15).
+    /// </summary>
+    [Fact]
+    public async Task An_empty_response_is_retried_before_the_turn_gives_up()
+    {
+        using var sb = new Sandbox();
+        var llm = Script.Client(Script.Text(""), Script.Text("the real answer"));
+        var s = new AgentSession(sb.Settings(), llm, sb.Project, new FakeInteraction());
+        var events = Helpers.Collect(s);
+
+        await s.RunTurnAsync("go", default);
+
+        Assert.Equal(2, llm.Requests.Count);                                     // one retry
+        Assert.Contains(events.OfType<TextDeltaEvent>(), d => d.Text.Contains("the real answer"));
+        Assert.Contains(events.OfType<NoticeEvent>(), n => n.Text.Contains("asking again"));
+        Assert.Null(s.LastTurnError);
+    }
+
+    /// <summary>...but only so many times: a model that keeps answering nothing must not loop for ever.</summary>
+    [Fact]
+    public async Task Repeated_empty_responses_stop_after_the_retry_budget()
+    {
+        using var sb = new Sandbox();
+        var llm = Script.Client(Script.Text(""), Script.Text(""), Script.Text(""), Script.Text(""), Script.Text("never reached"));
+        var s = new AgentSession(sb.Settings(), llm, sb.Project, new FakeInteraction());
+        var events = Helpers.Collect(s);
+
+        await s.RunTurnAsync("go", default);
+
+        Assert.Equal(3, llm.Requests.Count);                                     // the attempt plus two retries
+        Assert.Contains(events.OfType<NoticeEvent>(), n => n.Text.Contains("not asking again"));
+    }
 }

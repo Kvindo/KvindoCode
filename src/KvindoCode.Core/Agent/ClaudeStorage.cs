@@ -443,12 +443,26 @@ public sealed class ClaudeStorage : ISessionStorage
         _lastUuid[info.Id] = (string?)o["uuid"];
     }
 
+    /// <summary>One lock per transcript so two writers cannot interleave.</summary>
+    /// <remarks>
+    /// A <c>FileStream</c> in append mode issues its own write calls, so two of them racing on the same transcript
+    /// could leave HALF a record followed immediately by the next one on the same line — a torn line, which used to
+    /// silently cut a session's history in half ("Dropdown click opens orgs window", 2026-10-15). The read side now
+    /// tolerates such a line, but not producing one is the actual fix. Keyed by path, because one process may hold
+    /// several sessions at once; a DIFFERENT process appending (the Claude desktop app) cannot be locked out, which is
+    /// exactly why the reader has to cope with a torn line anyway.
+    /// </remarks>
+    static readonly System.Collections.Concurrent.ConcurrentDictionary<string, object> WriteLocks = new();
+
     static void WriteLine(SessionInfo info, JsonObject o)
     {
         Directory.CreateDirectory(System.IO.Path.GetDirectoryName(info.Path)!);
-        using var fs = new FileStream(info.Path, FileMode.Append, FileAccess.Write, FileShare.ReadWrite);
         var bytes = Encoding.UTF8.GetBytes(o.ToJsonString(new JsonSerializerOptions { Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping }) + "\n");
-        fs.Write(bytes, 0, bytes.Length);
+        lock (WriteLocks.GetOrAdd(System.IO.Path.GetFullPath(info.Path), _ => new object()))
+        {
+            using var fs = new FileStream(info.Path, FileMode.Append, FileAccess.Write, FileShare.ReadWrite);
+            fs.Write(bytes, 0, bytes.Length);
+        }
     }
 
     // ------------------------------------------------------------------ loading (Claude JSONL tree → Entries)
@@ -482,6 +496,45 @@ public sealed class ClaudeStorage : ISessionStorage
         var nodes = new Dictionary<string, Node>();
         Node? leaf = null;
         int lineNo = 0;
+
+        void Register(JsonElement r, int ln, long start)
+        {
+            if (!r.TryGetProperty("uuid", out var uu) || uu.ValueKind != JsonValueKind.String) return;
+            var type = r.TryGetProperty("type", out var t) ? t.GetString() ?? "" : "";
+            string? parent = r.TryGetProperty("parentUuid", out var p) && p.ValueKind == JsonValueKind.String ? p.GetString() : null;
+            string? lp = r.TryGetProperty("logicalParentUuid", out var l2) && l2.ValueKind == JsonValueKind.String ? l2.GetString() : null;
+            bool side = r.TryGetProperty("isSidechain", out var sc) && sc.ValueKind == JsonValueKind.True;
+            bool cs = r.TryGetProperty("isCompactSummary", out var c) && c.ValueKind == JsonValueKind.True;
+            bool bnd = type == "system" && r.TryGetProperty("subtype", out var st) && st.GetString() == "compact_boundary";
+            bool rew = type == "system" && r.TryGetProperty("subtype", out var st2) && st2.GetString() == "kvindocode_rewind";
+            var n = new Node(uu.GetString()!, parent, lp, type, ln, side, cs, bnd, rew) { Offset = start };
+            nodes[n.Uuid] = n;
+            if (!side && (type is "user" or "assistant" || rew)) leaf = n;
+        }
+
+        // A line that does not parse can still hold ONE COMPLETE record. An append can be torn — a partial write of a
+        // record — and the following append lands straight behind it on the same line. Dropping the whole line threw the
+        // complete record away with the torn one, and because the records after it name it as their parent, the walk
+        // from the leaf stopped right there: the session opened with only the tail of its history and looked broken
+        // ("Dropdown click opens orgs modal", 2026-10-15, line 163 of its transcript). Recover every balanced object
+        // after the torn prefix; only that prefix is lost.
+        void Salvage(string line, long lineStart)
+        {
+            for (var at = line.IndexOf("{\"parentUuid\"", 1, StringComparison.Ordinal); at > 0;)
+            {
+                var end = EndOfObject(line, at);
+                if (end < 0) return;                              // the tail is torn too: nothing left to recover
+                try
+                {
+                    using var doc = JsonDocument.Parse(line.Substring(at, end - at));
+                    // byte offset of the object inside the line, so pass 2 can seek straight to it (it starts
+                    // mid-line; ReadLineAt still returns exactly this object, up to the newline)
+                    Register(doc.RootElement, lineNo, lineStart + (System.Text.Ascii.IsValid(line) ? at : Encoding.UTF8.GetByteCount(line.AsSpan(0, at))));
+                }
+                catch (Exception e) when (e is JsonException or InvalidOperationException) { }
+                at = line.IndexOf("{\"parentUuid\"", end, StringComparison.Ordinal);
+            }
+        }
         using (var sr = new StreamReader(new FileStream(info.Path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, 1 << 16), Encoding.UTF8, false, 1 << 16))
         {
             string? line;
@@ -499,23 +552,15 @@ public sealed class ClaudeStorage : ISessionStorage
                 try
                 {
                     using var doc = JsonDocument.Parse(line);
-                    var r = doc.RootElement;
-                    if (!r.TryGetProperty("uuid", out var uu) || uu.ValueKind != JsonValueKind.String) continue;
-                    var type = r.TryGetProperty("type", out var t) ? t.GetString() ?? "" : "";
-                    string? parent = r.TryGetProperty("parentUuid", out var p) && p.ValueKind == JsonValueKind.String ? p.GetString() : null;
-                    string? lp = r.TryGetProperty("logicalParentUuid", out var l2) && l2.ValueKind == JsonValueKind.String ? l2.GetString() : null;
-                    bool side = r.TryGetProperty("isSidechain", out var sc) && sc.ValueKind == JsonValueKind.True;
-                    bool cs = r.TryGetProperty("isCompactSummary", out var c) && c.ValueKind == JsonValueKind.True;
-                    bool bnd = type == "system" && r.TryGetProperty("subtype", out var st) && st.GetString() == "compact_boundary";
-                    bool rew = type == "system" && r.TryGetProperty("subtype", out var st2) && st2.GetString() == "kvindocode_rewind";
-                    var n = new Node(uu.GetString()!, parent, lp, type, lineNo, side, cs, bnd, rew) { Offset = lineStart };
-                    nodes[n.Uuid] = n;
-                    if (!side && (type is "user" or "assistant" || rew)) leaf = n;
+                    Register(doc.RootElement, lineNo, lineStart);
                 }
                 // Claude transcripts can contain an incomplete UTF-16 surrogate in a string. JsonDocument.Parse may
                 // succeed, then GetString() throws InvalidOperationException; one damaged line must not make the
                 // entire session impossible to open.
-                catch (Exception e) when (e is JsonException or InvalidOperationException or DecoderFallbackException) { }
+                catch (Exception e) when (e is JsonException or InvalidOperationException or DecoderFallbackException)
+                {
+                    Salvage(line, lineStart);
+                }
             }
         }
         if (leaf is null) return loaded;
@@ -682,6 +727,28 @@ public sealed class ClaudeStorage : ISessionStorage
         int len = (int)ms.Length;
         if (len > 0 && bytes[len - 1] == (byte)'\r') len--;             // tolerate CRLF
         return Encoding.UTF8.GetString(bytes, 0, len);
+    }
+
+    /// <summary>Index just past the JSON object starting at <paramref name="start"/>, or -1 when it never closes
+    /// (a torn write). Braces inside strings do not count, so a tool result full of JSON does not close it early.</summary>
+    static int EndOfObject(string s, int start)
+    {
+        var depth = 0;
+        var inString = false;
+        for (var i = start; i < s.Length; i++)
+        {
+            var c = s[i];
+            if (inString)
+            {
+                if (c == '\\') i++;                                       // skip the escaped character
+                else if (c == '"') inString = false;
+                continue;
+            }
+            if (c == '"') inString = true;
+            else if (c == '{') depth++;
+            else if (c == '}' && --depth == 0) return i + 1;
+        }
+        return -1;
     }
 
     /// <summary>Anthropic-format lines → OpenAI-style messages. Stateful: merges split assistant lines and pairs tool results.</summary>

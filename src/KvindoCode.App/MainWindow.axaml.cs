@@ -5,6 +5,7 @@ using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Layout;
 using Avalonia.Media;
+using Avalonia.Media.Imaging;
 using Avalonia.Platform.Storage;
 using Avalonia.Threading;
 using Avalonia.VisualTree;
@@ -73,6 +74,10 @@ public partial class MainWindow : Window
                 if (_live.TryGetValue(sessionId, out var sv)) { sv.Transcript.Handle(new NoticeEvent(msg, false)); if (sv == _current) RebuildSidebar(); }
                 else ShowInfo(msg);   // no open view for it: the old behaviour is still better than dropping it
             }),
+            // An image the local scan flagged is the human's call, and they must SEE the picture to make it. Asking a
+            // blind yes/no would just teach them to approve everything (the auditor flags ordinary screenshots often
+            // enough that its findings cannot decide alone — reported 2026-10-15).
+            ReviewImageAsync = f => Dispatcher.UIThread.InvokeAsync(() => ReviewFlaggedImageAsync(f)),
         };
         _storage = CreateStorage();
         SessionStorage.Default = _storage;
@@ -271,7 +276,7 @@ public partial class MainWindow : Window
 
     async Task OnOpenedAsync()
     {
-        _all = await Task.Run(() => SafeList());
+        _all = await Task.Run(() => SafeList()) ?? new List<SessionInfo>();
         var args = Environment.GetCommandLineArgs();
         string? requested = args.Length > 1 && Directory.Exists(args[1]) ? Path.GetFullPath(args[1]) : null;
         var project = requested ?? (_settings.LastProject is { } lp && Directory.Exists(lp) ? lp : null);
@@ -402,7 +407,15 @@ public partial class MainWindow : Window
         }
     }
 
-    List<SessionInfo> SafeList()
+    /// <summary>Every session the storage knows about, or <c>null</c> when it could not be listed at all.</summary>
+    /// <remarks>
+    /// The distinction matters: <c>ListAll</c> can throw on a transient IO problem (a directory being rewritten, a
+    /// locked registry file), and replacing the sidebar's contents with the EMPTY list that used to be returned in that
+    /// case made every session — and with them the whole “Needs attention” block — vanish for a refresh, for no reason
+    /// the user could see (reported 2026-10-15: "sometimes all Needs attention sessions disappear"). Callers keep what
+    /// they already had instead.
+    /// </remarks>
+    List<SessionInfo>? SafeList()
     {
         try
         {
@@ -411,12 +424,13 @@ public partial class MainWindow : Window
             // sidebar, the search index and the restart prompt unless the user asks for it (reported 2026-10-04).
             return _settings.ShowSubagentSessions ? all : all.Where(s => !s.Subagent).ToList();
         }
-        catch { return new List<SessionInfo>(); }
+        catch { return null; }
     }
 
     async Task RefreshSessionsAsync()
     {
         var fresh = await Task.Run(() => SafeList());
+        if (fresh is null) return;                  // could not list: keep what is on screen (see SafeList)
         // order, titles, pins and membership matter; a bumped activity time that does not reorder anything does not
         bool changed = fresh.Count != _all.Count || fresh.Zip(_all).Any(p => p.First.Id != p.Second.Id || p.First.Title != p.Second.Title || p.First.Starred != p.Second.Starred || p.First.Archived != p.Second.Archived);
         foreach (var f in fresh)
@@ -1819,6 +1833,56 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
+    /// The local scan flagged an image with something that looks like a credential. It is the only judge of pictures (no
+    /// pattern can match pixels) and it is often wrong about screenshots, so the human decides — and to decide they must
+    /// SEE the picture, which is why it is shown here rather than a blind yes/no (reported 2026-10-15).
+    /// Default = leave it out (the fail-closed behaviour this replaces).
+    /// </summary>
+    async Task<bool> ReviewFlaggedImageAsync(FlaggedImage f)
+    {
+        var send = false;
+        var dlg = new Window
+        {
+            Title = "Image flagged by the secret scan", Width = 720, Height = 640, MinWidth = 460, MinHeight = 380,
+            WindowStartupLocation = WindowStartupLocation.CenterOwner, CanResize = true,
+        };
+        var kinds = f.Types.Count > 0 ? string.Join(", ", f.Types) : "unspecified";
+        var head = new TextBlock
+        {
+            TextWrapping = TextWrapping.Wrap,
+            Text = $"The local secret scan flagged this image ({kinds}) and what it quoted looks like a real value. " +
+                   "Send it to the model anyway?",
+        };
+        var preview = new Image { Stretch = Stretch.Uniform, MaxHeight = 380 };
+        try { preview.Source = new Bitmap(new MemoryStream(Convert.FromBase64String(f.Data))); }
+        catch { preview.Source = null; }
+        var source = new TextBlock
+        {
+            Name = "FlaggedImageSource", TextWrapping = TextWrapping.Wrap, MaxLines = 3, FontSize = 11.5, Opacity = 0.7,
+            Text = string.IsNullOrWhiteSpace(f.Source) ? "" : "Attached with: " + f.Source,
+        };
+        var yes = new Button { Name = "FlaggedImageSend", Content = "Send it anyway", Classes = { "accent" } };
+        var no = new Button { Name = "FlaggedImageSkip", Content = "Leave it out", Classes = { "outline" } };
+        yes.Click += (_, _) => { send = true; dlg.Close(); };
+        no.Click += (_, _) => dlg.Close();
+        dlg.Content = new DockPanel
+        {
+            Margin = new Thickness(20),
+            Children =
+            {
+                new StackPanel
+                {
+                    [DockPanel.DockProperty] = Dock.Bottom, Spacing = 10,
+                    Children = { source, new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, HorizontalAlignment = HorizontalAlignment.Right, Children = { no, yes } } },
+                },
+                new ScrollViewer { Content = new StackPanel { Spacing = 12, Children = { head, new Border { Classes = { "card" }, Padding = new Thickness(8), Child = preview } } } },
+            },
+        };
+        await dlg.ShowDialog(this);
+        return send;
+    }
+
+    /// <summary>
     /// The "possible secret" review window. Shows the WHOLE text (any number of lines) with the proposed secret pre-selected.
     /// The user marks the parts that are secret: the current selection can be added as a part (each part gets its own vault name),
     /// or split into one part per line when a block holds several credentials. "It is a secret" stores every marked part.
@@ -2484,7 +2548,12 @@ public partial class MainWindow : Window
         }
 
         // ---- "needs attention" section: entries persist until explicitly dismissed by the user
-        var attention = all.Where(x => !x.Archived && !IsPinned(x) && _settings.AttentionSessions.Contains(x.Id)).OrderByDescending(x => x.Updated).ToList();
+        // Pinned (starred) sessions are listed here TOO. They used to be filtered out, on the theory that the Pinned
+        // group already shows them — but the group is usually collapsed and all it shows then is a 7px dot, so a
+        // pinned session that finished in the background was effectively invisible in the one place that is a to-do
+        // list. Reported twice for the session that happened to be pinned ("your session is not shown in Needs
+        // attention", 2026-10-15).
+        var attention = all.Where(x => !x.Archived && _settings.AttentionSessions.Contains(x.Id)).OrderByDescending(x => x.Updated).ToList();
         if (attention.Count > 0)
         {
             var head = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto") };
@@ -2492,16 +2561,27 @@ public partial class MainWindow : Window
             left.Children.Add(Ui.Icon("IconCheck", "KvOk", 14));
             left.Children.Add(new TextBlock { Text = $"Needs attention  ·  {attention.Count}", FontWeight = FontWeight.Medium, FontSize = 13, VerticalAlignment = VerticalAlignment.Center });
             var hb = new Button { Classes = { "ghost" }, Content = left, HorizontalAlignment = HorizontalAlignment.Stretch, HorizontalContentAlignment = HorizontalAlignment.Left, Padding = new Thickness(8, 6), Margin = new Thickness(0, 2, 0, 0) };
-            var dismissAll = new Button { Classes = { "ghost" }, Content = Ui.Icon("IconX", "KvMuted", 11, 2), Padding = new Thickness(6, 4), VerticalAlignment = VerticalAlignment.Center };
-            ToolTip.SetTip(dismissAll, "Remove every session from this list (Entries come back when they finish again)");
-            dismissAll.Click += (_, _) =>
+            // "Remove every session" is DESTRUCTIVE and irreversible (nothing puts the entries back until those
+            // sessions finish another turn), and it used to sit as a small ✕ in this header that fired on a single
+            // stray click with no confirmation and no notice — a whole to-do list could be wiped without the user
+            // noticing how (reported 2026-10-15: "sometimes all Needs attention sessions disappear and i dont know
+            // how"). It now follows the app's own bulk-delete pattern: the control exists only while Alt is held.
+            head.Children.Add(hb);
+            if (_altDown)
             {
-                _settings.AttentionSessions.RemoveAll(id => attention.Any(s => s.Id == id));
-                _settings.AttentionAcknowledged.RemoveAll(id => attention.Any(s => s.Id == id));
-                TrySaveSettings(); RebuildSidebar();
-            };
-            Grid.SetColumn(dismissAll, 1);
-            head.Children.Add(hb); head.Children.Add(dismissAll);
+                var dismissAll = new Button { Name = "AttentionClearAll", Classes = { "ghost" }, Content = Ui.Icon("IconX", "KvMuted", 11, 2), Padding = new Thickness(6, 4), VerticalAlignment = VerticalAlignment.Center };
+                ToolTip.SetTip(dismissAll, $"Remove all {attention.Count} session(s) from this list (hold Alt for this button; entries come back when those sessions finish another turn)");
+                dismissAll.Click += (_, _) =>
+                {
+                    var gone = attention.Select(s => s.Title).ToList();
+                    _settings.AttentionSessions.RemoveAll(id => attention.Any(s => s.Id == id));
+                    _settings.AttentionAcknowledged.RemoveAll(id => attention.Any(s => s.Id == id));
+                    TrySaveSettings(); RebuildSidebar();
+                    ShowInfo($"Removed {gone.Count} session(s) from “Needs attention”: {string.Join(", ", gone)}. They come back when they finish another turn.");
+                };
+                Grid.SetColumn(dismissAll, 1);
+                head.Children.Add(dismissAll);
+            }
             ProjectsPanel.Children.Add(head);
             foreach (var s in attention)
             {

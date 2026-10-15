@@ -1471,6 +1471,101 @@ public sealed class SecretAuditorRealUiTests
         Assert.DoesNotContain(other.Id, (IEnumerable<string>)settings.AttentionAcknowledged);   // both lists are cleaned
     }
 
+    /// <summary>
+    /// A PINNED session that finished in the background must still be listed in "Needs attention". It used to be
+    /// filtered out (the Pinned group already shows it) — but that group is usually collapsed and all it shows then is
+    /// a 7px dot, so the one place that is a to-do list hid it. Reported 2026-10-15 for the session that happened to be
+    /// pinned while the user was looking for it there.
+    /// </summary>
+    [AvaloniaFact]
+    public async Task A_pinned_session_that_finished_is_still_listed_in_needs_attention()
+    {
+        using Sandbox sb = new Sandbox();
+        using App app = Start(sb, new JsonArray { Says("one") });
+        AppSettings settings = Field<AppSettings>(app.Window, "_settings");
+        StackPanel sidebar = app.Window.FindControl<StackPanel>("ProjectsPanel");
+        SessionInfo other = new SessionInfo { Id = "pinned-attn-7788", Title = "PINNEDFIN", Cwd = sb.Project, Updated = DateTimeOffset.UtcNow, Created = DateTimeOffset.UtcNow, Path = System.IO.Path.Combine(sb.Root, "p.jsonl"), Starred = true };
+        Field<List<SessionInfo>>(app.Window, "_all").Add(other);
+        settings.AttentionSessions.Add(other.Id);
+        Invoke(app.Window, "RebuildSidebar");
+        Dispatcher.UIThread.RunJobs();
+
+        Assert.Contains("Needs attention", string.Join("\n", sidebar.GetVisualDescendants().OfType<TextBlock>().Select(t => t.Text ?? "")));
+        Assert.Contains(sidebar.GetVisualDescendants().OfType<TextBlock>(), t => t.Text == "PINNEDFIN");
+    }
+
+    /// <summary>
+    /// "Remove every session from Needs attention" wipes the whole to-do list and nothing brings the entries back until
+    /// those sessions finish another turn. It used to be a small ✕ in the block header that fired on one stray click
+    /// with no confirmation and no notice — a plausible explanation of the reported "sometimes all Needs attention
+    /// sessions disappear and i dont know how" (2026-10-15). It must not be reachable by a plain click any more: it
+    /// appears only while Alt is held, like the app's other bulk-delete controls.
+    /// </summary>
+    [AvaloniaFact]
+    public async Task The_remove_all_button_only_exists_while_alt_is_held()
+    {
+        using Sandbox sb = new Sandbox();
+        using App app = Start(sb, new JsonArray { Says("one") });
+        AppSettings settings = Field<AppSettings>(app.Window, "_settings");
+        StackPanel sidebar = app.Window.FindControl<StackPanel>("ProjectsPanel");
+        SessionInfo other = new SessionInfo { Id = "attn-clearall-1", Title = "KEEPME", Cwd = sb.Project, Updated = DateTimeOffset.UtcNow, Created = DateTimeOffset.UtcNow, Path = System.IO.Path.Combine(sb.Root, "k.jsonl") };
+        Field<List<SessionInfo>>(app.Window, "_all").Add(other);
+        settings.AttentionSessions.Add(other.Id);
+        Invoke(app.Window, "RebuildSidebar");
+        Dispatcher.UIThread.RunJobs();
+
+        bool ClearAll() => sidebar.GetVisualDescendants().OfType<Button>().Any(b => b.Name == "AttentionClearAll");
+        Assert.False(ClearAll());                          // a plain click cannot reach it
+
+        typeof(MainWindow).GetMethod("SetAlt", BindingFlags.NonPublic | BindingFlags.Instance)!.Invoke(app.Window, new object[] { true, true });
+        Dispatcher.UIThread.RunJobs();
+        Assert.True(ClearAll());                           // Alt reveals it, with the entry still listed
+        Assert.Contains(other.Id, (IEnumerable<string>)settings.AttentionSessions);
+
+        typeof(MainWindow).GetMethod("SetAlt", BindingFlags.NonPublic | BindingFlags.Instance)!.Invoke(app.Window, new object[] { false, (bool?)null });
+        Dispatcher.UIThread.RunJobs();
+        Assert.False(ClearAll());
+        Assert.Contains(other.Id, (IEnumerable<string>)settings.AttentionSessions);   // nothing was removed
+    }
+
+    /// <summary>A session list that could not be read must not empty the sidebar: the whole "Needs attention" block
+    /// vanished with it ("sometimes all Needs attention sessions disappear", 2026-10-15).</summary>
+    [AvaloniaFact]
+    public async Task A_failed_session_refresh_keeps_what_is_on_screen()
+    {
+        using Sandbox sb = new Sandbox();
+        using App app = Start(sb, new JsonArray { Says("one") });
+        AppSettings settings = Field<AppSettings>(app.Window, "_settings");
+        StackPanel sidebar = app.Window.FindControl<StackPanel>("ProjectsPanel");
+        SessionInfo other = new SessionInfo { Id = "attn-keep-9", Title = "STAYHERE", Cwd = sb.Project, Updated = DateTimeOffset.UtcNow, Created = DateTimeOffset.UtcNow, Path = System.IO.Path.Combine(sb.Root, "s.jsonl") };
+        Field<List<SessionInfo>>(app.Window, "_all").Add(other);
+        settings.AttentionSessions.Add(other.Id);
+        Invoke(app.Window, "RebuildSidebar");
+        Dispatcher.UIThread.RunJobs();
+
+        // the storage cannot list anything (a transient IO failure is what this stands in for)
+        typeof(MainWindow).GetField("_storage", BindingFlags.NonPublic | BindingFlags.Instance)!
+            .SetValue(app.Window, new ThrowingStorage(Field<ISessionStorage>(app.Window, "_storage")));
+        await InvokeUiAsync(app.Window, "RefreshSessionsAsync");
+        Dispatcher.UIThread.RunJobs();
+
+        var text = string.Join("\n", sidebar.GetVisualDescendants().OfType<TextBlock>().Select(t => t.Text ?? ""));
+        Assert.Contains("Needs attention", text);
+        Assert.Contains("STAYHERE", text);
+    }
+
+    /// <summary>Stands in for a storage that throws while listing (a locked registry file, a directory being rewritten).</summary>
+    sealed class ThrowingStorage(ISessionStorage inner) : ISessionStorage
+    {
+        public string Name => inner.Name;
+        public List<SessionInfo> ListAll() => throw new IOException("the registry could not be enumerated");
+        public SessionInfo Create(string cwd, string? model) => inner.Create(cwd, model);
+        public LoadedSession Load(SessionInfo info) => inner.Load(info);
+        public void Append(SessionInfo info, Entry e) => inner.Append(info, e);
+        public void SaveMeta(SessionInfo info) => inner.SaveMeta(info);
+        public void Delete(SessionInfo info) => inner.Delete(info);
+    }
+
     [AvaloniaFact]
     public async Task Clicking_a_session_that_is_still_running_keeps_it_in_needs_attention()
     {
@@ -2452,6 +2547,12 @@ public sealed class SecretAuditorRealUiTests
             // vault's own "delete false positives" action has purged them; anything ELSE this long being flagged is
             // still a failure, which is the point of the test.
             if (record.Name is "audited-token-36c1e3bf05cb" or "audited-password-c24d01506538") continue;
+            // Kept deliberately by the user on 2026-10-15, after the false-positive review: 24 of the 25 entries it
+            // named then were purged, and this one — a 52-character token our OWN detector matches (the start/end
+            // marker rule) — was marked as a SECRET to keep. It is therefore expected to be offered for review (its
+            // shape is unhelpful: it carries a backslash) and must not fail the guard. Named, so the allowance stays
+            // visible rather than turning into a widened rule.
+            if (record.Name is "audited-token-a1c58f74a01e") continue;
             if (credentialLike && SecretShapes.Describe(value).Suspicious) wrong.Add($"{record.Name} ({value.Length} chars)");
         }
         System.Console.WriteLine("=== names + reasons (no values) ===");
@@ -2889,6 +2990,78 @@ public sealed class SecretAuditorRealUiTests
     {
         return string.Join(" | ", from t in dlg.GetVisualDescendants().OfType<TextBlock>()
             select t.Text);
+    }
+
+    /// <summary>A 1x1 PNG: the smallest thing the dialog can actually decode and show.</summary>
+    private const string OnePixelPng = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+
+    private static Task<bool> OpenFlaggedImageDialogAsync(App app, FlaggedImage flagged)
+    {
+        var method = typeof(MainWindow).GetMethod("ReviewFlaggedImageAsync", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        return (Task<bool>)method.Invoke(app.Window, new object[] { flagged })!;
+    }
+
+    private static async Task<Window> WaitForImageDialogAsync(App app)
+    {
+        for (int i = 0; i < 40; i++)
+        {
+            Dispatcher.UIThread.RunJobs();
+            var found = app.Window.OwnedWindows.FirstOrDefault(w => w.Title == "Image flagged by the secret scan");
+            if (found is not null) return found;
+            await Task.Delay(25);
+        }
+        throw new TimeoutException("the flagged-image dialog never appeared");
+    }
+
+    /// <summary>
+    /// An image the local scan flagged with a credential-shaped value is a question, not a silent drop: the dialog must
+    /// SHOW the picture (asking about something the human cannot see would only train them to approve), and "Send it
+    /// anyway" must answer yes.
+    /// </summary>
+    [AvaloniaFact]
+    public async Task A_flagged_image_is_shown_and_sent_when_the_human_approves_it()
+    {
+        using var sb = new Sandbox();
+        using var app = Start(sb, new JsonArray { Says("hi") });
+        var task = OpenFlaggedImageDialogAsync(app, new FlaggedImage(OnePixelPng, new[] { "api_key" }, "look at this"));
+
+        var dlg = await WaitForImageDialogAsync(app);
+        var text = DialogTextFor(dlg);
+        Assert.Contains("api_key", text);
+        Assert.Contains("look at this", text);       // the message it came with
+        var shown = dlg.GetVisualDescendants().OfType<Image>().FirstOrDefault();
+        Assert.NotNull(shown);
+        Assert.NotNull(shown!.Source);               // the picture really decoded
+
+        app.Click(dlg.GetVisualDescendants().OfType<Button>().First(b => b.Name == "FlaggedImageSend"));
+        Assert.True(await task);
+    }
+
+    /// <summary>And the other answer leaves it out — the fail-closed default is what the button means.</summary>
+    [AvaloniaFact]
+    public async Task A_flagged_image_the_human_declines_is_not_sent()
+    {
+        using var sb = new Sandbox();
+        using var app = Start(sb, new JsonArray { Says("hi") });
+        var task = OpenFlaggedImageDialogAsync(app, new FlaggedImage(OnePixelPng, new[] { "other" }, ""));
+
+        var dlg = await WaitForImageDialogAsync(app);
+        app.Click(dlg.GetVisualDescendants().OfType<Button>().First(b => b.Name == "FlaggedImageSkip"));
+        Assert.False(await task);
+    }
+
+    /// <summary>The app's own client is what the window actually uses, so the dialog must be wired onto it: without
+    /// <c>ReviewImageAsync</c> every finding is a silent drop and the session cannot see the screenshots it was sent.</summary>
+    [AvaloniaFact]
+    public void The_window_wires_the_flagged_image_dialog_onto_the_llm_client()
+    {
+        using var sb = new Sandbox();
+        var fresh = new MainWindow();
+        try
+        {
+            Assert.NotNull(Field<AuditingLlmClient>(fresh, "_llm").ReviewImageAsync);
+        }
+        finally { fresh.Close(); }
     }
 
     private static string DialogTextFor(Window dlg)

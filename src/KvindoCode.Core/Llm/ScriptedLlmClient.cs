@@ -31,6 +31,16 @@ public sealed class ScriptedLlmClient : ILlmClient
 
         // let a scripted step fail the way the gateway does — {"error":"HTTP 404: модель «haiku» не найдена"}
         if ((string?)item["error"] is { Length: > 0 } err) throw new LlmException(err);
+        // ...or fail MID-STREAM, after some text has already been shown: {"text":"...","failAfter":24,"error":"..."}.
+        // This is the shape the gateway produced ("Поток ответа завершился до окончания генерации") and it is the one
+        // the client must NOT blindly retry — a second attempt would print the same text twice.
+        if (item["failAfter"] is JsonNode fail && (int?)item["error"] is null && (string?)item["streamError"] is { Length: > 0 } serr)
+        {
+            var head = ((string?)item["text"] ?? "");
+            var upto = Math.Min((int?)fail ?? 0, head.Length);
+            if (upto > 0) { res.Content = head[..upto]; cb?.OnText?.Invoke(res.Content); }
+            throw new LlmException(serr, null, true);
+        }
 
         if ((string?)item["reasoning"] is { Length: > 0 } r)
         {

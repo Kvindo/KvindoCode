@@ -576,6 +576,15 @@ public sealed partial class MarkdownView : StackPanel
     /// <summary>A clickable URL, rendered as ordinary inline text so selecting and copying still work.</summary>
     void AddUrlRun(InlineCollection inlines, string shown, string url)
     {
+        // A file:// URL names a FILE, and the only sensible thing to do with one is what a plain path does: open it in
+        // the side panel. It went to the URL branch instead and therefore to the desktop's xdg-open, which does nothing
+        // useful for a file the user wants to read next to the conversation (reported 2026-10-15: "those links wont open
+        // in side panel!"). Only when the file really resolves — otherwise the URL branch is better than nothing.
+        if (TryFileUrl(url, out var local, out var localLine) && PathResolver?.Invoke(local) is { } fullPath)
+        {
+            AddPathRun(_inlineHost!, inlines, shown, fullPath, localLine);
+            return;
+        }
         int at = PlainLength(inlines);
         if (_inlineHost is { } host) UrlLinks.Add(host, at, shown.Length, url, u => (UrlClicked ?? Shell.Open)(u));
         var r = new Run(shown)
@@ -586,6 +595,27 @@ public sealed partial class MarkdownView : StackPanel
         };
         if (Res("KvAccent") is { } fg) r.Foreground = fg;
         inlines.Add(r);
+    }
+
+    /// <summary>A <c>file://</c> URL as a local path plus an optional line number, or false when it is not one.</summary>
+    /// <remarks>
+    /// Percent-escapes are decoded by <see cref="Uri"/>; a <c>#L12</c> / <c>#12</c> fragment is read as a line, the same
+    /// way <see cref="PathLinks"/> reads a <c>file:12</c> suffix.
+    /// </remarks>
+    static bool TryFileUrl(string url, out string path, out int? line)
+    {
+        path = ""; line = null;
+        if (!url.StartsWith("file://", StringComparison.OrdinalIgnoreCase)) return false;
+        try
+        {
+            if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) || !uri.IsFile || uri.LocalPath.Length == 0) return false;
+            path = uri.LocalPath;
+            var frag = uri.Fragment.TrimStart('#');
+            if (frag.StartsWith("L", StringComparison.OrdinalIgnoreCase)) frag = frag[1..];
+            if (int.TryParse(frag, out var n) && n > 0) line = n;
+            return true;
+        }
+        catch { return false; }
     }
 
     /// <summary>Host of the block currently being rendered; set before AddInlines runs.</summary>
@@ -676,6 +706,10 @@ public sealed partial class MarkdownView : StackPanel
     /// <summary>For tests: the spans registered for a host (offset, length, full path).</summary>
     public IEnumerable<(int Start, int Length, string Full)> PathSpansOf(Control host)
         => _pathMaps.TryGetValue(host, out var m) ? m.Spans.Select(s => (s.Start, s.Length, s.Full)) : Enumerable.Empty<(int, int, string)>();
+
+    /// <summary>For tests: the line the registered path span <paramref name="index"/> points at, or null.</summary>
+    public int? PathLineOf(Control host, int index)
+        => _pathMaps.TryGetValue(host, out var m) && index >= 0 && index < m.Spans.Count ? m.Spans[index].Line : null;
 
     /// <summary>For tests: total registered path spans. The table is weak, so enumerate it (enumeration does not keep
     /// the controls alive, which is the point of using it rather than a Dictionary).</summary>

@@ -1568,9 +1568,17 @@ public sealed class AgentSession : IDisposable
     /// <summary>Reached the per-turn model-call cap; the turn continues automatically rather than stopping.</summary>
     const int MaxTurnPasses = 3;
 
+    /// <summary>How many times one turn may ask the model to carry on after the provider cut the stream mid-answer.</summary>
+    const int MaxStreamContinuations = 2;
+
+    /// <summary>How many times one turn re-asks after a call that came back with no answer at all.</summary>
+    const int MaxEmptyResponseRetries = 2;
+
     async Task<string> LoopAsync(CancellationToken ct)
     {
         int stopRounds = 0;
+        int streamContinuations = 0;
+        int emptyRetries = 0;
         int cap = Math.Max(50, _settings.MaxIterations);
         for (int iter = 0; iter < cap; iter++)
         {
@@ -1655,6 +1663,28 @@ public sealed class AgentSession : IDisposable
                 EmitRaw(new AssistantMessageEndEvent());
                 throw;
             }
+            // The provider's stream ended mid-answer ("Поток ответа завершился до окончания генерации") after text had
+            // already been shown. The client only retries a request that produced NOTHING, because a blind retry would
+            // print the same text twice — so an interruption like this used to end the turn with an error, over and over,
+            // and the human had to paste "continue" (reported 2026-10-15). Its own retry loop already gave up by the
+            // time we get here. Continue instead: keep what arrived, and ask for the REST of the answer. Bounded, so a
+            // provider that keeps cutting the stream cannot loop for ever.
+            catch (Exception e) when ((e is LlmException or HttpRequestException) && partial.Length > 0 && streamContinuations < MaxStreamContinuations && !ct.IsCancellationRequested)
+            {
+                streamContinuations++;
+                FlushStreams();
+                EmitRaw(new AssistantMessageEndEvent());
+                var head = partial.ToString();
+                Add(new ChatMessage { Role = "assistant", Content = head, Model = Model });
+                Add(new ChatMessage
+                {
+                    Role = "user", IsInternal = true,
+                    Content = "<system-reminder>\nThe provider's stream ended before your response was finished (" + e.Message + "). " +
+                              "Continue EXACTLY where you left off: do not repeat what you already wrote and do not repeat a tool call you already made.\n</system-reminder>",
+                });
+                Emit(new NoticeEvent("The provider ended the stream mid-answer; continuing where it stopped.", false));
+                continue;
+            }
             FlushStreams();
             requestWatch.Stop();
             EmitRaw(new AssistantMessageEndEvent());
@@ -1687,6 +1717,21 @@ public sealed class AgentSession : IDisposable
                                      "This is a gateway/model failure, not something to act on — retry, or switch model.", true));
                 LastTurnError = marker;
                 return "error";
+            }
+
+            // A completed call that came back with NO answer at all — no text and no tool call, while the stream itself
+            // finished cleanly — is a gateway hiccup, not a reply. It used to end the turn with "The model returned an
+            // empty response." and leave the human to press Send again. The client already retries a stream that is
+            // empty from end to end; this covers the rest (a reply carrying only hidden reasoning, say). Bounded, so a
+            // model that keeps answering nothing cannot loop for ever (asked 2026-10-15). Placed BEFORE the assistant
+            // message is stored, so a retried attempt does not leave an empty turn in the history.
+            if (res.ToolCalls.Count == 0 && string.IsNullOrWhiteSpace(res.Content)
+                && emptyRetries < MaxEmptyResponseRetries && !ct.IsCancellationRequested)
+            {
+                emptyRetries++;
+                Emit(new NoticeEvent($"The model returned an empty response; asking again ({emptyRetries}/{MaxEmptyResponseRetries}).", false));
+                await Task.Delay(500 * emptyRetries, ct);
+                continue;
             }
 
             if (redactor.Contains(res.Content) || redactor.Contains(res.Reasoning)) NoteMasked();
@@ -1723,7 +1768,9 @@ public sealed class AgentSession : IDisposable
                 if (res.FinishReason == "length")
                     Emit(new NoticeEvent("The response was cut off by the output token limit.", true));
                 else if (string.IsNullOrWhiteSpace(res.Content))
-                    Emit(new NoticeEvent("The model returned an empty response.", true));
+                    Emit(new NoticeEvent(emptyRetries > 0
+                        ? $"The model returned an empty response {emptyRetries + 1} times; not asking again. Send a message to retry, or switch model."
+                        : "The model returned an empty response.", true));
                 else if (Hooks.Any("Stop") && stopRounds < 3)
                 {   // Stop hooks may reject the answer ("block") — the model then revises it
                     var hs = await Hooks.RunAsync("Stop", HookPayload(new JsonObject { ["stop_hook_active"] = stopRounds > 0 }), null, ct, st => Emit(new PhaseEvent(st)));
