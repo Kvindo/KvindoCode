@@ -209,13 +209,33 @@ public sealed class BashTool : Tool
     /// </summary>
     static void EnsureReposForCommand(string command, ToolContext ctx, SessionWorkspace ws, CancellationToken ct)
     {
-        foreach (var repo in Workspaces.Nested(ws.Root))
+        var repos = Workspaces.Nested(ws.Root);
+        var hit = false;
+        foreach (var repo in repos)
         {
             var rel = Path.GetRelativePath(ws.Root, repo).Replace('\\', '/');
             if (!command.Contains(rel, StringComparison.Ordinal)) continue;
+            hit = true;
             Workspaces.EnsureRepo(ws, repo, ctx.SessionId, out _, ct);   // failure => absent => the command fails loudly
         }
+        // The list is cached (the scan is 10 506 directory lookups on this machine, paid per command otherwise). A
+        // command that names a path the cache does not know may be a repository cloned since — rescan once, so a new
+        // repo is still materialised on the very command that touches it.
+        if (!hit && LooksLikeRepoPath(command))
+        {
+            Workspaces.InvalidateNested(ws.Root);
+            foreach (var repo in Workspaces.Nested(ws.Root))
+            {
+                var rel = Path.GetRelativePath(ws.Root, repo).Replace('\\', '/');
+                if (!command.Contains(rel, StringComparison.Ordinal)) continue;
+                Workspaces.EnsureRepo(ws, repo, ctx.SessionId, out _, ct);
+            }
+        }
     }
+
+    /// <summary>Whether a command mentions a path deep enough to be inside a repository (so a rescan is worth trying).</summary>
+    static bool LooksLikeRepoPath(string command) =>
+        System.Text.RegularExpressions.Regex.IsMatch(command, @"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+");
 
     /// <summary>
     /// Best-effort detection of `cd <absolute path>` that would leave the session's worktree. Only literal absolute

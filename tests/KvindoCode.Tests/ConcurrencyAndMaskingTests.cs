@@ -430,4 +430,47 @@ public sealed class ConcurrencyAndMaskingTests(ITestOutputHelper o)
 
         other.Dispose();
     }
+
+    // ------------------------------------------------------------------ the per-command repo scan
+
+    /// <summary>
+    /// The nested-repo list must be scanned ONCE per root, not on every command.
+    /// </summary>
+    /// <remarks>
+    /// Every Bash call asked "which repositories are inside this project?" and answered it by walking the tree and
+    /// stat-ing a <c>.git</c> in each directory — 10 506 directories / 289 ms on this machine's container project, for
+    /// a command whose own shell work was ~4 ms (asked 2026-10-15: "simple bash commands execute too long").
+    /// </remarks>
+    [Fact]
+    public void The_nested_repo_scan_happens_once_and_can_be_invalidated()
+    {
+        using var sb = new Sandbox();
+        // two repositories under the project root, so the scan returns a real answer
+        foreach (var name in new[] { "one", "two" })
+        {
+            var d = Path.Combine(sb.Project, name);
+            Directory.CreateDirectory(d);
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("git", "init -q")
+            { WorkingDirectory = d, RedirectStandardError = true, RedirectStandardOutput = true })!.WaitForExit(10_000);
+        }
+        Workspaces.ClearNestedCacheForTest();
+
+        var first = Workspaces.Nested(sb.Project);
+        Assert.Equal(2, first.Count);
+        var second = Workspaces.Nested(sb.Project);
+        Assert.Same(first, second);                                   // served from the cache, not re-scanned
+
+        // a repository added AFTER the cache was filled is only found once the cache is dropped — which the Bash tool
+        // does when a command names a path the cached list does not know
+        var three = Path.Combine(sb.Project, "three");
+        Directory.CreateDirectory(three);
+        System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("git", "init -q")
+        { WorkingDirectory = three, RedirectStandardError = true, RedirectStandardOutput = true })!.WaitForExit(10_000);
+        Assert.Same(first, Workspaces.Nested(sb.Project));            // still cached, as designed
+
+        Workspaces.InvalidateNested(sb.Project);
+        var after = Workspaces.Nested(sb.Project);
+        Assert.Equal(3, after.Count);
+        Assert.Contains(after, r => r.EndsWith("three", StringComparison.Ordinal));
+    }
 }

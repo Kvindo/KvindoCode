@@ -91,10 +91,10 @@ public partial class MainWindow : Window
             // each piece has its own column, so hiding is only about clutter, not collisions
             SetVisible(ProjectText, e.NewSize.Width >= 980);
             SetVisible(UsageText, e.NewSize.Width >= 760);
-            SetVisible(AskSearchBox, e.NewSize.Width >= 700);
+            SetVisible(FindBtn, e.NewSize.Width >= 700);
             // Text can be null on a freshly created TextBlock, and the `!` here threw a NullReferenceException out of
             // ArrangeCore -> SizeChanged (errors.log 2026-10-06/07), i.e. inside the layout pass it was reacting to.
-            if (!AskSearchBox.IsVisible && (FindStatus.IsVisible || (FindStatus.Text?.Length ?? 0) > 0))
+            if (!FindBtn.IsVisible && (FindStatus.IsVisible || (FindStatus.Text?.Length ?? 0) > 0))
             {
                 FindStatus.Text = "";
                 SetVisible(FindStatus, false);
@@ -211,19 +211,8 @@ public partial class MainWindow : Window
         SearchBox.TextChanged += (_, _) => { SearchClear.IsVisible = !string.IsNullOrEmpty(SearchBox.Text); _debounce.Stop(); _debounce.Start(); };
 
         // find inside the current session: the same regexp engine, applied to the transcript
-        AskSearchBox.KeyDown += (_, e) =>
-        {
-            if (e.Key == Key.Escape)
-            {
-                AskSearchBox.Text = "";
-                FindStatus.Text = "";
-                FindStatus.IsVisible = false;
-                _current?.Transcript.ClearSearch();
-                e.Handled = true;
-            }
-            else if (e.Key == Key.Enter) { RunFind(forward: (e.KeyModifiers & KeyModifiers.Shift) == 0); e.Handled = true; }
-        };
-        AskSearchBox.TextChanged += (_, _) => RunFind(forward: true);
+        FindBtn.Click += (_, _) => OpenFindInPane();
+
         SearchClear.Click += (_, _) => SearchBox.Text = "";
         _debounce.Tick += (_, _) => { _debounce.Stop(); _ = RunSearchAsync(SearchBox.Text ?? ""); };
         _hitTimer.Tick += (_, _) => { if (_searching && HitCount() != _shownHits) RebuildSidebar(); };
@@ -238,6 +227,10 @@ public partial class MainWindow : Window
         _pane.CloseRequested += HidePane;
         _pane.ContextChanged += () => { if (_current is not null) _current.Session.Project.Reload(_settings); };
         _pane.FileRequested += (p, l) => { OpenPane(); if (_project is { Length: > 0 }) _pane.SetProject(_project); _pane.ShowFile(p, l); };
+        // Picking a find-in-session result scrolls the transcript to the message it is in, loading older messages
+        // first when it is not rendered yet (asked 2026-10-15: the results moved into the panel so they can be clicked
+        // through "like in global session search").
+        _pane.HitRequested += h => { if (_current is { } cur) _ = GoToHitAsync(cur, h); };
 
         // attachments: button, drag & drop, paste
         AttachBtn.Content = Ui.Icon("IconAttach", "KvMuted", 16);
@@ -304,6 +297,13 @@ public partial class MainWindow : Window
         var tick = new DispatcherTimer { Interval = TimeSpan.FromSeconds(4) };
         tick.Tick += async (_, _) => { UpdateTasks(); await UpdateBrowserStatusAsync(); CheckStalledSessions(); };
         tick.Start();
+
+        // The header's live figures (memory + UI-thread load). The lag probe runs FIRST and the readout second, so the
+        // number shown is the round-trip that just completed rather than the previous interval's.
+        UpdateHealth(); ProbeUiLag();
+        var health = new DispatcherTimer { Interval = TimeSpan.FromSeconds(HealthSeconds) };
+        health.Tick += (_, _) => { UpdateHealth(); ProbeUiLag(); };
+        health.Start();
         Input.Focus();
         _ = RunStartupChecksAsync();                          // offer to continue what was active in the previous run
         _ = WarnAboutVaultProblemsAsync();                    // a lost vault key or a corrupt vault silently "empty" it otherwise
@@ -698,14 +698,15 @@ public partial class MainWindow : Window
             var collected = new List<AgentEvent>();
             Action<AgentEvent> grab = collected.Add;
             session.Event += grab;
+            sv.Transcript.BeginIndexedReplay();
             try { sv.ReplayOlderRemaining = session.ReplayWindow(ReplayWindowMessages); }
             finally { session.Event -= grab; }
             sv.ReplayLoadedMessages = Math.Min(ReplayWindowMessages, session.HistoryCount);
             session.Event += e => PostEvent(sv, e);
             ReplayPosts++;                                          // ONE post for the whole batch (see PostEvent)
-            _replaying = true;
+            _replaying = true; sv.Transcript.ReplayingNow = true;
             try { foreach (var e in collected) OnEvent(sv, e); }
-            finally { _replaying = false; }
+            finally { _replaying = false; sv.Transcript.ReplayingNow = false; }
             sv.Transcript.OpenedWhenOlderExist(sv.ReplayOlderRemaining);
             if (_sidebarDirty) { _sidebarDirty = false; }
         }
@@ -813,6 +814,7 @@ public partial class MainWindow : Window
         sv.Transcript.LoadEarlierRequested += () => _ = LoadEarlierAsync(sv);
         // Same window rule as opening a session: a rewind rebuilds from the newest end, so reset the window counters
         // rather than leaving them describing the view that was just thrown away.
+        sv.Transcript.BeginIndexedReplay();
         sv.ReplayOlderRemaining = sv.Session.ReplayWindow(ReplayWindowMessages);
         sv.ReplayLoadedMessages = Math.Min(ReplayWindowMessages, sv.Session.HistoryCount);
         sv.Transcript.OpenedWhenOlderExist(sv.ReplayOlderRemaining);
@@ -852,20 +854,30 @@ public partial class MainWindow : Window
     }
 
     /// <summary>Put a previously sent message (with its attachment block) back into the composer.</summary>
-    /// <summary>Run the in-session search against the transcript that is on screen.</summary>
-    void RunFind(bool forward)
+    /// <summary>
+    /// Open (or focus) find-in-session in the side panel, which searches the WHOLE history rather than the rendered
+    /// controls (see <c>AgentSession.SearchHistory</c>).
+    /// </summary>
+    void OpenFindInPane()
     {
-        if (_current is null) { FindStatus.Text = ""; FindStatus.IsVisible = false; return; }
-        var pattern = AskSearchBox.Text ?? "";
-        if (pattern.Length == 0)
+        if (_current is null) return;
+        OpenPane();
+        if (_project is { Length: > 0 }) _pane.SetProject(_project);
+        _pane.ShowSearch(_current.Session);
+    }
+
+    /// <summary>Bring a find result into view: load earlier messages until it is rendered, then reveal it.</summary>
+    async Task GoToHitAsync(SessionView sv, SessionSearchHit h)
+    {
+        var view = sv.Transcript;
+        for (var guard = 0; guard < 40; guard++)
         {
-            FindStatus.Text = "";
-            FindStatus.IsVisible = false;
-            _current.Transcript.ClearSearch();
-            return;
+            if (view.RevealMessage(h.HistoryIndex)) return;               // it is on screen now
+            if (sv.ReplayOlderRemaining <= 0) break;                      // nothing older left to load
+            await LoadEarlierAsync(sv);
+            Dispatcher.UIThread.RunJobs();
         }
-        FindStatus.Text = _current.Transcript.SearchTranscript(pattern, forward);
-        FindStatus.IsVisible = true;                 // only while searching: it must not sit in the bar permanently
+        view.ScrollToEnd();                                               // could not pin it: at least show the newest
     }
 
     void LoadIntoComposer(string text)
@@ -976,6 +988,19 @@ public partial class MainWindow : Window
         if (!_searching && _query.Length == 0) RebuildSidebar();
     }
 
+    /// <summary>The human-readable name of a session id, for a cross-session message label.</summary>
+    /// <remarks>
+    /// Looks in the open sessions first (freshest title), then the cached list, and finally falls back to the short id —
+    /// never to an empty string, because the label has to say something about the sender either way.
+    /// </remarks>
+    string SenderName(string sessionId)
+    {
+        var title = _live.TryGetValue(sessionId, out var lv) ? lv.Session.Info.Title
+                  : _all.FirstOrDefault(x => x.Id == sessionId)?.Title;
+        var shortId = sessionId[..Math.Min(8, sessionId.Length)];
+        return string.IsNullOrWhiteSpace(title) || title == "Untitled" ? shortId : $"{title} ({shortId})";
+    }
+
     ISessionBridge? _sessionBridge;
 
     /// <summary>Delivers a message from one agent to another session, exactly like a message typed in that session.</summary>
@@ -987,7 +1012,12 @@ public partial class MainWindow : Window
 
     async Task<string> DeliverToSessionAsync(SessionInfo target, string text, string fromSessionId)
     {
-        var labelled = $"[Message from another KvindoCode session ({fromSessionId[..Math.Min(8, fromSessionId.Length)]}) — an agent, not the user. Treat it as a request from a colleague; reply with the Sessions tool if one is needed.]\n\n{text}";
+        // Name the sender the way a human would: an 8-character id told the reader nothing about WHO was talking, and
+        // this label is read by a model that then decides how to treat the message (asked 2026-10-16: "we need to add
+        // session full name for human"). The title is the human-readable name; the short id is kept as a fallback for a
+        // session we cannot identify, since a reply still needs something addressable.
+        var from = SenderName(fromSessionId);
+        var labelled = $"[Message from another KvindoCode session: \"{from}\" — an agent, not the user. Treat it as a request from a colleague; reply with the Sessions tool if one is needed.]\n\n{text}";
         var title = target.Title;
         if (!_live.TryGetValue(target.Id, out var sv))
         {
@@ -2343,14 +2373,130 @@ public partial class MainWindow : Window
 
     void UpdateTitle()
     {
-        TitleText.Text = _current == null ? "KvindoCode" : (_current.Session.Info.Title is { Length: > 0 } t ? t : "New session");
+        TitleText.Text = _current == null ? "Kvindo™ Code" : (_current.Session.Info.Title is { Length: > 0 } t ? t : "New session");
         ProjectText.Text = _current == null ? "" : ShortPath(_current.Session.Project.Cwd);
-        Title = _current == null ? "KvindoCode" : $"{TitleText.Text} — KvindoCode";
+        Title = _current == null ? "Kvindo™ Code" : $"{TitleText.Text} — Kvindo™ Code";
         RenameBtn.IsVisible = RegenBtn.IsVisible = PinBtn.IsVisible = CopyNameBtn.IsVisible = _current != null;
         if (_current != null) { PinBtn.Content = Ui.Icon("IconPin", IsPinned(_current.Session.Info) ? "KvAccent" : "KvMuted", 15); ToolTip.SetTip(PinBtn, IsPinned(_current.Session.Info) ? "Unpin session" : "Pin session"); }
     }
 
     static string ShortPath(string p) => p.StartsWith(Paths.Home) ? "~" + p[Paths.Home.Length..] : p;
+
+    // ================================================================== process health (memory + UI-thread load)
+
+    /// <summary>
+    /// Live figures for the header: how much memory this process holds, and how loaded the UI thread is.
+    /// </summary>
+    /// <remarks>
+    /// Asked for 2026-10-15: after the title, show the app's memory usage and the UI thread's CPU usage. The UI figure
+    /// has TWO parts on purpose, because either alone lies:
+    /// <list type="bullet">
+    /// <item><b>CPU</b> — the UI thread's own processor time as a share of ONE core, over the sampling interval. The
+    /// Avalonia UI thread is this process's main thread, whose OS thread id equals the process id on Linux, which is
+    /// how it is located. When it cannot be found the CPU part is omitted rather than shown wrong.</item>
+    /// <item><b>lag</b> — how long a <see cref="DispatcherPriority.Background"/> callback waited to run. That is what
+    /// makes a starved UI visible even at a LOW CPU number: the thread can be blocked (on the vault lock, say) with no
+    /// CPU to show for it. Only one probe is ever outstanding, so measuring cannot become the load it measures.</item>
+    /// </list>
+    /// Every read is cheap, and the 2 s timer keeps this off any hot path.
+    /// </remarks>
+    void UpdateHealth()
+    {
+        try
+        {
+            _proc.Refresh();                                               // Process caches its counters: without this the figure cannot be trusted to be current
+            var mem = _proc.WorkingSet64;                                  // resident set on Linux: what a user calls "app memory"
+            var ui = UiThreadLoadPercent();
+            var lag = _uiLagMs;
+
+            var text = $"RAM {FormatBytes(mem)}";
+            if (ui is { } pct) text += $" · UI {pct:0}%";
+            if (lag >= 60) text += $" · lag {lag:0}ms";                     // only when it is actually felt
+            if (HealthText.Text != text) HealthText.Text = text;
+
+            // normal / getting heavy / this is what is slowing you down
+            HealthText.Foreground = lag >= 400 || ui >= 85 ? new SolidColorBrush(Color.Parse("#EF4444"))
+                                  : lag >= 120 || ui >= 50 ? new SolidColorBrush(Color.Parse("#F59E0B"))
+                                  : null;
+            ToolTip.SetTip(HealthText,
+                $"{FormatBytes(mem)} resident memory.\n" +
+                (ui is { } u ? $"UI thread: {u:0.0}% of one core, over the last {HealthSeconds:0}s.\n" : "UI thread CPU: unavailable.\n") +
+                $"Last dispatcher round-trip: {lag:0} ms at Background priority — the figure to watch: high lag with low CPU means the UI thread is blocked, not busy.");
+        }
+        catch { /* a display figure must never take the window down */ }
+    }
+
+    /// <summary>Percentage of one core the UI thread used since the previous sample, or null when unreadable.</summary>
+    /// <remarks>
+    /// The thread is identified by asking the CURRENT thread for its OS id (<c>gettid</c>) and looking that up, not by
+    /// assuming the UI thread is the process's main thread: that holds in the app but NOT in a headless test host,
+    /// where Avalonia runs its dispatcher on a thread of its own — measured the hard way, the first version reported a
+    /// flat 0% while a 500 ms busy-loop ran on the UI thread.
+    /// </remarks>
+    double? UiThreadLoadPercent()
+    {
+        try
+        {
+            if (_uiThread is null)
+            {
+                _proc.Refresh();                                        // the thread list is a snapshot too
+                var tid = OperatingSystem.IsLinux() ? NativeThreadId() : Environment.ProcessId;
+                _uiThread = _proc.Threads.Cast<ProcessThread>().FirstOrDefault(t => t.Id == tid)
+                            ?? _proc.Threads.Cast<ProcessThread>().FirstOrDefault(t => t.Id == Environment.ProcessId);
+                if (_uiThread is null) return null;
+            }
+            var now = DateTime.UtcNow;
+            var cpu = _uiThread.TotalProcessorTime;
+            if (_uiSampleAt is { } at && _uiSampleCpu is { } prev)
+            {
+                var wall = (now - at).TotalSeconds;
+                if (wall > 0.2)
+                {
+                    // advance the window FIRST, so this sample measures its own interval and not everything since startup
+                    var pct = (cpu - prev).TotalSeconds / wall * 100.0;
+                    _uiSampleAt = now; _uiSampleCpu = cpu;
+                    return Math.Clamp(pct, 0, 100);
+                }
+            }
+            _uiSampleAt = now; _uiSampleCpu = cpu;
+            return 0;
+        }
+        catch { return null; }
+    }
+    ProcessThread? _uiThread;
+    DateTime? _uiSampleAt;
+    TimeSpan? _uiSampleCpu;
+
+    /// <summary>The calling thread's OS id. Linux only for now; elsewhere the pid is the fallback.</summary>
+    [System.Runtime.InteropServices.DllImport("libc", EntryPoint = "gettid", SetLastError = false)]
+    static extern int gettid();
+    static int NativeThreadId()
+    {
+        try { return gettid(); } catch { return Environment.ProcessId; }        // old libc without gettid
+    }
+
+    /// <summary>Milliseconds a background dispatcher callback waited: the UI thread's real "am I keeping up" figure.</summary>
+    double _uiLagMs;
+    bool _uiLagProbeOutstanding;
+    const double HealthSeconds = 2;
+
+    void ProbeUiLag()
+    {
+        if (_uiLagProbeOutstanding) return;                 // never queue a second probe behind the first
+        _uiLagProbeOutstanding = true;
+        var posted = System.Diagnostics.Stopwatch.GetTimestamp();
+        Dispatcher.UIThread.Post(() =>
+        {
+            _uiLagMs = (System.Diagnostics.Stopwatch.GetTimestamp() - posted) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+            _uiLagProbeOutstanding = false;
+        }, DispatcherPriority.Background);
+    }
+
+    static string FormatBytes(long b) => b >= 1L << 30 ? $"{b / (double)(1L << 30):0.0}G"
+                                       : b >= 1L << 20 ? $"{b / (double)(1L << 20):0}M"
+                                       : $"{Math.Max(1, b / 1024)}K";
+
+    readonly Process _proc = Process.GetCurrentProcess();
 
     void UpdateMode()
     {
