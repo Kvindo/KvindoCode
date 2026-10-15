@@ -704,7 +704,9 @@ public sealed class AgentSession : IDisposable
 
     public void Dispose()
     {
-        foreach (var c in _promptSchedules.Values) c.Cts.Cancel();
+        // Each loop disposes its own source when it exits, so one may already be gone here: Cancel() on a disposed
+        // source throws, and an unguarded throw in Dispose would take the session down on the way out.
+        foreach (var c in _promptSchedules.Values) { try { c.Cts.Cancel(); } catch (ObjectDisposedException) { } }
         _promptSchedules.Clear();
         Subagents.Dispose(); Tasks.Dispose(); CleanSecretFiles();
         // release the browser tabs this session owned, so another session may use them (the pages stay open)
@@ -782,15 +784,23 @@ public sealed class AgentSession : IDisposable
         if (interval < TimeSpan.FromSeconds(5)) interval = TimeSpan.FromSeconds(5);
         var id = 100000 + Random.Shared.Next(1, 899999);
         var cts = new CancellationTokenSource();
+        // The TOKEN is captured once and the loop owns the SOURCE. Reading `cts.Token` on every iteration is what broke
+        // when a stop disposed the source underneath a still-running loop: the property throws ObjectDisposedException
+        // ("The CancellationTokenSource has been disposed."), which surfaced as "A scheduled prompt stopped: …" long
+        // after a perfectly normal stop (recurring report, 2026-10-15). Disposal is now the loop's own job, in its
+        // finally — nothing outside it can pull the source away while the loop is still using it.
+        var token = cts.Token;
         lock (_promptScheduleLock) { while (_promptSchedules.ContainsKey(id)) id++; _promptSchedules[id] = (cts, interval, prompt); }
+        // CancellationToken.None, NOT token: with a token, a source cancelled before the pool picks the delegate up
+        // skips the body entirely — so the finally would never run and the CTS would never be disposed.
         _ = Task.Run(async () =>
         {
             try
             {
-                while (!cts.Token.IsCancellationRequested)
+                while (true)
                 {
-                    await Task.Delay(interval, cts.Token);
-                    if (cts.Token.IsCancellationRequested) break;
+                    await Task.Delay(interval, token);
+                    if (token.IsCancellationRequested) break;
                     var turn = new QueuedTurn(prompt, null, Scheduled: true);
                     if (!IsRunning)
                     {
@@ -800,16 +810,20 @@ public sealed class AgentSession : IDisposable
                         // Treat the race as "the session is busy" and queue the prompt instead.
                         // scheduled: true — the tick is driven by the timer, so it must not raise the "waiting for your
                         // input" alert when it returns (2026-10-10: a LOOP beeped on every tick).
-                        try { await RunTurnAsync(prompt, cts.Token, null, scheduled: true); }
+                        try { await RunTurnAsync(prompt, token, null, scheduled: true); }
                         catch (InvalidOperationException) { _scheduledTurns.Enqueue(turn); }
                     }
                     else _scheduledTurns.Enqueue(turn); // injected between tool rounds, like a user-queued message
                 }
             }
-            catch (OperationCanceledException) { }
+            catch (OperationCanceledException) { }   // a normal stop — not worth a notice
             catch (Exception e) { Emit(new NoticeEvent("A scheduled prompt stopped: " + e.Message, true)); }
-            finally { lock (_promptScheduleLock) _promptSchedules.Remove(id); }
-        }, cts.Token);
+            finally
+            {
+                lock (_promptScheduleLock) _promptSchedules.Remove(id);
+                cts.Dispose();                       // the loop that used it has ended; nobody else touches the source
+            }
+        }, CancellationToken.None);
         return id;
     }
 
@@ -817,7 +831,10 @@ public sealed class AgentSession : IDisposable
     {
         (CancellationTokenSource Cts, TimeSpan Interval, string Prompt) cts;
         lock (_promptScheduleLock) if (!_promptSchedules.Remove(id, out cts)) return false;
-        cts.Cts.Cancel(); cts.Cts.Dispose(); return true;
+        // Cancel only. Disposing here raced the loop: it could still be between iterations, about to read Token, and
+        // that read threw. The loop disposes its own source when it exits (see above).
+        try { cts.Cts.Cancel(); } catch (ObjectDisposedException) { }   // already gone: stopping is still a success
+        return true;
     }
 
     public IReadOnlyList<(int Id, TimeSpan Interval, string Prompt)> ScheduledPrompts
