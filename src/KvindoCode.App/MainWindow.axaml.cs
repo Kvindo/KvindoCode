@@ -988,6 +988,19 @@ public partial class MainWindow : Window
         if (!_searching && _query.Length == 0) RebuildSidebar();
     }
 
+    /// <summary>The human-readable name of a session id, for a cross-session message label.</summary>
+    /// <remarks>
+    /// Looks in the open sessions first (freshest title), then the cached list, and finally falls back to the short id —
+    /// never to an empty string, because the label has to say something about the sender either way.
+    /// </remarks>
+    string SenderName(string sessionId)
+    {
+        var title = _live.TryGetValue(sessionId, out var lv) ? lv.Session.Info.Title
+                  : _all.FirstOrDefault(x => x.Id == sessionId)?.Title;
+        var shortId = sessionId[..Math.Min(8, sessionId.Length)];
+        return string.IsNullOrWhiteSpace(title) || title == "Untitled" ? shortId : $"{title} ({shortId})";
+    }
+
     ISessionBridge? _sessionBridge;
 
     /// <summary>Delivers a message from one agent to another session, exactly like a message typed in that session.</summary>
@@ -999,7 +1012,12 @@ public partial class MainWindow : Window
 
     async Task<string> DeliverToSessionAsync(SessionInfo target, string text, string fromSessionId)
     {
-        var labelled = $"[Message from another KvindoCode session ({fromSessionId[..Math.Min(8, fromSessionId.Length)]}) — an agent, not the user. Treat it as a request from a colleague; reply with the Sessions tool if one is needed.]\n\n{text}";
+        // Name the sender the way a human would: an 8-character id told the reader nothing about WHO was talking, and
+        // this label is read by a model that then decides how to treat the message (asked 2026-10-16: "we need to add
+        // session full name for human"). The title is the human-readable name; the short id is kept as a fallback for a
+        // session we cannot identify, since a reply still needs something addressable.
+        var from = SenderName(fromSessionId);
+        var labelled = $"[Message from another KvindoCode session: \"{from}\" — an agent, not the user. Treat it as a request from a colleague; reply with the Sessions tool if one is needed.]\n\n{text}";
         var title = target.Title;
         if (!_live.TryGetValue(target.Id, out var sv))
         {

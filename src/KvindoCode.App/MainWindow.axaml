@@ -27,13 +27,18 @@
     <!-- ================= Sidebar ================= -->
     <Border Classes="sidebar edge" BorderThickness="0,0,1,0" x:Name="SidebarBorder">
       <Grid RowDefinitions="Auto,Auto,Auto,Auto,*,Auto">
-        <Grid Grid.Row="0" ColumnDefinitions="Auto,Auto,*,Auto" Margin="16,16,12,8">
+        <!-- THREE columns, and the live figures live in the LAST one which is sized `*`: in an Auto column they made
+             the header wider than the 300px sidebar, which made the sidebar's ScrollViewer content wider than its
+             viewport, which pushed every row's controls (the Needs-attention X at x=308) outside the clipped area —
+             so clicks on them silently missed (caught by the Needs-attention UI tests). Confining the text to `*` keeps
+             the header inside the sidebar and trims the figures instead. -->
+        <Grid Grid.Row="0" ColumnDefinitions="Auto,Auto,*" Margin="16,16,12,8">
           <!-- The Kvindo mark (extracted from the Cloud logo) rather than a letter in a coloured box: same product. -->
           <Image Grid.Column="0" Source="avares://kvindocode/Assets/kvindo-k.png" Width="26" Height="26" VerticalAlignment="Center"/>
           <TextBlock Grid.Column="1" Name="BrandText" Text="Kvindo™ Code" FontWeight="SemiBold" FontSize="15" Margin="10,0,0,0" VerticalAlignment="Center"/>
           <!-- Live process figures: memory held, and how busy/blocked the UI thread is. Filled by UpdateHealth(). -->
-          <TextBlock Grid.Column="3" Name="HealthText" FontSize="11" Opacity="0.55" VerticalAlignment="Center"
-                     Margin="8,0,0,0" TextTrimming="CharacterEllipsis"
+          <TextBlock Grid.Column="2" Name="HealthText" FontSize="11" Opacity="0.55" VerticalAlignment="Center"
+                     Margin="8,0,0,0" HorizontalAlignment="Right" TextTrimming="CharacterEllipsis"
                      ToolTip.Tip="Memory this process holds, and UI-thread load: its CPU share plus the last dispatcher round-trip, which measures blocking even when the CPU is idle."/>
         </Grid>
 

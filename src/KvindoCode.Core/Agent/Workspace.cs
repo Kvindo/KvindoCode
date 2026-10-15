@@ -408,7 +408,55 @@ public static class Workspaces
     /// Git repositories inside <paramref name="root"/> (not including <paramref name="root"/> itself), ignoring the
     /// usual noise. Returns a WORKTREE's repo directory too, which is what the session needs to branch from.
     /// </summary>
+    /// <remarks>
+    /// CACHED per root, because the answer is a property of the FOLDER while the caller is a per-command check: every
+    /// Bash call used to walk the whole tree and stat a <c>.git</c> in each directory. Measured on this machine's
+    /// container project (70 nested repos): <b>10 506 directories, 289 ms</b> of file lookups for each simple
+    /// <c>sed</c>/<c>ls</c>, which is why ordinary commands were reported as slow (asked 2026-10-15). The command
+    /// itself was ~4 ms.
+    ///
+    /// Refreshed by <see cref="InvalidateNested"/>, which the Bash tool calls when a command names a path the cached
+    /// list does not know — so opening a NEW repo (a fresh clone) is still discovered on the command that touches it,
+    /// which is the only moment the answer can change in a way that matters.
+    /// </remarks>
     public static List<string> Nested(string root)
+    {
+        var key = SafeKey(root);
+        if (key is null) return ScanNested(root);
+        lock (NestedGate)
+        {
+            if (NestedCache.TryGetValue(key, out var hit)) return hit;
+        }
+        var fresh = ScanNested(root);
+        lock (NestedGate)
+        {
+            if (NestedCache.Count > 64) NestedCache.Clear();      // a session per root, never a real bound
+            NestedCache[key] = fresh;
+        }
+        return fresh;
+    }
+
+    static readonly Dictionary<string, List<string>> NestedCache = new(StringComparer.Ordinal);
+    static readonly object NestedGate = new();
+
+    /// <summary>Forget the cached repo list for a root, so the next scan sees a repository added since.</summary>
+    public static void InvalidateNested(string root)
+    {
+        var key = SafeKey(root);
+        if (key is null) return;
+        lock (NestedGate) NestedCache.Remove(key);
+    }
+
+    /// <summary>For tests: forget every cached list.</summary>
+    public static void ClearNestedCacheForTest() { lock (NestedGate) NestedCache.Clear(); }
+
+    static string? SafeKey(string root)
+    {
+        try { return Path.GetFullPath(root); } catch { return null; }
+    }
+
+    /// <summary>The scan itself: walk the tree once and remember where the repositories are.</summary>
+    static List<string> ScanNested(string root)
     {
         var found = new List<string>();
         try

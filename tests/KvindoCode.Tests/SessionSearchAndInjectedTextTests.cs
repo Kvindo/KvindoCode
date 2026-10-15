@@ -188,4 +188,37 @@ public sealed class SessionSearchAndInjectedTextTests(ITestOutputHelper o)
             Assert.DoesNotContain("system-reminder", t);
         }
     }
+
+    // ---------------------------------------------------------------- (4) naming the sending session
+
+    /// <summary>
+    /// A cross-session message must name the sender the way a human would, not as a bare id fragment.
+    /// </summary>
+    /// <remarks>
+    /// Asked 2026-10-16: "we need to add session full name for human". The label is read by a MODEL that then decides
+    /// how to treat the message, and "<c>8551e731</c>" told it nothing about who was talking. The title is used, with
+    /// the short id kept beside it so a reply is still addressable; an unidentified or untitled session falls back to
+    /// the id alone rather than to an empty name.
+    /// </remarks>
+    [AvaloniaFact]
+    public async Task A_cross_session_message_names_the_sending_session()
+    {
+        using var sb = new Sandbox();
+        using var app = SecretAuditorRealUiTests.StartUi(sb, new JsonArray { Script.Text("hi") });
+        var all = (List<SessionInfo>)typeof(KvindoCode.App.MainWindow)
+            .GetField("_all", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(app.Window)!;
+        all.Add(new SessionInfo { Id = "8551e731-aaaa-bbbb-cccc-dddddddddddd", Title = "PostgreSQL overview page failure debug", Cwd = sb.Project });
+        all.Add(new SessionInfo { Id = "99999999-1111-2222-3333-444444444444", Title = "Untitled", Cwd = sb.Project });
+
+        var name = typeof(KvindoCode.App.MainWindow).GetMethod("SenderName", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
+        var named = (string)name.Invoke(app.Window, new object[] { "8551e731-aaaa-bbbb-cccc-dddddddddddd" })!;
+        var untitled = (string)name.Invoke(app.Window, new object[] { "99999999-1111-2222-3333-444444444444" })!;
+        var unknown = (string)name.Invoke(app.Window, new object[] { "abcdef12-0000-0000-0000-000000000000" })!;
+        o.WriteLine($"named='{named}' untitled='{untitled}' unknown='{unknown}'");
+
+        Assert.Contains("PostgreSQL overview page failure debug", named);   // the human-readable name
+        Assert.Contains("8551e731", named);                                 // ...and something to reply to
+        Assert.Equal("99999999", untitled);                                 // "Untitled" is not a name
+        Assert.Equal("abcdef12", unknown);                                  // an unknown session still gets an id
+    }
 }

@@ -1989,14 +1989,17 @@ public sealed class SecretAuditorRealUiTests
         Dispatcher.UIThread.RunJobs();
 
         var title = app.Window.FindControl<TextBlock>("TitleText")!;
-        var box = app.Window.FindControl<TextBox>("AskSearchBox")!;
+        // The in-bar FIND BOX was replaced by a button that opens find-in-session in the side panel (2026-10-15, so a
+        // result list has room and can be clicked through). It occupies the same grid column, so this test is about
+        // that column still owning its own space.
+        var box = app.Window.FindControl<Button>("FindBtn")!;
         var status = app.Window.FindControl<TextBlock>("FindStatus")!;
         var project = app.Window.FindControl<TextBlock>("ProjectText")!;
 
         Rect R(Control c) => c.TranslatePoint(new Point(0, 0), app.Window) is { } p
             ? new Rect(p, c.Bounds.Size) : default;
 
-        Assert.True(box.IsVisible, "the find box should be visible at this width");
+        Assert.True(box.IsVisible, "the Find control should be visible at this width");
         // every one of them must have a column to itself: no two rectangles may intersect
         var named = new (string Name, Control C, bool Shown)[]
         {
@@ -2013,13 +2016,8 @@ public sealed class SecretAuditorRealUiTests
         var pin = app.Window.FindControl<Button>("PinBtn")!;
         if (pin.IsVisible) Assert.False(R(box).Intersects(R(pin)), $"box {R(box)} overlaps the pin button {R(pin)}");
 
-        // the status only appears while searching
-        Assert.False(status.IsVisible);
-        box.Text = "needle";
-        Dispatcher.UIThread.RunJobs();
-        Assert.True(status.IsVisible);
-        box.Text = "";
-        Dispatcher.UIThread.RunJobs();
+        // The status label is no longer driven by a box in this bar (the search runs in the panel); it only reports a
+        // jump now, so it starts hidden and nothing in the header turns it on.
         Assert.False(status.IsVisible);
     }
 
@@ -2279,36 +2277,34 @@ public sealed class SecretAuditorRealUiTests
     [AvaloniaFact]
     public async Task The_in_session_search_finds_and_selects_text()
     {
-        // The header box searches this session's transcript with the same regexp engine as the sidebar.
+        // Find moved to the SIDE PANEL and searches the whole stored history (2026-10-15): the in-bar box only walked
+        // the rendered controls, so it could not see messages outside the window or text inside a collapsed tool card.
         using Sandbox sb = new Sandbox();
         using App app = Start(sb, new JsonArray { Says("alpha needle-123 beta needle-456") });
         app.TypeAndSend("look for it");
         await app.WaitForTurnAsync();
         Dispatcher.UIThread.RunJobs();
 
-        var box = app.Window.FindControl<TextBox>("AskSearchBox");
-        Assert.NotNull(box);                                          // the box exists next to the title
-
-        box!.Text = "needle-\\d+";
+        var pane = (KvindoCode.App.Views.RightPane)typeof(KvindoCode.App.MainWindow)
+            .GetField("_pane", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(app.Window)!;
+        pane.SetProject(sb.Project);
+        pane.ShowSearch(app.Session.Session);
+        pane.Measure(new Size(600, 800)); pane.Arrange(new Rect(0, 0, 600, 800));
         Dispatcher.UIThread.RunJobs();
-        var status = app.Window.FindControl<TextBlock>("FindStatus")!;
-        Assert.Contains("/", status.Text ?? "");                       // "1/2"
 
-        // every match is a real selection, so it can be copied
-        var selected = app.Session.Transcript.CurrentHitText();
-        Assert.Contains("needle-", selected);
+        var box = pane.GetVisualDescendants().OfType<TextBox>().First(t => (t.Watermark ?? "").Contains("Find in this session"));
+        box.Text = "needle-\\d+";
+        Dispatcher.UIThread.RunJobs();
+        var rows = pane.GetVisualDescendants().OfType<Button>()
+            .Where(b => b.Content is StackPanel sp && sp.Children.OfType<Grid>().Any()).ToList();
+        Assert.Equal(2, rows.Count);                                  // both matches, from the stored history
 
-        // an invalid regexp falls back to a literal search instead of throwing
+        // an invalid regexp is reported instead of throwing
         box.Text = "needle-(unclosed";
         Dispatcher.UIThread.RunJobs();
-        Assert.Equal("no matches", status.Text);
-
-        // and an empty box clears it
-        box.Text = "";
-        Dispatcher.UIThread.RunJobs();
-        Assert.Equal("", status.Text);
+        var texts = string.Join(" | ", pane.GetVisualDescendants().OfType<TextBlock>().Select(t => t.Text ?? ""));
+        Assert.Contains("Invalid regex", texts);
     }
-
     [AvaloniaFact]
     public async Task A_path_in_a_list_item_is_clickable_not_just_highlighted()
     {
