@@ -37,8 +37,30 @@ public static partial class SecretPlaceholders
     /// Output is byte-identical to the previous implementation either way.
     /// </remarks>
     public static string Protect(string text, IReadOnlyList<(string Name, string Value)> targets)
+        => Protect(text, targets, null);
+
+    /// <summary>
+    /// As <see cref="Protect(string, IReadOnlyList{ValueTuple{string, string}})"/>, but with the caller's masker used as
+    /// an O(text) pre-check.
+    /// </summary>
+    /// <remarks>
+    /// The loop below is inherently per-VALUE: with the 749 values this vault holds it walks every one of them over
+    /// every outbound string, and the audit path applies it to the system prompt, every message and every reasoning
+    /// block on every request — roughly 900 MB of `Contains` scans for a 600 KB context, measured as the dominant
+    /// local pre-send cost left after the detector was memoised (reviewed 2026-10-15). <c>SecretRedactor</c> already
+    /// has the one-pass automaton for exactly this question and <c>Contains</c> was already used that way for the
+    /// "is anything known in here" check; the masking path simply never got it.
+    ///
+    /// Safe because the masker's map is a SUPERSET of <paramref name="targets"/>: it is built from the same
+    /// <c>RedactionTargets()</c> pairs (the escaping step only ever ADDS entries). So "the automaton found nothing"
+    /// means "no target value occurs", the loop would replace nothing, and returning the text untouched is exactly
+    /// what it would have returned — same instance, same bytes.
+    /// </remarks>
+    public static string Protect(string text, IReadOnlyList<(string Name, string Value)> targets, SecretRedactor? redactor)
     {
         if (targets.Count == 0 || text.Length == 0) return text;
+
+        if (redactor is not null && !redactor.Contains(text)) return text;     // one pass instead of one per value
         var result = text;
         for (var i = 0; i < targets.Count; i++)
         {

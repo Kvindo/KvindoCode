@@ -701,8 +701,8 @@ public partial class MainWindow : Window
             try { sv.ReplayOlderRemaining = session.ReplayWindow(ReplayWindowMessages); }
             finally { session.Event -= grab; }
             sv.ReplayLoadedMessages = Math.Min(ReplayWindowMessages, session.HistoryCount);
-            session.Event += e => Dispatcher.UIThread.Post(() => OnEvent(sv, e));
-            ReplayPosts++;
+            session.Event += e => PostEvent(sv, e);
+            ReplayPosts++;                                          // ONE post for the whole batch (see PostEvent)
             _replaying = true;
             try { foreach (var e in collected) OnEvent(sv, e); }
             finally { _replaying = false; }
@@ -711,9 +711,55 @@ public partial class MainWindow : Window
         }
         else
         {
-            session.Event += e => Dispatcher.UIThread.Post(() => OnEvent(sv, e));
+            session.Event += e => PostEvent(sv, e);
         }
         return sv;
+    }
+
+    /// <summary>Events buffered for a session that is not on screen, waiting for one dispatcher turn to drain them.</summary>
+    readonly Dictionary<string, List<AgentEvent>> _pendingEvents = new();
+    /// <summary>How many dispatcher posts applied live events — ONE per buffered batch, not one per event.</summary>
+    internal int EventPosts;
+
+    /// <summary>
+    /// Hand one live event to the UI thread.
+    /// </summary>
+    /// <remarks>
+    /// The session ON SCREEN posts immediately: its events are what the user is watching, and delaying them is a
+    /// regression. Any other session BUFFERS — every event of every session used to take its own dispatcher trip and
+    /// its own <c>OnEvent</c>, and <c>OnEvent</c> builds real controls and rebuilds the sidebar. With nine sessions
+    /// running, the hidden ones were posting thousands of work items per minute for transcripts nobody was looking at,
+    /// starving the one that IS visible (that is the reported "many sessions at once are slower", 2026-10-15). One
+    /// drain per batch keeps every event — nothing is dropped — and applies them in order in a single dispatcher turn.
+    ///
+    /// The same pattern is already used for a replayed history (<see cref="ReplayPosts"/>); this applies it to the
+    /// live stream.
+    /// </remarks>
+    void PostEvent(SessionView sv, AgentEvent e)
+    {
+        if (Dispatcher.UIThread.CheckAccess() && sv == _current) { OnEvent(sv, e); return; }
+        if (sv == _current || _current is null)
+        {
+            EventPosts++;
+            Dispatcher.UIThread.Post(() => OnEvent(sv, e));
+            return;
+        }
+        lock (_pendingEvents)
+        {
+            if (!_pendingEvents.TryGetValue(sv.Id, out var list)) _pendingEvents[sv.Id] = list = new List<AgentEvent>();
+            list.Add(e);
+            if (list.Count > 1) return;                     // a drain for this session is already queued
+        }
+        EventPosts++;
+        Dispatcher.UIThread.Post(() => DrainEvents(sv));
+    }
+
+    /// <summary>Apply everything buffered for a session, in order, in ONE dispatcher turn.</summary>
+    void DrainEvents(SessionView sv)
+    {
+        List<AgentEvent> batch;
+        lock (_pendingEvents) { if (!_pendingEvents.Remove(sv.Id, out batch!)) return; }
+        foreach (var e in batch) OnEvent(sv, e);
     }
 
     /// <summary>True while a replay batch is being applied: sidebar rebuilds are deferred to the end of the batch.</summary>

@@ -86,8 +86,49 @@ A value must never be written into a message or a tool result. `Secrets get` wri
         return sb.ToString();
     }
 
-    /// <summary>The branch a worktree is on, or "" when it cannot be read.</summary>
-    static string BranchName(string cwd)
+    /// <summary>The branch a worktree is on, or "" when it cannot be read. Cached per directory (see <see cref="GitInfo"/>).</summary>
+    static string BranchName(string cwd) => GitBranch(cwd);
+
+    /// <summary>
+    /// The current branch of <paramref name="cwd"/>, cached per directory for a few seconds.
+    /// </summary>
+    /// <remarks>
+    /// <c>Process.Start("git", …)</c> FORKS THE WHOLE PROCESS — this is an Avalonia/dotnet desktop app, so it is not a
+    /// cheap 1 ms exec but a copy of a several-hundred-MB address space. The system prompt is rebuilt for every model
+    /// call, and the isolated-worktree case calls this twice per call (once through <see cref="GitInfo"/>, once through
+    /// <see cref="BranchName"/>), so a long turn forked the app two times per round, under whatever load the sessions
+    /// themselves created (found while investigating "many sessions at once are slow", 2026-10-15).
+    ///
+    /// The branch changes when the user commits or switches branches, which cannot matter AT ALL inside a 5-second
+    /// window of prompt building, and a stale "yes/no + branch" line in the environment block is harmless — but the
+    /// cache is short-lived anyway so a genuine switch shows up almost immediately. Entries are per absolute directory
+    /// and the table is tiny (one per open session), so it cannot grow.
+    /// </remarks>
+    static string GitBranch(string cwd)
+    {
+        var key = $"{cwd}\u0000{Environment.ProcessId}";
+        lock (GitCacheGate)
+        {
+            if (GitCache.TryGetValue(key, out var hit) && (DateTime.UtcNow - hit.At).TotalSeconds < GitCacheSeconds)
+                return hit.Branch;
+        }
+        var branch = ReadBranch(cwd);
+        lock (GitCacheGate)
+        {
+            if (GitCache.Count > 256) GitCache.Clear();          // a session per entry, never a real bound
+            GitCache[key] = (DateTime.UtcNow, branch);
+        }
+        return branch;
+    }
+
+    static readonly Dictionary<string, (DateTime At, string Branch)> GitCache = new(StringComparer.Ordinal);
+    static readonly object GitCacheGate = new();
+    const int GitCacheSeconds = 5;
+
+    /// <summary>For tests: forget what is cached, so a directory's branch is read again.</summary>
+    public static void ClearGitCacheForTest() { lock (GitCacheGate) GitCache.Clear(); }
+
+    static string ReadBranch(string cwd)
     {
         try
         {
@@ -166,19 +207,39 @@ Workflow:
 If the user rejects the plan with feedback, revise it and call ExitPlanMode again.
 """;
 
+    /// <summary>The branch shown in the environment block, or null outside a git work tree. Shares the cached lookup.</summary>
     static string? GitInfo(string cwd)
+    {
+        var branch = GitBranch(cwd);
+        // ReadBranch returns "" for both "git failed" and "detached HEAD", so ask git once whether this IS a repo when
+        // the answer is empty; that second question is cheap only in the rare no-repo case and is cached with it.
+        if (branch.Length > 0) return branch;
+        lock (GitCacheGate)
+            if (GitCache.TryGetValue($"{cwd}\u0000{Environment.ProcessId}\u0000repo", out var known) && (DateTime.UtcNow - known.At).TotalSeconds < GitCacheSeconds)
+                return known.Branch.Length > 0 ? known.Branch : null;
+        var isRepo = IsGitWorkTree(cwd);
+        lock (GitCacheGate)
+        {
+            if (GitCache.Count > 256) GitCache.Clear();
+            GitCache[$"{cwd}\u0000{Environment.ProcessId}\u0000repo"] = (DateTime.UtcNow, isRepo ? "yes" : "");
+        }
+        return isRepo ? "HEAD" : null;
+    }
+
+    static bool IsGitWorkTree(string cwd)
     {
         try
         {
             var psi = new ProcessStartInfo("git") { RedirectStandardOutput = true, RedirectStandardError = true, WorkingDirectory = cwd };
-            foreach (var a in new[] { "rev-parse", "--abbrev-ref", "HEAD" }) psi.ArgumentList.Add(a);
+            psi.ArgumentList.Add("rev-parse");
+            psi.ArgumentList.Add("--is-inside-work-tree");
             using var p = Process.Start(psi);
-            if (p is null) return null;
+            if (p is null) return false;
             var o = p.StandardOutput.ReadToEnd().Trim();
             p.StandardError.ReadToEnd();
-            if (!p.WaitForExit(3000)) { try { p.Kill(true); } catch { } return null; }
-            return p.ExitCode == 0 && o.Length > 0 ? o : null;
+            if (!p.WaitForExit(3000)) { try { p.Kill(true); } catch { } return false; }
+            return p.ExitCode == 0 && o == "true";
         }
-        catch { return null; }
+        catch { return false; }
     }
 }
