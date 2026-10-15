@@ -47,6 +47,33 @@ public sealed class AgentSession : IDisposable
     static readonly System.Text.RegularExpressions.Regex ReminderRx = new(@"\n*<system-reminder>.*?</system-reminder>", System.Text.RegularExpressions.RegexOptions.Singleline | System.Text.RegularExpressions.RegexOptions.Compiled);
     public static string StripReminders(string? s) => ReminderRx.Replace(s ?? "", "").Trim();
 
+    /// <summary>
+    /// What the human actually WROTE, for showing their own message again.
+    /// </summary>
+    /// <remarks>
+    /// The stored user message is not the user's words: the outbound content is built by wrapping them in the
+    /// UserPromptSubmit hook context, the configured prompt PREFIX and prompt SUFFIX, and (for a scheduled turn) a
+    /// reminder — all of which must go to the model, and none of which the human wrote. The live turn emits the clean
+    /// text, but REPLAY read it back out of the transcript, so opening an old session showed the injected text glued
+    /// to the user's own message (reported 2026-10-15: "when i open old session and read my messages i see text that
+    /// was injected after prompt. I should not see that").
+    ///
+    /// The prefix/suffix are matched against the CURRENT settings. A session whose settings have since changed keeps
+    /// those older words — that is the honest limit of not storing the original text separately, and it is strictly
+    /// better than showing it every time.
+    /// </remarks>
+    string DisplayUserText(string? stored)
+    {
+        var text = StripReminders(stored);
+        var pre = _settings.PromptPrefix?.Trim();
+        if (!string.IsNullOrEmpty(pre) && text.StartsWith(pre, StringComparison.Ordinal))
+            text = text[pre.Length..].TrimStart();
+        var suf = _settings.PromptSuffix?.Trim();
+        if (!string.IsNullOrEmpty(suf) && text.EndsWith(suf, StringComparison.Ordinal))
+            text = text[..^suf.Length].TrimEnd();
+        return text;
+    }
+
     JsonObject HookPayload(JsonObject? extra = null)
     {
         var o = extra ?? new JsonObject();
@@ -1178,16 +1205,16 @@ public sealed class AgentSession : IDisposable
                 case "user":
                     if (m.IsSummary || m.IsInternal) break;
                     if (m.IsNotification) Emit(new TaskNoticeEvent(0, "background tasks", StripTags(m.Content ?? ""), false));
-                    else Emit(new UserMessageEvent(StripReminders(m.Content), hIdx, Replayed: true));
+                    else Emit(new UserMessageEvent(DisplayUserText(m.Content), hIdx, Replayed: true));
                     break;
                 case "assistant":
                     if (!string.IsNullOrEmpty(m.Reasoning)) Emit(new ThinkingDeltaEvent(m.Reasoning));
-                    if (!string.IsNullOrEmpty(m.Content)) Emit(new TextDeltaEvent(m.Content));
-                    Emit(new AssistantMessageEndEvent());
+                    if (!string.IsNullOrEmpty(m.Content)) Emit(new TextDeltaEvent(m.Content, hIdx));
+                    Emit(new AssistantMessageEndEvent(hIdx));
                     foreach (var tc in m.ToolCalls ?? new())
                     {
                         calls[tc.Id] = tc; open.Add(tc.Id);
-                        Emit(new ToolStartEvent(tc.Id, tc.Name, ParseArgs(tc.Arguments)));
+                        Emit(new ToolStartEvent(tc.Id, tc.Name, ParseArgs(tc.Arguments), hIdx));
                     }
                     break;
                 case "tool":
@@ -1223,16 +1250,16 @@ public sealed class AgentSession : IDisposable
                 case "user":
                     if (m.IsSummary || m.IsInternal) break;
                     if (m.IsNotification) Emit(new TaskNoticeEvent(0, "background tasks", StripTags(m.Content ?? ""), false));
-                    else Emit(new UserMessageEvent(StripReminders(m.Content), hIdx, Replayed: true));
+                    else Emit(new UserMessageEvent(DisplayUserText(m.Content), hIdx, Replayed: true));
                     break;
                 case "assistant":
                     if (!string.IsNullOrEmpty(m.Reasoning)) Emit(new ThinkingDeltaEvent(m.Reasoning));
-                    if (!string.IsNullOrEmpty(m.Content)) Emit(new TextDeltaEvent(m.Content));
-                    Emit(new AssistantMessageEndEvent());
+                    if (!string.IsNullOrEmpty(m.Content)) Emit(new TextDeltaEvent(m.Content, hIdx));
+                    Emit(new AssistantMessageEndEvent(hIdx));
                     foreach (var tc in m.ToolCalls ?? new())
                     {
                         calls[tc.Id] = tc; open.Add(tc.Id);
-                        Emit(new ToolStartEvent(tc.Id, tc.Name, ParseArgs(tc.Arguments)));
+                        Emit(new ToolStartEvent(tc.Id, tc.Name, ParseArgs(tc.Arguments), hIdx));
                     }
                     break;
                 case "tool":
@@ -1960,6 +1987,81 @@ public sealed class AgentSession : IDisposable
     // ---------------------------------------------------------------- rewind & fork
 
     public int HistoryCount { get { lock (_lock) return _history.Count; } }
+
+    /// <summary>For tests: append a message to the conversation exactly as <c>Add</c> would (no turn machinery).</summary>
+    internal void AddMessageForTest(ChatMessage m) => Add(m);
+
+    /// <summary>For tests: the conversation's messages, newest last.</summary>
+    internal List<ChatMessage> HistoryMessages()
+    {
+        lock (_lock) return _history.Where(e => e.Kind == "msg" && e.M is not null).Select(e => e.M!).ToList();
+    }
+
+    /// <summary>
+    /// Search EVERY message this session ever had, not just the ones the transcript has rendered.
+    /// </summary>
+    /// <remarks>
+    /// The in-transcript find walked the on-screen CONTROLS, which misses two classes of text by construction:
+    /// messages outside the rendered window (older messages load on demand — a real session here holds ~4000), and
+    /// anything inside a collapsed tool card, whose body is <c>IsVisible = false</c> and therefore not in the visual
+    /// tree at all. Reported 2026-10-15 as "find in session seems not search all messages". Reading <c>_history</c>
+    /// is the honest source: it is what was stored, so nothing can be missed for layout reasons.
+    ///
+    /// A brief window of context is returned per hit, flattened to one line, so a result list can show WHY it matched
+    /// without re-reading anything.
+    /// </remarks>
+    public SessionSearchHits SearchHistory(string pattern, int max = 500)
+    {
+        if (string.IsNullOrWhiteSpace(pattern)) return SessionSearchHits.None();
+        System.Text.RegularExpressions.Regex rx;
+        try { rx = new System.Text.RegularExpressions.Regex(pattern, System.Text.RegularExpressions.RegexOptions.IgnoreCase); }
+        catch (Exception e) { return SessionSearchHits.None("Invalid regex: " + e.Message); }
+
+        List<Entry> snapshot;
+        lock (_lock) snapshot = _history.ToList();
+        var hits = new List<SessionSearchHit>();
+        var idx = -1;
+        foreach (var e in snapshot)
+        {
+            if (e.Kind != "msg" || e.M is null) continue;
+            idx++;
+            var m = e.M;
+            // Internal plumbing (hook context, screenshots, reminders, compaction summaries) is not the conversation.
+            if (m.IsInternal || m.IsSummary) continue;
+            foreach (var (text, role) in Searchable(m))
+            {
+                if (string.IsNullOrEmpty(text)) continue;
+                foreach (System.Text.RegularExpressions.Match mm in rx.Matches(text))
+                {
+                    if (mm.Length == 0) continue;
+                    hits.Add(new SessionSearchHit(role, idx, m.Ts, Flatten(text, mm.Index - 60, mm.Index), mm.Value, Flatten(text, mm.Index + mm.Length, -1, 60)));
+                    if (hits.Count >= max) return new SessionSearchHits(hits);
+                }
+            }
+        }
+        return new SessionSearchHits(hits);
+    }
+
+    /// <summary>The searchable text of one message: content, reasoning and the tool call it made.</summary>
+    static IEnumerable<(string Text, string Role)> Searchable(ChatMessage m)
+    {
+        if (!string.IsNullOrEmpty(m.Content)) yield return (m.Content!, m.Role);
+        if (!string.IsNullOrEmpty(m.Reasoning)) yield return (m.Reasoning!, m.Role);
+        foreach (var tc in m.ToolCalls ?? new()) if (!string.IsNullOrEmpty(tc.Arguments)) yield return (tc.Arguments!, "tool");
+    }
+
+    /// <summary>A single-line window of <paramref name="text"/>: up to 60 characters either side, newlines flattened.</summary>
+    static string Flatten(string text, int from, int matchStart, int take = 60)
+    {
+        var start = Math.Max(0, from);
+        // matchStart < 0 means "just take `take` characters from `start`" (the trailing half of a hit)
+        var len = matchStart >= 0 ? matchStart - start : Math.Min(take, text.Length - start);
+        len = Math.Max(0, Math.Min(len, text.Length - start));
+        var slice = text.Substring(start, len);
+        if (start > 0) slice = "…" + slice;
+        if (start + len < text.Length) slice += "…";
+        return slice.Replace("\r", "").Replace("\n", " ⏎ ");
+    }
 
     public bool IsUserTurnStart(int idx)
     {

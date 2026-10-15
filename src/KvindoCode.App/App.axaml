@@ -24,6 +24,15 @@
     <Style Selector="Border.composer:focus-within">
       <Setter Property="BorderBrush" Value="{DynamicResource KvAccent}"/>
     </Style>
+    <!-- A message a find-in-session result jumped to: a brief outline so it is obvious WHICH message matched. -->
+    <Style Selector=":is(Border).searchhit">
+      <Setter Property="BorderBrush" Value="{DynamicResource KvAccent}"/>
+      <Setter Property="BorderThickness" Value="2"/>
+      <Setter Property="CornerRadius" Value="10"/>
+    </Style>
+    <Style Selector=":is(SelectableTextBlock).searchhit">
+      <Setter Property="Background" Value="{DynamicResource KvAccent}"/>
+    </Style>
     <Style Selector="Border.userbubble">
       <Setter Property="Background" Value="{DynamicResource KvUserBubble}"/>
       <Setter Property="CornerRadius" Value="14"/>

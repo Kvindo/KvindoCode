@@ -1,0 +1,139 @@
+using System.Diagnostics;
+using System.Reflection;
+using System.Text.RegularExpressions;
+using Avalonia.Controls;
+using Avalonia.Headless.XUnit;
+using Avalonia.Media.Imaging;
+using Avalonia.Platform;
+using Avalonia.Threading;
+using KvindoCode.App;
+using Xunit;
+using Xunit.Abstractions;
+
+namespace KvindoCode.Tests;
+
+/// <summary>
+/// The sidebar header: the Kvindo mark, the "Kvindo™ Code" wordmark, and the live process figures beside it.
+/// </summary>
+/// <remarks>
+/// Asked for 2026-10-15: replace the logo with "kvindo icon from cloud project", and after the name show "app's memory
+/// usage and UI thread cpu usage". Both are UI-only facts, so they are asserted on the real window rather than on a
+/// helper.
+/// </remarks>
+public sealed class HeaderHealthAndBrandTests(ITestOutputHelper o)
+{
+    static TextBlock Health(MainWindow w)
+        => (TextBlock?)typeof(MainWindow).GetField("HealthText", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public)?.GetValue(w)
+           ?? w.FindControl<TextBlock>("HealthText") ?? throw new InvalidOperationException("the header health label is gone");
+
+    static void Sample(MainWindow w)
+    {
+        typeof(MainWindow).GetMethod("ProbeUiLag", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(w, null);
+        Dispatcher.UIThread.RunJobs();
+        typeof(MainWindow).GetMethod("UpdateHealth", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(w, null);
+    }
+
+    /// <summary>The header carries the Kvindo mark (not a letter in a box) and the trademarked name.</summary>
+    [AvaloniaFact]
+    public void The_header_shows_the_kvindo_mark_and_the_trademarked_name()
+    {
+        using var sb = new Sandbox();
+        using var app = SecretAuditorRealUiTests.StartUi(sb, new System.Text.Json.Nodes.JsonArray { Script.Text("hi") });
+        var brand = app.Window.FindControl<TextBlock>("BrandText");
+        Assert.NotNull(brand);
+        Assert.Equal("Kvindo™ Code", brand!.Text);
+
+        // and the header really shows an Image bound to the mark asset
+        var img = brand.Parent is Grid g ? g.Children.OfType<Image>().FirstOrDefault() : null;
+        Assert.NotNull(img);
+        Assert.NotNull(img!.Source);
+
+        // The asset itself is the check that means something: headless drawing DECODES A 1x1 STUB (measured), so
+        // asserting Bitmap.PixelSize here would pass for any file at all. Read the PNG header of the bytes avares
+        // serves — exactly the bytes that ship in the app.
+        using var stream = AssetLoader.Open(new Uri("avares://kvindocode/Assets/kvindo-k.png"));
+        var head = new byte[24];
+        stream.ReadExactly(head);
+        Assert.Equal(new byte[] { 0x89, 0x50, 0x4E, 0x47 }, head[..4]);       // it IS a PNG
+        var w = (head[16] << 24) | (head[17] << 16) | (head[18] << 8) | head[19];
+        var h = (head[20] << 24) | (head[21] << 16) | (head[22] << 8) | head[23];
+        o.WriteLine($"mark: {w}x{h}");
+        Assert.True(w >= 64 && w == h, $"the mark asset is {w}x{h} — expected a square of at least 64px");
+    }
+
+    /// <summary>The window icon asset was replaced with the Kvindo mark and still loads.</summary>
+    [AvaloniaFact]
+    public void The_window_icon_is_the_kvindo_mark()
+    {
+        using var stream = AssetLoader.Open(new Uri("avares://kvindocode/Assets/icon.png"));
+        var head = new byte[24];
+        stream.ReadExactly(head);
+        Assert.Equal(new byte[] { 0x89, 0x50, 0x4E, 0x47 }, head[..4]);
+        var w = (head[16] << 24) | (head[17] << 16) | (head[18] << 8) | head[19];
+        var h = (head[20] << 24) | (head[21] << 16) | (head[22] << 8) | head[23];
+        o.WriteLine($"window icon: {w}x{h}");
+        Assert.Equal(512, w);
+        Assert.Equal(w, h);                                          // square: the mark is 1:1
+    }
+
+    /// <summary>The header shows a real memory figure and a real UI-thread figure.</summary>
+    [AvaloniaFact]
+    public void The_header_shows_memory_and_ui_thread_load()
+    {
+        using var sb = new Sandbox();
+        using var app = SecretAuditorRealUiTests.StartUi(sb, new System.Text.Json.Nodes.JsonArray { Script.Text("hi") });
+        var text = Health(app.Window);
+
+        Sample(app.Window);
+        o.WriteLine("header: " + text.Text);
+        Assert.Matches(new Regex(@"^RAM \d+(\.\d)?[MKGT]"), text.Text ?? "");
+        Assert.Contains("UI ", text.Text);
+
+        // The figure must be THIS process's memory, not a constant and not another process's. Compare against the
+        // process directly (the previous "hold 48 MB and watch it grow" attempt was vacuous: a short-lived allocation
+        // does not have to move the resident set of a GC heap at all).
+        using var proc = System.Diagnostics.Process.GetCurrentProcess();
+        proc.Refresh();
+        var shown = ParseRam(text.Text!);
+        var real = proc.WorkingSet64 / (double)(1L << 20);
+        o.WriteLine($"header says {shown:0}M, this process holds {real:0}M");
+        Assert.InRange(shown, real * 0.9, real * 1.1);
+    }
+
+    /// <summary>
+    /// The UI-thread figure has to be LIVE: a busy UI thread must show a non-zero percentage. Without this the number
+    /// could be a hard-coded zero — which is exactly what a readout of a broken measurement looks like.
+    /// </summary>
+    [AvaloniaFact]
+    public async Task A_busy_ui_thread_shows_a_nonzero_load()
+    {
+        using var sb = new Sandbox();
+        using var app = SecretAuditorRealUiTests.StartUi(sb, new System.Text.Json.Nodes.JsonArray { Script.Text("hi") });
+        var w = app.Window;
+        var load = () => (double?)typeof(MainWindow).GetMethod("UiThreadLoadPercent", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(w, null);
+
+        // Two samples: the first only opens a measurement window, the second reports it.
+        Sample(w); await Task.Delay(300); var idle = load();
+        o.WriteLine($"idle: {idle}");
+        Assert.True(idle is >= 0 and < 90, $"an idle UI thread reported {idle}%");
+
+        // Burn the UI thread for ~500 ms, then take the next sample: the delta must show it.
+        Dispatcher.UIThread.Invoke(() =>
+        {
+            var sw = Stopwatch.StartNew();
+            while (sw.ElapsedMilliseconds < 500) { /* deliberately busy */ }
+        });
+        var busy = load();
+        o.WriteLine($"after burning the UI thread for 500 ms: {busy}");
+        Assert.True(busy > 20, $"the UI thread was busy for 500 ms but the figure reads {busy}% — it is not measuring");
+    }
+
+    /// <summary>The RAM figure out of the header text, in megabytes.</summary>
+    static double ParseRam(string text)
+    {
+        var m = Regex.Match(text, @"^RAM (\d+(?:\.\d)?)([MKGT])");
+        Assert.True(m.Success, $"no RAM figure in \"{text}\"");
+        var v = double.Parse(m.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture);
+        return m.Groups[2].Value switch { "K" => v / 1024, "M" => v, "G" => v * 1024, _ => v * 1024 * 1024 };
+    }
+}

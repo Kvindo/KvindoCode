@@ -17,6 +17,23 @@ public enum SessionMode { Normal, Delegate }
 /// <summary>What a tool is under the Delegate mode: always allowed (talk/ask), a subagent tool, or a direct action (blocked).
 public enum SessionToolRole { Always, Subagent, Direct }
 
+/// <summary>One match of a find-in-session query: the message it is in, its position, and the text around it.</summary>
+/// <param name="HistoryIndex">Index into the session history, so the UI can jump to (and load) that message.</param>
+/// <param name="Before">Up to ~60 characters before the match, with any newline flattened.</param>
+/// <param name="Match">The matched text itself.</param>
+/// <param name="After">Up to ~60 characters after the match.</param>
+public sealed record SessionSearchHit(string Role, int HistoryIndex, DateTimeOffset When, string Before, string Match, string After)
+{
+    public int Index => HistoryIndex;
+}
+
+/// <summary>Result of a history search: the hits, and why there are none when the pattern was rejected.</summary>
+public sealed record SessionSearchHits(IReadOnlyList<SessionSearchHit> Hits, string Error = "")
+{
+    public int Count => Hits.Count;
+    public static SessionSearchHits None(string error = "") => new(Array.Empty<SessionSearchHit>(), error);
+}
+
 public sealed record TodoItem(string Content, string ActiveForm, string Status);
 
 public sealed record QuestionOption(string Label, string Description);
@@ -65,11 +82,13 @@ public sealed record WaitingForUserEvent(string Kind) : AgentEvent;
 public sealed record UserMessageEvent(string Text, int HistoryIndex = -1, bool Replayed = false) : AgentEvent;   // Replayed = shown again from the saved history, NOT something written just now
 /// <summary>Short status text for the working indicator (e.g. a hook's status message).</summary>
 public sealed record PhaseEvent(string Text) : AgentEvent;
-public sealed record TextDeltaEvent(string Text) : AgentEvent;
+/// <param name="HistoryIndex">Which history message this delta belongs to, or -1 for a LIVE turn. The transcript
+/// uses it so a find-in-session result can scroll to the message it matched; a live turn has no such index.</param>
+public sealed record TextDeltaEvent(string Text, int HistoryIndex = -1) : AgentEvent;
 public sealed record ThinkingDeltaEvent(string Text) : AgentEvent;
-public sealed record AssistantMessageEndEvent : AgentEvent;
+public sealed record AssistantMessageEndEvent(int HistoryIndex = -1) : AgentEvent;
 public sealed record ToolPendingEvent(string Id, string Name) : AgentEvent;
-public sealed record ToolStartEvent(string Id, string Name, JsonObject? Input) : AgentEvent;
+public sealed record ToolStartEvent(string Id, string Name, JsonObject? Input, int HistoryIndex = -1) : AgentEvent;
 public sealed record ToolEndEvent(string Id, string Name, string Output, bool IsError, long DurationMs) : AgentEvent;
 public sealed record ModeChangedEvent(PermissionMode Mode) : AgentEvent;
 public sealed record WorkModeChangedEvent(SessionMode Mode) : AgentEvent;

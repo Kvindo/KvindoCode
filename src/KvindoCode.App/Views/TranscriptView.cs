@@ -343,8 +343,25 @@ public sealed class TranscriptView : UserControl
     void Add(Control c)
     {
         _stack.Children.Add(c);
+        _msgOf.Add((c, _curMsgIndex));
         if (_stick) ScrollToEndSoon();
     }
+
+    /// <summary>Which history message each rendered control belongs to, and the index being appended right now.</summary>
+    /// <remarks>
+    /// Used by find-in-session results to scroll to the message a hit is in. Only populated while a REPLAY runs (the
+    /// indices come from <see cref="AgentSession.ReplayWindow"/>, which reports the history position of the message it
+    /// emits) — a live turn has no such index, which is why <see cref="RevealMessage"/> refuses when the map is not
+    /// complete rather than scrolling to the wrong place.
+    /// </remarks>
+    readonly List<(Control Control, int Index)> _msgOf = new();
+    int _curMsgIndex = -1;
+    /// <summary>True when every control on screen came from a replay window, so indices can be trusted.</summary>
+    public bool Indexed { get; private set; }
+    /// <summary>True while a replayed batch is being applied: a TurnStart inside a replayed history is history too.</summary>
+    bool _replayingNow;
+    /// <summary>The caller sets this around a replayed batch, so index bookkeeping is not cleared by history itself.</summary>
+    public bool ReplayingNow { get => _replayingNow; set => _replayingNow = value; }
 
     // ------------------------------------------------------------------ interaction hooks (called by UiInteraction)
 
@@ -380,6 +397,7 @@ public sealed class TranscriptView : UserControl
         switch (e)
         {
             case TurnStartEvent:
+                if (!_replayingNow) ResetIndexing();         // a live turn: the index map no longer describes the screen
                 _turnWatch.Restart(); _streamChars = 0; _phase = "Working"; _statusBar.IsVisible = true;
                 _glyphPulse?.Cancel(); _glyphPulse = Ui.Pulse(_statusGlyph); UpdateStatus(); break;
             case TurnEndEvent:
@@ -393,8 +411,9 @@ public sealed class TranscriptView : UserControl
                         stuck.SetResult("The model call failed before this tool ran — it was not executed.", true, 0);
                 _pendingToolIds.Clear();
                 break;
-            case UserMessageEvent u: CloseText(); Add(UserBubble(u.Text, u.HistoryIndex)); _lastMsgTs = DateTimeOffset.UtcNow; _stick = true; ScrollToEndSoon(); break;
+            case UserMessageEvent u: CloseText(); _curMsgIndex = u.HistoryIndex; AddIndexed(UserBubble(u.Text, u.HistoryIndex), u.HistoryIndex); _lastMsgTs = DateTimeOffset.UtcNow; _stick = true; ScrollToEndSoon(); break;
             case TextDeltaEvent t:
+                if (t.HistoryIndex >= 0) _curMsgIndex = t.HistoryIndex;
                 if (_text is null)
                 {
                     EndThinking();
@@ -405,13 +424,13 @@ public sealed class TranscriptView : UserControl
                 }
                 _textBuf.Append(t.Text); _textDirty = true; _streamChars += t.Text.Length; SetPhase("Writing"); break;
             case ThinkingDeltaEvent th: AppendThinking(th.Text); _streamChars += th.Text.Length; SetPhase("Thinking"); break;
-            case AssistantMessageEndEvent: CloseText(); EndThinking(); _lastMsgTs = DateTimeOffset.UtcNow; break;
+            case AssistantMessageEndEvent ae: if (ae.HistoryIndex >= 0) _curMsgIndex = ae.HistoryIndex; CloseText(); EndThinking(); _lastMsgTs = DateTimeOffset.UtcNow; break;
             case ToolPendingEvent p:
                 // do NOT close the text block here — the model may still be streaming text alongside the tool call
                 if (!_tools.ContainsKey(p.Id) && p.Name is not "ExitPlanMode" and not "AskUserQuestion" and not "TodoWrite")
                 { var c = NewToolCard(p.Id, p.Name); _tools[p.Id] = c; _pendingToolIds.Add(p.Id); Add(c); }
                 break;
-            case ToolStartEvent s: CloseText(); EndThinking(); OnToolStart(s); SetPhase(s.Name switch { "ExitPlanMode" => "Waiting for your approval", "AskUserQuestion" => "Waiting for your answer", _ => "Running " + s.Name }); break;
+            case ToolStartEvent s: CloseText(); EndThinking(); if (s.HistoryIndex >= 0) _curMsgIndex = s.HistoryIndex; OnToolStart(s); SetPhase(s.Name switch { "ExitPlanMode" => "Waiting for your approval", "AskUserQuestion" => "Waiting for your answer", _ => "Running " + s.Name }); break;
             case ToolEndEvent d: OnToolEnd(d); SetPhase("Working"); break;
             case NoticeEvent n: Add(Notice(n)); break;
             case CompactedEvent c: CloseText(); Add(CompactMarker(c.Summary)); break;
@@ -483,6 +502,42 @@ public sealed class TranscriptView : UserControl
             if (_thinkBody.Text != t) _thinkBody.Text = t;
         }
     }
+
+    /// <summary>Append a control that belongs to a known history message.</summary>
+    void AddIndexed(Control c, int historyIndex)
+    {
+        _stack.Children.Add(c);
+        _msgOf.Add((c, historyIndex));
+        if (_stick) ScrollToEndSoon();
+    }
+
+    /// <summary>Forget the message map: a live turn starts, so nothing on screen is a replayed index any more.</summary>
+    public void ResetIndexing() { Indexed = false; _msgOf.Clear(); _curMsgIndex = -1; }
+
+    /// <summary>Begin a batch of replayed messages, so their controls record the history index they came from.</summary>
+    public void BeginIndexedReplay() { Indexed = true; _msgOf.Clear(); }
+
+    /// <summary>
+    /// Scroll to the control of history message <paramref name="historyIndex"/> and select its first characters.
+    /// </summary>
+    /// <remarks>
+    /// False when that message is not on screen (older ones load on demand) or the map cannot be trusted (a live turn
+    /// ran since the replay), so the caller knows to load earlier messages first rather than scrolling somewhere else.
+    /// </remarks>
+    public bool RevealMessage(int historyIndex)
+    {
+        if (!Indexed || historyIndex < 0) return false;
+        if (!_msgOf.Any(x => x.Index == historyIndex)) return false;
+        var ctrl = _msgOf.First(x => x.Index == historyIndex).Control;
+        _stick = false;                                    // jumping must not snap back to the bottom
+        ctrl.BringIntoView();
+        // light it up so the user can see WHICH message the result was in
+        _highlighted?.Classes.Remove("searchhit");
+        _highlighted = ctrl;
+        ctrl.Classes.Add("searchhit");
+        return true;
+    }
+    Control? _highlighted;
 
     void CloseText()
     {

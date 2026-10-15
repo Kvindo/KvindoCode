@@ -30,8 +30,18 @@ public sealed class RightPane : UserControl
     // "Files" shows the project tree with the current file selected, so other files can be browsed from a path
     // (asked 2026-10-07). Added last so it never steals the default selection from Plan/Details/File.
     readonly Button _filesTab = new() { Content = "Files", Classes = { "pill" }, IsVisible = true };
+    // "Search": find inside THIS session. It lives in the panel rather than in the bar because a result list needs room
+    // and you want to click through results (asked 2026-10-15: "I want find in session open in right pannel so that i
+    // can more easily select search results like in global session search").
+    readonly Button _searchTab = new() { Content = "Find", Classes = { "pill" }, IsVisible = false };
     readonly ContentControl _body = new();
     readonly TextBlock _title = new() { FontWeight = FontWeight.SemiBold, FontSize = 13, TextTrimming = TextTrimming.CharacterEllipsis, VerticalAlignment = VerticalAlignment.Center };
+
+    AgentSession? _session;                       // the session whose history Search reads
+    readonly TextBox _findBox = new() { Watermark = "Find in this session (regex)…", FontSize = 12.5, MinHeight = 32, VerticalContentAlignment = VerticalAlignment.Center };
+    readonly TextBlock _findStatus = new() { FontSize = 11.5, Classes = { "muted" }, Margin = new Thickness(2, 4, 2, 0) };
+    readonly StackPanel _findList = new() { Spacing = 4 };
+    readonly ScrollViewer _findScroll = new() { HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Disabled };
 
     string? _plan; double _fontSize = 14;
     ToolDetail? _detail; string _cwd = "";
@@ -42,13 +52,14 @@ public sealed class RightPane : UserControl
     readonly List<(Button Button, string Kind)> _pills = new();
 
     public string Active => _active;
-    public bool HasContent => _plan != null || _detail != null || _file != null || _agent != null || _context != null;
+    /// <summary>True when the panel is showing something (so the window knows it does not need the hint).</summary>
+    public bool HasContent => _plan != null || _detail != null || _file != null || _agent != null || _context != null || _session != null;
 
     public RightPane()
     {
         var close = new Button { Classes = { "ghost" }, Content = Ui.Icon("IconX", "KvMuted", 13, 2), Padding = new Thickness(6), VerticalAlignment = VerticalAlignment.Center };
         close.Click += (_, _) => CloseRequested?.Invoke();
-        var tabs = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 2, Children = { _planTab, _detailTab, _fileTab, _filesTab }, VerticalAlignment = VerticalAlignment.Center };
+        var tabs = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 2, Children = { _planTab, _detailTab, _fileTab, _searchTab, _filesTab }, VerticalAlignment = VerticalAlignment.Center };
         var header = new Grid { ColumnDefinitions = new ColumnDefinitions("Auto,*,Auto"), Margin = new Thickness(10, 0, 6, 0), Height = 52 };
         header.Children.Add(tabs);
         _title.Margin = new Thickness(10, 0); Grid.SetColumn(_title, 1); header.Children.Add(_title);
@@ -64,9 +75,11 @@ public sealed class RightPane : UserControl
         _detailTab.Click += (_, _) => Activate("detail");
         _fileTab.Click += (_, _) => Activate("file");
         _filesTab.Click += (_, _) => { _active = "files"; BuildFiles(); };
+        _searchTab.Click += (_, _) => Activate("search");
         // Activate highlights the pills through this list; a missing entry means the Files pill stays highlighted
         // after another tab is chosen.
-        _pills.Add((_planTab, "plan")); _pills.Add((_detailTab, "detail")); _pills.Add((_fileTab, "file")); _pills.Add((_filesTab, "files"));
+        _pills.Add((_planTab, "plan")); _pills.Add((_detailTab, "detail")); _pills.Add((_fileTab, "file"));
+        _pills.Add((_searchTab, "search")); _pills.Add((_filesTab, "files"));
         // Files is the default view: something useful is shown before any file or tool is opened.
         Activate("files");
     }
@@ -77,6 +90,7 @@ public sealed class RightPane : UserControl
     {
         _plan = null; _detail = null; _file = null; _agent = null; _context = null; _active = "";
         _planTab.IsVisible = _detailTab.IsVisible = _fileTab.IsVisible = false;
+        _session = null; _searchTab.IsVisible = false;
         _body.Content = null; _title.Text = "";
         // RE-SHOW the cached tree rather than rebuilding it: constructing every node here is what made switching
         // sessions slow (measured 10-17k TreeViewItems per switch, 2026-10-07). One assignment is all this costs.
@@ -593,8 +607,93 @@ public sealed class RightPane : UserControl
                 break;
             case "detail" when _detail != null: _title.Text = $"{_detail.Name}  {ToolSummary.For(_detail.Name, _detail.Input)}"; _body.Content = BuildDetail(_detail); break;
             case "file" when _file != null: _title.Text = _file.Value.path; _body.Content = BuildFile(_file.Value.path, _file.Value.line); break;
+            case "search": _title.Text = "Find in session"; _body.Content = BuildSearch(); break;
         }
     }
+
+    // ------------------------------------------------------------------ find in session
+
+    /// <summary>Show the find-in-session view for <paramref name="session"/> and put the caret in the box.</summary>
+    /// <remarks>
+    /// Asked for 2026-10-15, together with "find in session seems not search all messages": the old in-bar find walked
+    /// the CONTROLS on screen, so it could only ever see the newest window of messages (older ones are not rendered
+    /// until "load earlier messages") and could not see anything inside a COLLAPSED tool card, whose body is
+    /// <c>IsVisible = false</c> and therefore absent from the visual tree. Search now reads the session's real history.
+    /// </remarks>
+    public void ShowSearch(AgentSession session)
+    {
+        _session = session;
+        _searchTab.IsVisible = true;
+        Activate("search");
+        _findBox.Focus();
+        if ((_findBox.Text ?? "").Length > 0) RunSearch();
+    }
+
+    Control BuildSearch()
+    {
+        var head = new StackPanel { Spacing = 2, Children = { _findBox, _findStatus } };
+        _findScroll.Content = _findList;
+        var root = new DockPanel { Margin = new Thickness(12, 10, 12, 12) };
+        DockPanel.SetDock(head, Dock.Top);
+        root.Children.Add(head);
+        root.Children.Add(_findScroll);
+        if (_findBox.Tag is null)                       // wire once; the pane is reused across sessions
+        {
+            _findBox.Tag = this;
+            _findBox.TextChanged += (_, _) => RunSearch();
+            _findBox.KeyDown += (_, e) =>
+            {
+                if (e.Key == Avalonia.Input.Key.Escape) { RunSearch(); e.Handled = true; }
+            };
+        }
+        return root;
+    }
+
+    /// <summary>Run the query over the WHOLE session history and list the hits.</summary>
+    void RunSearch()
+    {
+        _findList.Children.Clear();
+        var pattern = _findBox.Text ?? "";
+        if (_session is null) { _findStatus.Text = ""; return; }
+        if (pattern.Trim().Length == 0) { _findStatus.Text = "Type to search every message in this session."; return; }
+
+        var found = _session.SearchHistory(pattern, 500);
+        if (found.Count == 0)
+        {
+            _findStatus.Text = string.IsNullOrEmpty(found.Error) ? "No matches." : found.Error;
+            return;
+        }
+        _findStatus.Text = found.Count >= 500 ? "500+ matches (showing the first 500)" : $"{found.Count} match{(found.Count == 1 ? "" : "es")}";
+        foreach (var h in found.Hits) _findList.Children.Add(HitRow(h));
+        _findScroll.Offset = new Vector(0, 0);
+    }
+
+    Control HitRow(SessionSearchHit h)
+    {
+        var role = new TextBlock { Text = h.Role == "user" ? "you" : h.Role == "tool" ? "tool" : "assistant", FontSize = 10.5, Classes = { "muted" } };
+        var meta = new TextBlock { Text = $"{h.When:HH:mm:ss}{(h.Index >= 0 ? $"  ·  #{h.Index}" : "")}", FontSize = 10.5, Classes = { "muted" }, HorizontalAlignment = HorizontalAlignment.Right };
+        var top = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto"), Children = { role, meta } };
+        Grid.SetColumn(meta, 1);
+
+        // the match in context: before / MATCH / after, so the row says why it matched
+        var line = new SelectableTextBlock { TextWrapping = TextWrapping.Wrap, FontSize = 12, MaxLines = 4, FontFamily = (FontFamily)(Application.Current!.FindResource("KvMono") ?? FontFamily.Default) };
+        line.Inlines!.Add(new Avalonia.Controls.Documents.Run(h.Before));
+        line.Inlines!.Add(new Avalonia.Controls.Documents.Run(h.Match) { FontWeight = FontWeight.Bold, Background = new SolidColorBrush(Color.Parse("#F59E0B33")) });
+        line.Inlines!.Add(new Avalonia.Controls.Documents.Run(h.After));
+
+        var col = new StackPanel { Spacing = 2, Children = { top, line } };
+        var btn = new Button { Classes = { "ghost" }, HorizontalAlignment = HorizontalAlignment.Stretch, HorizontalContentAlignment = HorizontalAlignment.Left, Padding = new Thickness(8, 6), Content = col };
+        ToolTip.SetTip(btn, "Open this message in the transcript");
+        var target = h;
+        btn.Click += (_, _) => JumpToHit(target);
+        return btn;
+    }
+
+    /// <summary>Open the message a hit belongs to in the transcript (loading older messages when it is not rendered).</summary>
+    void JumpToHit(SessionSearchHit h) => HitRequested?.Invoke(h);
+
+    /// <summary>Raised when the user picks a result: the window scrolls the transcript to that message.</summary>
+    public event Action<SessionSearchHit>? HitRequested;
 
     // ------------------------------------------------------------------ tool details
 

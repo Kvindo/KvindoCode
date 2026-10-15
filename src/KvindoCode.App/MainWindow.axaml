@@ -2,7 +2,7 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:v="clr-namespace:KvindoCode.App.Views"
         x:Class="KvindoCode.App.MainWindow"
-        Title="KvindoCode" Width="1280" Height="820" MinWidth="760" MinHeight="520"
+        Title="Kvindo™ Code" Width="1280" Height="820" MinWidth="760" MinHeight="520"
         Icon="/Assets/icon.png"
         WindowStartupLocation="CenterScreen">
   <Window.Styles>
@@ -27,11 +27,14 @@
     <!-- ================= Sidebar ================= -->
     <Border Classes="sidebar edge" BorderThickness="0,0,1,0" x:Name="SidebarBorder">
       <Grid RowDefinitions="Auto,Auto,Auto,Auto,*,Auto">
-        <Grid Grid.Row="0" ColumnDefinitions="Auto,*" Margin="16,16,12,8">
-          <Border Width="26" Height="26" CornerRadius="8" Background="#D97757" VerticalAlignment="Center">
-            <TextBlock Text="✻" Foreground="White" FontSize="16" HorizontalAlignment="Center" VerticalAlignment="Center"/>
-          </Border>
-          <TextBlock Grid.Column="1" Text="KvindoCode" FontWeight="SemiBold" FontSize="15" Margin="10,0,0,0" VerticalAlignment="Center"/>
+        <Grid Grid.Row="0" ColumnDefinitions="Auto,Auto,*,Auto" Margin="16,16,12,8">
+          <!-- The Kvindo mark (extracted from the Cloud logo) rather than a letter in a coloured box: same product. -->
+          <Image Grid.Column="0" Source="avares://kvindocode/Assets/kvindo-k.png" Width="26" Height="26" VerticalAlignment="Center"/>
+          <TextBlock Grid.Column="1" Name="BrandText" Text="Kvindo™ Code" FontWeight="SemiBold" FontSize="15" Margin="10,0,0,0" VerticalAlignment="Center"/>
+          <!-- Live process figures: memory held, and how busy/blocked the UI thread is. Filled by UpdateHealth(). -->
+          <TextBlock Grid.Column="3" Name="HealthText" FontSize="11" Opacity="0.55" VerticalAlignment="Center"
+                     Margin="8,0,0,0" TextTrimming="CharacterEllipsis"
+                     ToolTip.Tip="Memory this process holds, and UI-thread load: its CPU share plus the last dispatcher round-trip, which measures blocking even when the CPU is idle."/>
         </Grid>
 
         <Button Grid.Row="1" x:Name="NewSessionBtn" Classes="ghost" HorizontalAlignment="Stretch" HorizontalContentAlignment="Left" Margin="10,2,10,4" Padding="10,8">
@@ -79,7 +82,7 @@
                  column a long session name kept its full width and ran under the icons and the search box
                  (reported 2026-10-08). The icons stay adjacent to the name because their column is Auto next to it. -->
             <Grid Grid.Column="0" ColumnDefinitions="*,Auto" VerticalAlignment="Center">
-              <TextBlock Grid.Column="0" x:Name="TitleText" Text="KvindoCode" FontWeight="SemiBold" FontSize="14" TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
+              <TextBlock Grid.Column="0" x:Name="TitleText" Text="Kvindo™ Code" FontWeight="SemiBold" FontSize="14" TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
               <!-- These act ON the session, so they belong beside its name, not in the row of view toggles on the
                    right (asked 2026-10-07). Copy name is first: it needs no session state to be useful. -->
               <StackPanel Grid.Column="1" x:Name="SessionIconBar" Orientation="Horizontal" Margin="6,0,0,0" VerticalAlignment="Center">
@@ -90,10 +93,11 @@
               </StackPanel>
             </Grid>
             <TextBlock Grid.Column="1" x:Name="ProjectText" Classes="muted" FontSize="12.5" TextTrimming="CharacterEllipsis" MaxWidth="200" Margin="8,0,0,0" VerticalAlignment="Center"/>
-            <!-- search inside this session: same regexp engine as the sidebar box -->
-            <TextBox Grid.Column="2" x:Name="AskSearchBox" Classes="composer" FontSize="12.5" MinHeight="26" Height="26" Width="180" Margin="8,0,0,0"
-                     VerticalContentAlignment="Center" Watermark="Find in session (regexp)"
-                     ToolTip.Tip="Find in this session — case-insensitive regexp (literal if invalid). Enter / Shift+Enter step through the matches, Esc clears."/>
+            <!-- Find moved to the SIDE PANEL (asked 2026-10-15): a result list needs room and you want to click through
+                 results. This button opens it and searches the whole history, not just the rendered window. -->
+            <Button Grid.Column="2" x:Name="FindBtn" Classes="ghost" Padding="8,4" Margin="8,0,0,0" VerticalAlignment="Center"
+                    Content="Find" FontSize="12.5"
+                    ToolTip.Tip="Find in this session (Ctrl+F) — opens in the side panel and searches every message, including text inside collapsed tool calls."/>
             <TextBlock Grid.Column="3" x:Name="FindStatus" Classes="muted" FontSize="11.5" VerticalAlignment="Center" Margin="6,0,0,0" Width="44" TextAlignment="Right" IsVisible="False"/>
             <StackPanel Grid.Column="4" Orientation="Horizontal" Margin="4,0,0,0" VerticalAlignment="Center">
               <ToggleButton x:Name="OnlyMineBtn" Classes="ghost" Padding="6" ToolTip.Tip="Show only my messages (hide the assistant's answers, tool calls and notices)"/>
