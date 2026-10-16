@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Threading;
+using System.Threading.Tasks;
 using KvindoCode.Core;
 using KvindoCode.Core.Telegram;
 using Xunit;
@@ -36,7 +37,11 @@ public sealed class TelegramSessionStateTests(ITestOutputHelper o)
         Assert.Equal("1234", config("api_id"));
         Assert.Equal("hash", config("api_hash"));
         Assert.Equal("/tmp/kv.session", config("session_pathname"));
-        // and the interactive ones, which are the difference between a finished login and a half one
+        // The alt-validation of a RESUMED session. This one is not interactive and not optional: with no answer the
+        // library falls through to demanding the phone number, and after that to Auth_LogOut — i.e. it would have thrown
+        // away the user's good session. -1 means "accept whichever user the session holds".
+        Assert.Equal("-1", config("user_id"));
+        // ...and the interactive ones, which are the difference between a finished login and a half one
         Assert.Equal("answer", config("phone_number"));
         Assert.Equal("answer", config("verification_code"));
         Assert.Equal("answer", config("password"));
@@ -55,6 +60,44 @@ public sealed class TelegramSessionStateTests(ITestOutputHelper o)
         Assert.Null(config("something_else"));
         Assert.Null(config("first_name"));       // a signup-only key: answering it would try to CREATE an account
         _ = Empty; _ = Half;
+    }
+
+    /// <summary>
+    /// On a machine that HAS a finished login, the app's own client must be able to answer whoami — the check that
+    /// failed while the config provider left <c>user_id</c> unanswered, even though the session was authorised.
+    /// Skips itself where there is no session (a CI box, a fresh install). Read-only: whoami and a dialog count.
+    /// </summary>
+    [Fact]
+    public async Task A_finished_login_answers_whoami()
+    {
+        var home = "/home/qtu100/.kvindocode";
+        var session = Path.Combine(home, "telegram-user.session");
+        if (!File.Exists(Path.Combine(home, "secrets.vault.json")) || !File.Exists(session)) { o.WriteLine("no live session on this machine"); return; }
+
+        Environment.SetEnvironmentVariable("KVINDOCODE_HOME", home);
+        var vault = new KvindoCode.Core.Secrets.SecretVault(Path.Combine(home, "secrets.vault.json"), Path.Combine(home, "secrets.key"));
+        if (!vault.Unlock(out _)) { o.WriteLine("the live vault did not unlock"); return; }
+        var previous = KvindoCode.Core.Secrets.SecretVault.Default;
+        KvindoCode.Core.Secrets.SecretVault.Default = vault;
+        try
+        {
+            var settings = AppSettings.Load();
+            var client = TelegramUserClient.Open(settings, out var error, null);
+            if (client is null) { o.WriteLine("telegram is not configured: " + error); return; }
+            using (client)
+            {
+                string who;
+                try { who = await client.WhoAmIAsync(CancellationToken.None); }
+                catch (Exception e) { Assert.Fail("a stored session could not be used: " + TelegramUserClient.DescribeError(e)); return; }
+                o.WriteLine("whoami: " + who);
+                Assert.Contains("(id ", who);
+            }
+        }
+        finally
+        {
+            KvindoCode.Core.Secrets.SecretVault.Default = previous;   // other suites own the sandbox vault
+            Environment.SetEnvironmentVariable("KVINDOCODE_HOME", null);
+        }
     }
 
     /// <summary>

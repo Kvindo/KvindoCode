@@ -66,6 +66,13 @@ public sealed class TelegramUserClient : IDisposable
     {
         "api_id" => apiId,
         "api_hash" => apiHash,
+        // NOT an interactive key: the library's "alt validation" of a RESUMED session. LoginUserIfNeeded, on a session
+        // that already has a user, asks user_id first and only falls back to comparing the account's phone with
+        // phone_number when the answer does not satisfy it. Answering nothing therefore ended in a demand for the phone
+        // number — and, worse, in "Proceeding to logout and login", i.e. it would have DISCARDED a good session
+        // (decompiled from WTelegramClient 4.4.9, which is why `whoami` failed on a session whose `dialogs` worked).
+        // -1 is the documented "accept whichever user this session holds": the session file IS the account.
+        "user_id" => "-1",
         "phone_number" => ask("Enter your phone number in international format (e.g. +79991234567):"),
         "verification_code" => ask("Telegram sent you a login code. Enter it:"),
         "password" => ask("Your account has 2FA. Enter your Telegram password:"),
