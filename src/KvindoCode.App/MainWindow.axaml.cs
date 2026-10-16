@@ -1069,6 +1069,11 @@ public partial class MainWindow : Window
 
     void Show(SessionView sv)
     {
+        // Opening a session REPLACES what is in the main area, and the terminal grid is one of those things. Leaving it
+        // attached put the transcript and the grid in the same cell (they drew over each other) and left the grid's poll
+        // timers running, so the app kept four tmux processes busy per tick behind the transcript (reported 2026-10-16:
+        // "when i open terminal and click on session view breaks").
+        CloseTerminals();
         if (_contextMain != null) { Host.Children.Remove(_contextMain); _contextMain = null; }
         BottomColumn.IsVisible = true;
         if (_current != null) _current.Draft = Input.Text ?? "";

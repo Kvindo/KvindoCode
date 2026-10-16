@@ -81,6 +81,7 @@ public sealed class TerminalUiTests : IDisposable
         public required MainWindow Main { get; init; }
         public required Sandbox Sandbox { get; init; }
         public required string Project { get; init; }
+        public required SessionView Session { get; init; }
 
         public TerminalsView? Terminals => Main.GetVisualDescendants().OfType<TerminalsView>().FirstOrDefault();
 
@@ -118,7 +119,7 @@ public sealed class TerminalUiTests : IDisposable
         win.Show();
         Invoke(win, "OpenProject", sb.Project);
         Dispatcher.UIThread.RunJobs();
-        return new App { Main = win, Sandbox = sb, Project = sb.Project };
+        return new App { Main = win, Sandbox = sb, Project = sb.Project, Session = Field<SessionView>(win, "_current") };
     }
 
     static async Task<bool> Eventually(Func<Task<bool>> condition, int ms = 10000)
@@ -330,11 +331,15 @@ public sealed class TerminalUiTests : IDisposable
     }
 
     /// <summary>
-    /// A splitter drag has to reach tmux: the session has no attached client, so nothing else would ever tell it the
-    /// pane got bigger, and the pane would keep wrapping at its old width.
+    /// Dragging a splitter must reach tmux as a BOUNDARY nudge of the cells the pane gained.
     /// </summary>
+    /// <remarks>
+    /// Not a total-size push: an absolute pane size computed from our layout produced a 1-column neighbour, and
+    /// re-tiling undoes the drag. The delta is what the splitter's DragCompleted applies, and the layout change below
+    /// is the same one a drag makes (star widths), so this drives the real arithmetic.
+    /// </remarks>
     [AvaloniaFact]
-    public async Task Dragging_a_splitter_changes_what_tmux_reports()
+    public async Task Dragging_a_splitter_nudges_the_boundary_in_tmux()
     {
         using var sb = new Sandbox();
         using var app = Start(sb);
@@ -342,28 +347,67 @@ public sealed class TerminalUiTests : IDisposable
         app.OpenTerminals();
         var terminals = app.Terminals!;
         Assert.True(await Eventually(async () => (await terminals.Backend.ListPanesAsync(sb.Project)).Count == 4));
-        await Eventually(async () => terminals.CurrentCellSizes().Any(), 5000);
+        Assert.True(await Eventually(async () => terminals.CurrentCellSizes().Any(), 8000));
 
-        var sizes = terminals.CurrentCellSizes().ToList();
-        Assert.Equal(4, sizes.Count);                       // every pane has a layout size to work from
-        await terminals.Backend.ResizeAsync(sb.Project, 0, 24, 6);
-        Assert.True(await Eventually(async () => (await terminals.Backend.ListPanesAsync(sb.Project)).Single(p => p.Index == 0).Columns == 24));
-
-        // now the real path a drag takes: the layout changes, then the sizes are pushed
         var grid = terminals.GetVisualDescendants().OfType<Grid>().First(g => g.Name == "TerminalGrid");
+        var before = terminals.CurrentCellSizes().ToDictionary(x => x.Index, x => x.Cells);
+        var tmuxBefore = (await terminals.Backend.ListPanesAsync(sb.Project)).Single(p => p.Index == 0).Columns;
+
+        // what a drag does: the layout changes...
         grid.ColumnDefinitions[0].Width = new GridLength(3, GridUnitType.Star);
         grid.ColumnDefinitions[2].Width = new GridLength(1, GridUnitType.Star);
         terminals.InvalidateMeasure();
-        terminals.Measure(new Size(1200, 800));
-        terminals.Arrange(new Rect(0, 0, 1200, 800));
+        terminals.Measure(new Size(1400, 800));
+        terminals.Arrange(new Rect(0, 0, 1400, 800));
         Dispatcher.UIThread.RunJobs();
-        terminals.PushSizesToTmux();
+        var after = terminals.CurrentCellSizes().ToDictionary(x => x.Index, x => x.Cells);
+        var delta = after[0].Columns - before[0].Columns;
+        _out.WriteLine($"layout: {before[0].Columns} -> {after[0].Columns} cells (delta {delta}); tmux pane 0 was {tmuxBefore}");
+        Assert.True(delta > 0, "the layout did not change, so this test would prove nothing");
 
-        var first = sizes.First(s => s.Index == 0).Cells;
-        Assert.True(await Eventually(async () => (await terminals.Backend.ListPanesAsync(sb.Project)).Single(p => p.Index == 0).Columns > 24),
-            "tmux never learned about the resized pane; asked for " + string.Join(",", terminals.CurrentCellSizes().Select(s => $"{s.Index}:{s.Cells.Columns}x{s.Cells.Rows}"))
-            + " from " + string.Join(",", sizes.Select(s => $"{s.Index}:{s.Cells.Columns}x{s.Cells.Rows}")));
-        _out.WriteLine($"cells before: {first.Columns}x{first.Rows}, after: {string.Join(",", terminals.CurrentCellSizes().Select(s => $"{s.Index}:{s.Cells.Columns}x{s.Cells.Rows}"))}");
+        // ...then the boundary is nudged by the cells the pane gained (exactly what DragCompleted calls)
+        await terminals.Backend.NudgeAsync(sb.Project, 0, 'R', delta);
+        Assert.True(await Eventually(async () => (await terminals.Backend.ListPanesAsync(sb.Project)).Single(p => p.Index == 0).Columns >= tmuxBefore + delta - 2),
+            $"tmux did not follow the drag: was {tmuxBefore}, asked for +{delta}, now " +
+            string.Join(",", (await terminals.Backend.ListPanesAsync(sb.Project)).Select(p => $"{p.Index}:{p.Columns}")));
+        Assert.All(await terminals.Backend.ListPanesAsync(sb.Project), p => Assert.True(p.Columns >= TerminalGeometry.MinColumns,
+            $"pane {p.Index} became degenerate: {p.Columns} columns"));
+    }
+
+    /// <summary>
+    /// Opening a session while the terminal grid is on screen must CLOSE the grid.
+    /// </summary>
+    /// <remarks>
+    /// Reported 2026-10-16: "when i open terminal and click on session view breaks". The transcript was inserted into
+    /// the same cell as the still-attached grid (they drew over each other), and the grid's poll timers kept running
+    /// behind it. Pinned three ways: the grid is gone, the transcript is on screen alone, and the polling stopped.
+    /// </remarks>
+    [AvaloniaFact]
+    public async Task Opening_a_session_closes_the_terminal_grid()
+    {
+        using var sb = new Sandbox();
+        using var app = Start(sb);
+        if (!new TmuxBackend().IsAvailable) { _out.WriteLine("tmux not available; skipping"); return; }
+        app.OpenTerminals();
+        var terminals = app.Terminals!;
+        Assert.True(await Eventually(async () => (await terminals.Backend.ListPanesAsync(sb.Project)).Count == 4));
+        var host = app.Main.FindControl<Grid>("Host")!;
+
+        // the way the sidebar does it: click the session row
+        Invoke(app.Main, "Show", app.Session);
+        Dispatcher.UIThread.RunJobs();
+
+        Assert.Null(app.Terminals);                                          // the grid is gone...
+        Assert.Null(host.Children.OfType<TerminalsView>().FirstOrDefault());
+        Assert.Same(app.Session.Transcript, host.Children[0]);               // ...and the transcript is what is in the cell
+        Assert.DoesNotContain(host.Children, c => c is TerminalsView);
+        Assert.True(app.Main.FindControl<Control>("BottomColumn")!.IsVisible);
+
+        // the polling really stopped: no further captures happen
+        var before = terminals.CaptureCalls.Values.Sum();
+        await Task.Delay(700);                                               // > 3 poll intervals
+        Dispatcher.UIThread.RunJobs();
+        Assert.Equal(before, terminals.CaptureCalls.Values.Sum());
     }
 
     /// <summary>Back to session restores the conversation and the composer, and does not kill the terminals.</summary>

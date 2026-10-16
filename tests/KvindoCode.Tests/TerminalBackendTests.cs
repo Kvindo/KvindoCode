@@ -206,17 +206,94 @@ public sealed class TerminalBackendTests(ITestOutputHelper o)
         Assert.All(after.Where(p => p.Index != 1), p => Assert.Equal("", p.Title));
     }
 
+    /// <summary>
+    /// Resizing the grid must leave EVERY pane usable.
+    /// </summary>
+    /// <remarks>
+    /// Reported 2026-10-16: "Terminal is unusable" — a real pane in the user's session was 11 columns wide. Cause:
+    /// the view resized each pane in turn with <c>resize-pane -x/-y</c>, which takes a pane's space from its neighbour.
+    /// Measured here first, without a fix: asking pane 0 of a tiled 80x24 window for 100x20 gives 78x20 next to a
+    /// 1-column pane. So this test asserts the property that was missing — no degenerate pane, before or after.
+    /// </remarks>
     [Fact]
-    public async Task Resizing_a_pane_changes_what_tmux_reports()
+    public async Task Resizing_the_grid_never_leaves_a_degenerate_pane()
     {
         await using var f = new Fixture();
         if (f.TmuxMissing) { o.WriteLine("tmux not available"); return; }
         await f.Backend.EnsureAsync(f.Dir, 4);
 
-        await f.Backend.ResizeAsync(f.Dir, 1, 30, 9);
-        var pane = (await f.Backend.ListPanesAsync(f.Dir)).Single(p => p.Index == 1);
-        // tmux keeps the grid consistent, so the neighbours give up space; the pane asked for must be at least this big
-        Assert.True(pane.Columns >= 30 && pane.Rows >= 9, $"asked 30x9, got {pane.Columns}x{pane.Rows}");
+        await f.Backend.ResizeGridAsync(f.Dir, 180, 45);
+        var panes = await f.Backend.ListPanesAsync(f.Dir);
+        o.WriteLine(string.Join(" | ", panes.Select(p => $"{p.Index}:{p.Columns}x{p.Rows}")));
+        Assert.All(panes, p => Assert.True(p.Columns >= TerminalGeometry.MinColumns && p.Rows >= TerminalGeometry.MinRows,
+            $"pane {p.Index} is {p.Columns}x{p.Rows}"));
+        // The grid really took the size it was given: a tiled 2x2 divides BOTH dimensions in two, so the panes' widths
+        // add up to about twice the window width. "About" is one column per divider — tmux draws a separator between
+        // adjacent panes and that column belongs to neither pane (measured: 89+90 = 179 for a 180-wide window).
+        Assert.InRange(panes.Sum(p => p.Columns) / 2, 178, 180);
+        Assert.InRange(panes.Sum(p => p.Rows) / 2, 44, 46);
+
+        // and a second, different size is applied cleanly too (a splitter drag does this repeatedly)
+        await f.Backend.ResizeGridAsync(f.Dir, 120, 30);
+        var smaller = await f.Backend.ListPanesAsync(f.Dir);
+        Assert.All(smaller, p => Assert.True(p.Columns >= TerminalGeometry.MinColumns && p.Rows >= TerminalGeometry.MinRows,
+            $"after the second resize pane {p.Index} is {p.Columns}x{p.Rows}"));
+    }
+
+    /// <summary>An existing session is topped up to the pane count that was asked for, and re-tiled.</summary>
+    [Fact]
+    public async Task Ensure_tops_up_a_session_that_lost_panes()
+    {
+        await using var f = new Fixture();
+        if (f.TmuxMissing) { o.WriteLine("tmux not available"); return; }
+        await f.Backend.EnsureAsync(f.Dir, 2);
+        Assert.Equal(2, (await f.Backend.ListPanesAsync(f.Dir)).Count);
+
+        await f.Backend.EnsureAsync(f.Dir, 4);
+        Assert.Equal(4, (await f.Backend.ListPanesAsync(f.Dir)).Count);
+        // and every pane is in the project directory, including the ones just added
+        Assert.All(await f.Backend.ListPanesAsync(f.Dir), p => Assert.Equal(Path.GetFullPath(f.Dir), p.Path));
+
+        await f.Backend.EnsureAsync(f.Dir, 4);                       // idempotent above the count
+        Assert.Equal(4, (await f.Backend.ListPanesAsync(f.Dir)).Count);
+    }
+
+    /// <summary>
+    /// A splitter drag moves ONE boundary in tmux, by the number of cells it moved on screen.
+    /// </summary>
+    /// <remarks>
+    /// The relative form is the point. An ABSOLUTE <c>resize-pane -x</c> computed from our own layout produced a
+    /// 1-column neighbour in the measurements above, and re-tiling would silently undo the drag (the grid would snap
+    /// back to an even split). So this pins: the pane next to the boundary grows, and every other pane stays usable.
+    /// </remarks>
+    [Fact]
+    public async Task A_boundary_nudge_resizes_one_pane_and_keeps_the_others_usable()
+    {
+        await using var f = new Fixture();
+        if (f.TmuxMissing) { o.WriteLine("tmux not available"); return; }
+        await f.Backend.EnsureAsync(f.Dir, 4);
+        await f.Backend.ResizeGridAsync(f.Dir, 160, 40);
+        var before = await f.Backend.ListPanesAsync(f.Dir);
+        var left = before.Single(p => p.Index == 0);
+
+        await f.Backend.NudgeAsync(f.Dir, 0, 'R', 10);
+        var after = await f.Backend.ListPanesAsync(f.Dir);
+        o.WriteLine("before: " + string.Join(" | ", before.Select(p => $"{p.Index}:{p.Columns}x{p.Rows}")));
+        o.WriteLine("after:  " + string.Join(" | ", after.Select(p => $"{p.Index}:{p.Columns}x{p.Rows}")));
+        Assert.True(after.Single(p => p.Index == 0).Columns >= left.Columns + 8, "the dragged pane did not grow");
+        Assert.All(after, p => Assert.True(p.Columns >= TerminalGeometry.MinColumns && p.Rows >= TerminalGeometry.MinRows,
+            $"pane {p.Index} became degenerate: {p.Columns}x{p.Rows}"));
+
+        // back the other way...
+        await f.Backend.NudgeAsync(f.Dir, 0, 'L', 8);
+        Assert.True((await f.Backend.ListPanesAsync(f.Dir)).Single(p => p.Index == 0).Columns < after.Single(p => p.Index == 0).Columns);
+
+        // ...and the two no-ops: a click (zero cells) and an unknown direction must change nothing, not guess
+        var same = (await f.Backend.ListPanesAsync(f.Dir)).Single(p => p.Index == 0).Columns;
+        await f.Backend.NudgeAsync(f.Dir, 0, 'R', 0);
+        Assert.Equal(same, (await f.Backend.ListPanesAsync(f.Dir)).Single(p => p.Index == 0).Columns);
+        await f.Backend.NudgeAsync(f.Dir, 0, 'X', 5);
+        Assert.Equal(same, (await f.Backend.ListPanesAsync(f.Dir)).Single(p => p.Index == 0).Columns);
     }
 
     [Fact]
