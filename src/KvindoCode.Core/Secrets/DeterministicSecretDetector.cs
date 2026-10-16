@@ -206,6 +206,33 @@ public static partial class DeterministicSecretDetector
     }
 
     /// <summary>
+    /// True when a value is a run of dashes followed by a piece of a word — <c>-----B</c>, <c>-----BEG</c>,
+    /// <c>-----EN</c>. That is a fragment of a PEM/diff/table separator (<c>-----BEGIN …-----</c>), never a credential.
+    /// </summary>
+    /// <remarks>
+    /// This is the shape the store path had no rule against: two such entries really are in the live vault
+    /// (<c>audited-token-d86eb5a9a920</c> is 6 characters, <c>audited-token-401da4171e87</c> is 8 — both verified by
+    /// SHA-256 against the name's own suffix, so this is not a guess), and because they are stored, EVERY
+    /// <c>-----BEGIN</c> in every PEM file the app shows is rewritten to a marker plus <c>EGIN</c>: a Read of the
+    /// app's own detector and test sources came back corrupted (reported 2026-10-16).
+    ///
+    /// A whole PEM header LINE (<c>-----BEGIN RSA PRIVATE KEY-----</c>) is deliberately NOT a fragment — it has spaces
+    /// and it is masked as part of the block — and neither is a real value, because those do not consist of dashes plus
+    /// a bare word. So this can only ever refuse a separator fragment.
+    /// </remarks>
+    public static bool IsFormatFragment(string? value)
+    {
+        var v = (value ?? "").Trim('"', '\'', '`', ';', ',').TrimEnd('\r', '\n');
+        if (v.Length is < 4 or > 32) return false;                        // a whole key blob, or too short to store anyway
+        var dashes = 0;
+        while (dashes < v.Length && v[dashes] == '-') dashes++;
+        if (dashes < 3) return false;
+        if (dashes == v.Length) return true;                              // a divider line: "------"
+        for (var i = dashes; i < v.Length; i++) if (!char.IsAsciiLetter(v[i])) return false;
+        return true;
+    }
+
+    /// <summary>
     /// Whether a candidate the local model proposed is worth interrupting the user for: not a placeholder, a
     /// reference, a hash, an identifier or a piece of code. Filters the second opinion, never the primary detector.
     /// </summary>

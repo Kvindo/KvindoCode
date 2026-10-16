@@ -412,6 +412,7 @@ public sealed class AgentSession : IDisposable
 
         var stored = new List<SecretSpan>();
         var replacements = new List<string>();
+        var maskedNotStored = 0;
         foreach (var span in spans)
         {
             var raw = text.Substring(span.Start, span.Length);
@@ -427,6 +428,22 @@ public sealed class AgentSession : IDisposable
 
             if (value.Length < SecretRedactor.MinLength) continue;
             if (vault.IsExcluded(value)) continue;
+
+            // A PEM/diff separator FRAGMENT ("-----B", "-----BEG") is never stored. This path is the only one without
+            // a plausibility gate — the outbound scan and the auditor's proposals both ask
+            // DeterministicSecretDetector.IsPlausibleSecretValue, which refuses anything starting with a dash — and the
+            // gap filled the live vault with exactly that shape. Every stored entry of this kind then rewrites every
+            // "-----BEGIN" in every PEM file the app shows (reported 2026-10-16).
+            //
+            // It is still MASKED, with the irreversible redaction rather than a marker: "do not store" must never mean
+            // "let it through", and the value is not in the vault, so no marker could expand back to it.
+            if (DeterministicSecretDetector.IsFormatFragment(value))
+            {
+                stored.Add(new SecretSpan(offset, value.Length, span.TypeOrOther, 1.0));
+                replacements.Add(DeterministicSecretDetector.RedactionText);
+                maskedNotStored++;
+                continue;
+            }
             var sha = SecretVault.Sha256Hex(value);
             var existing = vault.List().FirstOrDefault(item => item.Sha256 == sha);
             string name;
@@ -452,9 +469,12 @@ public sealed class AgentSession : IDisposable
         }
         if (stored.Count == 0) return SecretAuditOutcome.Clean;
 
-        vault.RaiseChanged();
+        if (stored.Count > maskedNotStored) vault.RaiseChanged();   // a masked-only fragment changed nothing in the vault
         _redactor = null;
-        EmitRaw(new NoticeEvent($"The secret auditor found {stored.Count} secret(s) in tool output — the value(s) were stored in the encrypted vault as {string.Join(", ", replacements)} and only the value was masked in the transcript.", false));
+        var notice = maskedNotStored == 0
+            ? $"The secret auditor found {stored.Count} secret(s) in tool output — the value(s) were stored in the encrypted vault as {string.Join(", ", replacements)} and only the value was masked in the transcript."
+            : $"The secret auditor found {stored.Count} secret(s) in tool output — only the value was masked in the transcript. {maskedNotStored} of them {(maskedNotStored == 1 ? "is a PEM/diff separator fragment and was" : "are PEM/diff separator fragments and were")} masked without being stored: a fragment of a line is not a credential.";
+        EmitRaw(new NoticeEvent(notice, false));
         // Pair each marker with its OWN span before merging. `stored` and `replacements` are built in lockstep, but
         // Merge may drop nested spans and clip overlapping ones, so passing the original list positionally made
         // Strip() apply span i's marker to a different value — and `Write` would then expand the wrong credential into
