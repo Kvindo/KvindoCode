@@ -230,6 +230,11 @@ public static partial class DeterministicSecretDetector
         // minimum abbreviation; the 7-31 band is the delta this adds, and the live vault's 19 pure-hex entries are all
         // already described by the shape classifier as "an identifier or reference name, not a secret value".
         if (Regex.IsMatch(v, @"^[0-9a-fA-F]{7,40}$")) return false;
+        // ...and a RANGE of ids, which is how git writes it: "a8a3928..d892ead" in a diff header, "a8a3928...d892ead"
+        // when the endpoints are not adjacent. The two ids are refused above, but the joined token is not pure hex (the
+        // dots), so it slipped through (reported 2026-10-16: "sha ranges like a8a3928..d892ead should not be marked as
+        // secrets"). A credential is never two hex ids with a dot sequence between them.
+        if (Regex.IsMatch(v, @"^[0-9a-fA-F]{7,40}\.{2,3}[0-9a-fA-F]{7,40}$")) return false;
         // ULIDs are ids the user pastes constantly; they were being offered as secrets every time (2026-10-04).
         if (IsUlid(v)) return false;
         if (Regex.IsMatch(v, @"^[A-Za-z_][A-Za-z0-9_]*$") && !v.Any(char.IsDigit)) return false;           // plain identifier
