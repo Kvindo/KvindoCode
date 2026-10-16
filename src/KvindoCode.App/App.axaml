@@ -272,6 +272,9 @@
       <StreamGeometry x:Key="IconPin">M9 4h6l-1 6 3 3H7l3-3zM12 13v7</StreamGeometry>
       <StreamGeometry x:Key="IconRewind">M9 14L4 9l5-5M4 9h10a6 6 0 0 1 0 12h-3</StreamGeometry>
       <StreamGeometry x:Key="IconFork">M6 3v7a4 4 0 0 0 4 4h4a4 4 0 0 1 4 4v3M6 3a2 2 0 1 0 0 .01M18 21a2 2 0 1 0 0 .01M6 21V10</StreamGeometry>
+      <!-- Merge: two branches joining into one (the Feather "git-merge" shape, in this file's stroke style — the two
+           dots are drawn as tiny 2px arcs, the same trick IconFork uses). -->
+      <StreamGeometry x:Key="IconMerge">M6 3v12M6 15a9 9 0 0 0 9-9M6 18a3 3 0 1 0 0 .01M18 6a3 3 0 1 0 0 .01</StreamGeometry>
       <StreamGeometry x:Key="IconPanel">M4 5h16v14H4zM14 5v14</StreamGeometry>
       <StreamGeometry x:Key="IconAttach">M21 11l-8.5 8.5a5 5 0 0 1-7-7L14 4a3.5 3.5 0 0 1 5 5l-8.5 8.5a2 2 0 0 1-3-3L15 7</StreamGeometry>
       <StreamGeometry x:Key="IconTrash">M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13</StreamGeometry>

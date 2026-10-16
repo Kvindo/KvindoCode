@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Reflection;
 using System.Text.RegularExpressions;
+using Avalonia;                          // TranslatePoint returns an Avalonia.Point
 using Avalonia.Controls;
 using Avalonia.Layout;
 using Avalonia.VisualTree;
@@ -50,11 +51,13 @@ public sealed class HeaderHealthAndBrandTests(ITestOutputHelper o)
         var img = app.Window.GetVisualDescendants().OfType<Image>().FirstOrDefault();
         Assert.NotNull(img);
         Assert.NotNull(img!.Source);
-        // ...and the name is at the TOP of that stack, because the figures follow it (asked 2026-10-16: "KvindoCode
-        // text should be alligned to bottom of brand icon or to top if you planning add resources after name")
-        var stack = brand.Parent as StackPanel;
-        Assert.NotNull(stack);
-        Assert.Equal(VerticalAlignment.Top, stack!.VerticalAlignment);
+        // ...and the name is at the TOP of that block, because the figures follow it (asked 2026-10-16: "KvindoCode
+        // text should be alligned to bottom of brand icon or to top if you planning add resources after name").
+        // The block is a Grid as tall as the mark (until 2026-10-16 it was a StackPanel; the two lines now span the
+        // mark edge to edge, which a stack cannot do).
+        var block = brand.Parent as Grid;
+        Assert.NotNull(block);
+        Assert.Equal(VerticalAlignment.Top, brand.VerticalAlignment);
         Assert.Equal(VerticalAlignment.Top, img.VerticalAlignment);
 
         // The asset itself is the check that means something: headless drawing DECODES A 1x1 STUB (measured), so
@@ -171,6 +174,63 @@ public sealed class HeaderHealthAndBrandTests(ITestOutputHelper o)
         // The cell must be wide enough for the whole figure: in the one-line header it was squeezed to ~100px and the
         // ellipsis ate most of it, which is the other half of why it read as missing.
         Assert.True(text.Bounds.Width > 150, $"the figures were squeezed into {text.Bounds.Width}px");
+    }
+
+    /// <summary>
+    /// The two header lines SPAN the mark: the wordmark's top edge on the mark's top edge, the figures' bottom edge on
+    /// the mark's bottom edge.
+    /// </summary>
+    /// <remarks>
+    /// Reported 2026-10-16: "Text should be aligned to top and bottom lines of icon". Read from the LIVE layout, never
+    /// from the XAML: the previous shape (a StackPanel with <c>Margin="10,1,0,0"</c> and <c>Spacing="1"</c>) put the
+    /// wordmark 1px below the mark's top and left the figures 3px above its bottom edge — measured, and the figures
+    /// assertion below fails on it.
+    /// </remarks>
+    [AvaloniaFact]
+    public void The_two_header_lines_span_the_mark()
+    {
+        using var sb = new Sandbox();
+        using var app = SecretAuditorRealUiTests.StartUi(sb, new System.Text.Json.Nodes.JsonArray { Script.Text("hi") });
+        var w = app.Window;
+        Sample(w);                                               // so the figures line has its real text and box
+        Dispatcher.UIThread.RunJobs();
+
+        var brand = w.FindControl<TextBlock>("BrandText")!;
+        var health = Health(w);
+        var mark = w.GetVisualDescendants().OfType<Image>().First();
+
+        var markTop = mark.TranslatePoint(default, w)!.Value.Y;
+        var markBottom = markTop + mark.Bounds.Height;
+        var brandTop = brand.TranslatePoint(default, w)!.Value.Y;
+        var healthBottom = health.TranslatePoint(default, w)!.Value.Y + health.Bounds.Height;
+        o.WriteLine($"mark {markTop:0.###}..{markBottom:0.###} ({mark.Bounds}); wordmark top {brandTop:0.###} " +
+                    $"({brand.Bounds.Height:0.###} tall); figures bottom {healthBottom:0.###} ({health.Bounds.Height:0.###} tall)");
+
+        Assert.True(Math.Abs(brandTop - markTop) <= 2,
+            $"\"{brand.Text}\" starts {brandTop - markTop:0.###}px from the mark's top edge");
+        Assert.True(Math.Abs(markBottom - healthBottom) <= 2,
+            $"\"{health.Text}\" ends {markBottom - healthBottom:0.###}px from the mark's bottom edge");
+        // Spanning means the box holding both lines is as tall as the mark: without this the two edges could agree
+        // while the lines sat in a container of some other height.
+        Assert.Equal(mark.Bounds.Height, ((Control)brand.Parent!).Bounds.Height, 1);
+
+        // ...and the lines must FIT, which is why the mark is 34 and not 26. The headless renderer draws a stub whose
+        // metrics are a constant 0.8 em at every size (measured), so ask the real font the app renders with instead:
+        // Program.BuildAvaloniaApp calls WithInterFont(), and Inter's line heights at these sizes do not fit 26px.
+        System.Reflection.Assembly.Load("Avalonia.Fonts.Inter");
+        var lines = RealLineHeight("Inter-SemiBold", brand.FontSize) + RealLineHeight("Inter-Regular", health.FontSize);
+        o.WriteLine($"the two real Inter lines need {lines:0.###}px of the mark's {mark.Bounds.Height:0.###}px");
+        Assert.True(mark.Bounds.Height >= lines,
+            $"a {mark.Bounds.Height:0.###}px mark cannot hold {lines:0.###}px of text — the lines would overlap it");
+        Assert.Equal(mark.Bounds.Width, mark.Bounds.Height);     // square mark: scaling it must not stretch it
+    }
+
+    /// <summary>Line height (ascent + descent) of an Inter face at this size, measured with the app's own text stack.</summary>
+    static double RealLineHeight(string face, double fontSize)
+    {
+        using var s = AssetLoader.Open(new Uri($"avares://Avalonia.Fonts.Inter/Assets/{face}.ttf"));
+        var m = new SkiaSharp.SKFont(SkiaSharp.SKTypeface.FromStream(s), (float)fontSize).Metrics;
+        return -m.Ascent + m.Descent;
     }
 
     /// <summary>Find-in-session is an icon button in a row of icon buttons (asked 2026-10-16), not a word.</summary>
