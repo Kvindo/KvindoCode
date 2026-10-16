@@ -27,7 +27,7 @@ public static class VaultMaintenance
         if (client is null) { Console.Error.WriteLine(err); return 2; }
         using (client)
         {
-            if (client.IsSignedIn)
+            if (client.HasSessionFile)
             {
                 try { Console.Error.WriteLine("Already signed in: " + await client.WhoAmIAsync(CancellationToken.None)); return 0; }
                 catch (Exception e) { Console.Error.WriteLine("The stored session no longer works (" + Telegram.TelegramUserClient.DescribeError(e) + "); logging in again."); }

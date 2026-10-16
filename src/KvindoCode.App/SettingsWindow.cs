@@ -112,11 +112,13 @@ public sealed class SettingsWindow : Window
                     : $"“{field}” points at “{name}”, which is not in the vault yet.";
             }
             var session = Path.Combine(KvindoCode.Core.Paths.ConfigDir, "telegram-user.session");
+            // A session FILE is not a login: a run abandoned at the code prompt leaves a 7 KB file that authorises
+            // nothing (measured 2026-10-16). The window must not tell the human they are signed in when they are not.
             var hasSession = File.Exists(session) && new FileInfo(session).Length > 0;
             tgStatus.Text = Which("api_id", (tgApiId.Text ?? "").Trim()) + "\n"
                           + Which("api_hash", (tgApiHash.Text ?? "").Trim()) + "\n"
                           + (hasSession
-                              ? "A login session is stored, so the tool works without asking anything. Remove the session file to log in again."
+                              ? "A login session is stored. If the Telegram tool says it is not signed in, that session was never finished: run `kvindocode --telegram-login` again and let it ask for the code (remove the session file to start over)."
                               : "No login session yet — run `kvindocode --telegram-login` once (it asks for the phone code and, if set, the 2FA password).");
         }
         tgApiId.TextChanged += (_, _) => RefreshTelegram();
