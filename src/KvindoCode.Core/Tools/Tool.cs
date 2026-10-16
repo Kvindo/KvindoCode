@@ -57,6 +57,26 @@ public sealed class ToolContext
     }
 
     /// <summary>
+    /// The session's own copy of a repo, if one EXISTS ON DISK, whether or not it has been registered in memory.
+    /// </summary>
+    /// <remarks>
+    /// Registered-or-not was the bug (reported by another session on 2026-10-17, then reproduced here): a
+    /// <see cref="SessionWorkspace"/> discovers its repos lazily and only in memory, so a worktree left on disk by an
+    /// earlier app run — or by an earlier turn of the same session, before a restart — is invisible to it until
+    /// something WRITES into that repo. Reads then fell back to the shared checkout, which for the reporting session was
+    /// an OLDER tree: a file that existed only in its own copy read as "File does not exist: &lt;shared path&gt;", and a
+    /// Grep over the mirror found nothing, while Bash looked correct. The mirror is where this session's files are.
+    /// </remarks>
+    public string? ExistingSessionCopy(string repoRoot)
+    {
+        if (Workspace is not { Mirrored: true } ws) return null;
+        repoRoot = Path.GetFullPath(repoRoot);
+        var candidate = Path.Combine(ws.WorkDir, Path.GetRelativePath(ws.Root, repoRoot));
+        // a worktree carries a .git FILE (the mirror itself, or a submodule); a plain directory is not a copy of a repo
+        return Workspaces.IsLinkedWorktreeDir(candidate) ? candidate : null;
+    }
+
+    /// <summary>
     /// Where a READ of <paramref name="path"/> actually goes. A file inside a nested repo may be read straight from the
     /// real checkout (cheap, always current, and reading must never create a worktree); once the session has a worktree
     /// for that repo, its own copy is the truth — falling back to the real file when the file is untracked and present
@@ -68,8 +88,12 @@ public sealed class ToolContext
         var real = Canonical(path);
         if (Workspaces.FindEnclosingRepo(real, ws.Root, out var isWorktree) is not { } repo) return real;   // loose file
         if (isWorktree) return real;                                   // a linked worktree inside the project: read as-is
-        if (ws.RepoFor(repo) is not { } link) return real;             // not materialised: reading creates nothing
-        var sessionCopy = Path.Combine(link.SessionPath, Path.GetRelativePath(repo, real));
+        // The session's own copy wins — INCLUDING one that exists on disk but was never registered this run (see
+        // ExistingSessionCopy). Where it does not hold the file (one this session never touched) the real checkout is
+        // still a valid answer, so this falls back rather than failing.
+        var copy = ws.RepoFor(repo)?.SessionPath ?? ExistingSessionCopy(repo);
+        if (copy is null) return real;                                 // not materialised: reading creates nothing
+        var sessionCopy = Path.Combine(copy, Path.GetRelativePath(repo, real));
         return File.Exists(sessionCopy) ? sessionCopy : real;
     }
 
@@ -108,13 +132,29 @@ public sealed class ToolContext
 
     /// <summary>
     /// Where a directory-walking tool (Glob, Grep) should search. A mirrored session's own tree only contains the repos
-    /// it has already touched, so searching it would silently omit every other repo in the project — these tools search
-    /// the REAL project tree and return real paths, which a later write then maps into the right worktree.
+    /// it has already touched, so searching the mirror alone would silently omit every other repo in the project: a repo
+    /// with NO session copy is searched in the real tree, and one WITH a copy (registered, or simply on disk) is searched
+    /// in the copy, because that is the tree this session reads and edits.
     /// </summary>
     public string SearchRoot(string? path)
     {
         if (Workspace is not { Mirrored: true } ws) return string.IsNullOrEmpty(path) ? Cwd : Resolve(path);
-        return string.IsNullOrEmpty(path) ? ws.Root : Canonical(Resolve(path));
+        if (string.IsNullOrEmpty(path)) return ws.Root;
+        var real = Canonical(Resolve(path));
+        // Searching a repo that has a session copy must search THAT copy: it is what this session reads and edits, and
+        // the reported case was a Grep that found nothing because the file existed only in the session's worktree (the
+        // shared checkout was older). Repos without a copy are still searched in the shared tree, which is deliberate —
+        // walking a container's 70 repos must not materialise them.
+        if (Workspaces.FindEnclosingRepo(real, ws.Root, out var isWorktree) is { } repo && !isWorktree)
+        {
+            var copy = ws.RepoFor(repo)?.SessionPath ?? ExistingSessionCopy(repo);
+            if (copy is not null)
+            {
+                var sessionCopy = Path.Combine(copy, Path.GetRelativePath(repo, real));
+                if (Directory.Exists(sessionCopy) || File.Exists(sessionCopy)) return sessionCopy;
+            }
+        }
+        return real;
     }
 
     /// <summary>

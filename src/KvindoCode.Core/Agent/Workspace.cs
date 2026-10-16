@@ -473,6 +473,12 @@ public static class Workspaces
         return found;
     }
 
+    /// <summary>True when <paramref name="dir"/> is a git checkout (a .git FILE: a worktree or a submodule).</summary>
+    public static bool IsLinkedWorktreeDir(string dir)
+    {
+        try { return File.Exists(Path.Combine(dir, ".git")); } catch { return false; }
+    }
+
     static bool IsLinkedWorktree(string gitFile)
     {
         var p = ReadGitFile(gitFile);

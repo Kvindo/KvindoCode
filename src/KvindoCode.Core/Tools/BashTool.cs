@@ -147,7 +147,12 @@ public sealed class BashTool : Tool
                 File.Delete(cwdFile);
                 // An isolated session must not be able to leave its worktree: `cd ..`/`cd /` in one command would
                 // otherwise permanently re-point every later tool call at the shared tree (or a peer session's tree).
-                if (nd.Length > 0 && Directory.Exists(nd) && (!ctx.Isolated || Paths.IsUnder(nd, ctx.WorkDir)))
+                // The base for every later tool call may not leave the session's own tree. `ctx.Isolated` was too weak a
+                // test: a MIRRORED session reports Isolated=false until a write materialises a repo, so during that window
+                // a `cd` into the shared checkout was persisted as the base and every RELATIVE path afterwards resolved
+                // there, while Bash itself looked correct (reported by another session on 2026-10-17). A session with a
+                // Workspace keeps its cwd inside WorkDir, full stop.
+                if (nd.Length > 0 && Directory.Exists(nd) && (ctx.Workspace is null && !ctx.Isolated || Paths.IsUnder(nd, ctx.WorkDir)))
                     ctx.Cwd = nd;
                 // A mirrored session's cwd lives under its own mirror; anything else (a repo it walked into through an
                 // absolute path) is not persisted, so the next call is back inside its own tree.
