@@ -5,7 +5,7 @@ using System.Text;
 namespace KvindoCode.Core.Terminal;
 
 /// <summary>One tmux pane, as tmux reports it.</summary>
-public sealed record TerminalPaneInfo(int Index, int Columns, int Rows, string Title, string Command, bool Active, int CursorX = 0, int CursorY = 0);
+public sealed record TerminalPaneInfo(int Index, int Columns, int Rows, string Title, string Command, bool Active, int CursorX = 0, int CursorY = 0, string Path = "");
 
 /// <summary>
 /// The terminal grid's backend: tmux, driven with one tmux SESSION per project.
@@ -82,7 +82,10 @@ public sealed class TmuxBackend
         for (var i = 1; i < panes; i++)
         {
             var target = $"{name}.{i - 1}";
-            var (splitCode, _, splitError) = await RunAsync(new[] { "split-window", "-t", target, i % 2 == 1 ? "-h" : "-v" }, ct);
+            // -c again for every split. Without it only the FIRST pane lands in the project: a split without -c
+            // starts in the tmux CLIENT's directory, so three of the four terminals opened wherever the app happened
+            // to be launched from (measured against tmux 3.4: panes 1-3 had the client's cwd).
+            var (splitCode, _, splitError) = await RunAsync(new[] { "split-window", "-t", target, i % 2 == 1 ? "-h" : "-v", "-c", Path.GetFullPath(projectPath) }, ct);
             if (splitCode != 0) throw new InvalidOperationException($"tmux split-window failed: {splitError.Trim()}");
             // Wait for the new pane: the next split targets its index, which tmux assigns.
             for (var tries = 0; tries < 50; tries++)
@@ -109,7 +112,7 @@ public sealed class TmuxBackend
         if (!IsAvailable) return panes;
         // The title is OUR pane option rather than pane_title: tmux 3.4 sets pane_title to the login user for a fresh
         // pane ("qtu100"), so pane_title cannot tell "the human named this tab" from "nobody has".
-        const string format = "#{pane_index}\t#{pane_width}\t#{pane_height}\t#{@kv-title}\t#{pane_current_command}\t#{pane_active}\t#{cursor_x}\t#{cursor_y}";
+        const string format = "#{pane_index}\t#{pane_width}\t#{pane_height}\t#{@kv-title}\t#{pane_current_command}\t#{pane_active}\t#{cursor_x}\t#{cursor_y}\t#{pane_current_path}";
         var (code, output, _) = await RunAsync(new[] { "list-panes", "-t", SessionName(projectPath), "-F", format }, ct);
         if (code != 0) return panes;
         foreach (var line in output.Split('\n', StringSplitOptions.RemoveEmptyEntries))
@@ -119,7 +122,7 @@ public sealed class TmuxBackend
             if (!int.TryParse(f[0], out var index) || !int.TryParse(f[1], out var cols) || !int.TryParse(f[2], out var rows)) continue;
             _ = int.TryParse(f.Length > 6 ? f[6] : "0", out var cursorX);
             _ = int.TryParse(f.Length > 7 ? f[7] : "0", out var cursorY);
-            panes.Add(new TerminalPaneInfo(index, cols, rows, f[3], f[4], f[5] == "1", cursorX, cursorY));
+            panes.Add(new TerminalPaneInfo(index, cols, rows, f[3], f[4], f[5] == "1", cursorX, cursorY, f.Length > 8 ? f[8] : ""));
         }
         return panes;
     }
@@ -204,7 +207,7 @@ public sealed class TmuxBackend
     {
         if (!IsAvailable) return -1;
         var name = SessionName(projectPath);
-        await RunAsync(new[] { "split-window", "-t", $"{name}.0", "-v" }, ct);
+        await RunAsync(new[] { "split-window", "-t", $"{name}.0", "-v", "-c", Path.GetFullPath(projectPath) }, ct);
         await RunAsync(new[] { "select-layout", "-t", name, "tiled" }, ct);
         var panes = await ListPanesAsync(projectPath, ct);
         return panes.Count > 0 ? panes[^1].Index : -1;
@@ -219,8 +222,26 @@ public sealed class TmuxBackend
 
     // ---------------------------------------------------------------- process plumbing
 
+    /// <summary>
+    /// One tmux call, synchronously: a process started and drained with NO awaits.
+    /// </summary>
+    /// <remarks>
+    /// This is the blocking path, and it must not be implemented by blocking on an async method. It was, and that
+    /// deadlocked: the async version's continuations resume on the captured synchronisation context, so calling
+    /// <c>GetAwaiter().GetResult()</c> from the UI thread blocks the very thread those continuations need — the app
+    /// froze the first time the terminal grid asked whether tmux exists (found by the UI test, which hung). Reading the
+    /// pipes with <c>ReadToEnd</c> runs no continuations at all, so blocking here is safe by construction.
+    /// </remarks>
     (int Code, string Output, string Error) Run(string file, IEnumerable<string> args)
-        => RunAsyncCore(file, args, null, default).GetAwaiter().GetResult();
+    {
+        var psi = new ProcessStartInfo(file) { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true };
+        AddSocketAndArgs(psi, args);
+        using var p = Process.Start(psi) ?? throw new InvalidOperationException($"could not start {file}");
+        var output = Clean(p.StandardOutput.ReadToEnd());
+        var error = Clean(p.StandardError.ReadToEnd());
+        p.WaitForExit();
+        return (p.ExitCode, output, error);
+    }
 
     Task<(int Code, string Output, string Error)> RunAsync(IEnumerable<string> args, CancellationToken ct)
         => RunAsyncCore(_tmux, args, null, ct);
@@ -234,8 +255,7 @@ public sealed class TmuxBackend
     async Task<(int Code, string Output, string Error)> RunAsyncCore(string file, IEnumerable<string> args, string? input, CancellationToken ct)
     {
         var psi = new ProcessStartInfo(file) { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, RedirectStandardInput = input is not null };
-        if (_socket is { Length: > 0 }) { psi.ArgumentList.Add("-L"); psi.ArgumentList.Add(_socket); }
-        foreach (var a in args) psi.ArgumentList.Add(a);
+        AddSocketAndArgs(psi, args);
         using var p = Process.Start(psi) ?? throw new InvalidOperationException($"could not start {file}");
         var stdout = p.StandardOutput.ReadToEndAsync(ct);
         var stderr = p.StandardError.ReadToEndAsync(ct);
@@ -245,9 +265,15 @@ public sealed class TmuxBackend
         try { await p.WaitForExitAsync(ct); }
         catch (OperationCanceledException) { try { p.Kill(true); } catch { } throw; }
         return (p.ExitCode, outText, errText);
-
-        // tmux writes UTF-8 and reports a zero exit code for an empty capture; \r would otherwise end up inside the
-        // rendered cells.
-        static string Clean(string s) => s.Replace("\r\n", "\n").Replace('\r', '\n');
     }
+
+    void AddSocketAndArgs(ProcessStartInfo psi, IEnumerable<string> args)
+    {
+        if (_socket is { Length: > 0 }) { psi.ArgumentList.Add("-L"); psi.ArgumentList.Add(_socket); }
+        foreach (var a in args) psi.ArgumentList.Add(a);
+    }
+
+    // tmux writes UTF-8 and reports a zero exit code for an empty capture; \r would otherwise end up inside the
+    // rendered cells.
+    static string Clean(string s) => s.Replace("\r\n", "\n").Replace('\r', '\n');
 }

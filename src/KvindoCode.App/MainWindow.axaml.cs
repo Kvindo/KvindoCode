@@ -18,6 +18,7 @@ using KvindoCode.Core.Llm;
 using KvindoCode.Core.Notify;
 using KvindoCode.Core.Secrets;
 using KvindoCode.Core.Search;
+using KvindoCode.Core.Terminal;
 using KvindoCode.Core.Tools;
 
 namespace KvindoCode.App;
@@ -1971,6 +1972,60 @@ public partial class MainWindow : Window
         UpdateEmpty();
     }
 
+    // ================================================================== terminals
+
+    TerminalsView? _terminals;
+    TmuxBackend? _tmux;
+
+    /// <summary>
+    /// The tmux backend, created once. A separate socket is used when the environment asks for it
+    /// (<c>KVINDOCODE_TMUX_SOCKET</c>), which is how the tests stay off the human's own tmux server — the grid is
+    /// otherwise on the default socket so that <c>tmux attach</c> from a real terminal finds it.
+    /// </summary>
+    TmuxBackend Tmux => _tmux ??= new TmuxBackend(socketName: Environment.GetEnvironmentVariable("KVINDOCODE_TMUX_SOCKET"));
+
+    /// <summary>Open the 2x2 terminal grid for a project, replacing whatever else is in the main area.</summary>
+    void OpenTerminals(string project)
+    {
+        if (_terminals is { } open && open.Project == project) { CloseTerminals(); return; }   // the icon toggles
+        CloseContextMain();
+        if (_terminals is { } other && other.Project != project) CloseTerminals();              // one grid at a time
+        _project = project;
+        foreach (var tv in Host.Children.OfType<TranscriptView>().ToList()) Host.Children.Remove(tv);
+        _terminals = new TerminalsView(Tmux, project, CloseTerminals, ShowInfo)
+        {
+            MaxWidth = 1400,
+            HorizontalAlignment = HorizontalAlignment.Left,
+        };
+        Host.Children.Insert(0, _terminals);
+        BottomColumn.IsVisible = false;      // the composer belongs to a session, and no session is on screen now
+        EmptyState.IsVisible = false;
+        _terminals.FocusActive();
+        // ...and again once it has been laid out: a control that is not yet attached cannot take focus, and without
+        // the keyboard the grid would look alive while the characters went into the (hidden) composer
+        Dispatcher.UIThread.Post(() => _terminals?.FocusActive(), DispatcherPriority.Loaded);
+        RebuildSidebar();
+    }
+
+    void CloseTerminals()
+    {
+        if (_terminals is null) return;
+        // the tmux session is deliberately NOT killed: its panes are the thing the human expects to find again, and
+        // nothing is logged to disk, so leaving it running costs a shell and keeps the history
+        Host.Children.Remove(_terminals);
+        _terminals = null;
+        BottomColumn.IsVisible = true;
+        if (_current != null && !Host.Children.Contains(_current.Transcript))
+        {
+            Host.Children.Insert(0, _current.Transcript);
+            _current.Transcript.ScrollToEnd();
+        }
+        UpdateEmpty();
+    }
+
+    /// <summary>Where keystrokes go when the terminal grid is on screen.</summary>
+    bool TerminalsVisible => _terminals is not null && Host.Children.Contains(_terminals);
+
     /// <summary>
     /// The local scan flagged an image with something that looks like a credential. It is the only judge of pictures (no
     /// pattern can match pixels) and it is often wrong about screenshots, so the human decides — and to decide they must
@@ -3146,6 +3201,11 @@ public partial class MainWindow : Window
         ToolTip.SetTip(add, "New session in this project");
         add.Click += (_, _) => NewSession(path);
 
+        var terminals = new Button { Name = "TerminalBtn", Classes = { "ghost" }, Content = Ui.Icon("IconTerminal", "KvMuted", 14), Padding = new Thickness(6), VerticalAlignment = VerticalAlignment.Center };
+        terminals.Tag = path;      // tests address the button by its project: several project rows carry the same name
+        ToolTip.SetTip(terminals, $"Open the terminal grid for {Path.GetFileName(path.TrimEnd('/'))} (four terminals in a tmux session that outlives the app)");
+        terminals.Click += (_, _) => OpenTerminals(path);
+
         var menu = new ContextMenu();
         var open = new MenuItem { Header = "Reveal in file manager" };
         open.Click += (_, _) => Shell.Open(path);
@@ -3159,8 +3219,11 @@ public partial class MainWindow : Window
         menu.Items.Add(open); menu.Items.Add(remove);
         btn.ContextMenu = menu;
 
+        var actions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 2, VerticalAlignment = VerticalAlignment.Center };
+        actions.Children.Add(add);
+        actions.Children.Add(terminals);
         var g = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto"), Margin = new Thickness(0, 6, 0, 0) };
-        g.Children.Add(btn); Grid.SetColumn(add, 1); g.Children.Add(add);
+        g.Children.Add(btn); Grid.SetColumn(actions, 1); g.Children.Add(actions);
         return g;
     }
 

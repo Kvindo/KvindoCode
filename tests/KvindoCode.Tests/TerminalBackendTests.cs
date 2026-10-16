@@ -75,11 +75,11 @@ public sealed class TerminalBackendTests(ITestOutputHelper o)
         Assert.True(panes.Select(p => p.Columns).Distinct().Count() <= 2);
         Assert.True(panes.Select(p => p.Rows).Distinct().Count() <= 2);
 
-        // the cwd: the shell in the pane really is in the project directory
-        await f.Backend.SendTextAsync(f.Dir, 0, "pwd");
-        await f.Backend.SendKeyAsync(f.Dir, 0, "Enter");
-        Assert.True(await Eventually(async () => (await f.Backend.CaptureAsync(f.Dir, 0, 20)).Contains(f.Dir.Replace("/tmp/", "/tmp/"))),
-            "the pane did not report the project directory:\n" + await f.Backend.CaptureAsync(f.Dir, 0, 20));
+        // EVERY pane starts in the project directory, not just the first one. A split without -c starts in the tmux
+        // CLIENT's directory, so three of the four terminals opened wherever the app was launched from — the pane's own
+        // reported path is the check, because a prompt can be abbreviated.
+        foreach (var pane in panes)
+            Assert.Equal(Path.GetFullPath(f.Dir), pane.Path);
     }
 
     /// <summary>Ensure is idempotent, and a second call does not add a fifth pane.</summary>

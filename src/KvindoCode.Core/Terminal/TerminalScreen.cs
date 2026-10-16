@@ -23,8 +23,8 @@ public sealed class TerminalScreen
 {
     public List<TerminalLine> Lines { get; } = new();
     /// <summary>The row the cursor is on, or -1 when tmux did not report one (a scrollback capture).</summary>
-    public int CursorLine { get; init; } = -1;
-    public int CursorColumn { get; init; } = -1;
+    public int CursorLine { get; internal set; } = -1;
+    public int CursorColumn { get; internal set; } = -1;
 }
 
 /// <summary>
@@ -44,7 +44,7 @@ public static class TerminalScreenParser
     /// <summary>Parse captured pane text. <paramref name="cursorLine"/>/<paramref name="cursorColumn"/> come from tmux's own cursor report (-1 when unknown).</summary>
     public static TerminalScreen Parse(string captured, int cursorLine = -1, int cursorColumn = -1)
     {
-        var screen = new TerminalScreen { CursorLine = cursorLine, CursorColumn = cursorColumn };
+        var screen = new TerminalScreen();
         var runs = new List<TerminalRun>();
         var text = new StringBuilder();
         int? fg = null, bg = null;
@@ -67,7 +67,7 @@ public static class TerminalScreenParser
             if (c == '\n')
             {
                 Flush();
-                screen.Lines.Add(new TerminalLine(runs, -1, screen.Lines.Count == cursorLine));
+                screen.Lines.Add(new TerminalLine(runs, -1, false));
                 runs = new List<TerminalRun>();
                 continue;
             }
@@ -89,8 +89,26 @@ public static class TerminalScreenParser
             i = Math.Min(i + (i + 1 < captured.Length && "()*+-./".Contains(captured[i + 1]) ? 2 : 1), captured.Length - 1);
         }
         Flush();
-        screen.Lines.Add(new TerminalLine(runs, -1, screen.Lines.Count == cursorLine));
+        screen.Lines.Add(new TerminalLine(runs, -1, false));
+        MarkCursor(screen, cursorLine, cursorColumn);
         return screen;
+    }
+
+    /// <summary>
+    /// Record which row the terminal's cursor is on, and in which column.
+    /// </summary>
+    /// <remarks>
+    /// Separate from the parse because a capture that includes SCROLLBACK has more lines than the visible screen, so
+    /// tmux's <c>cursor_y</c> (which counts from the top of the VISIBLE screen) only means something once the caller
+    /// knows how many lines came from history. Doing it here rather than guessing at parse time keeps that arithmetic
+    /// in one place, and lets a caller with no cursor report (-1) simply not mark one.
+    /// </remarks>
+    public static void MarkCursor(TerminalScreen screen, int cursorLine, int cursorColumn)
+    {
+        screen.CursorLine = cursorLine;
+        screen.CursorColumn = cursorColumn;
+        if (cursorLine < 0 || cursorLine >= screen.Lines.Count) return;
+        screen.Lines[cursorLine] = screen.Lines[cursorLine] with { IsCursorLine = true, CursorColumn = cursorColumn };
     }
 
     /// <summary>Apply one SGR parameter list to the running style.</summary>
