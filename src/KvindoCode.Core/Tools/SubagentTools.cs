@@ -7,7 +7,7 @@ public sealed class AgentTool : Tool
 {
     public override SessionToolRole SessionRole => SessionToolRole.Subagent;
     public override string Name => "Agent";
-    public override string Description => "Spawns an isolated LLM subagent in the same project. Optional model or model_tag selects its model independently. The child runs concurrently; inspect with AgentOutput, list with AgentList, stop with AgentStop.";
+    public override string Description => "Spawns an isolated LLM subagent in the same project. Optional model or model_tag selects its model independently — call the Models tool to see the tags and model ids available. The child runs concurrently; inspect with AgentOutput, list with AgentList, stop with AgentStop.";
     public override JsonNode Schema => JsonNode.Parse("""
         {"type":"object","properties":{
           "prompt":{"type":"string"},
@@ -55,6 +55,68 @@ public sealed class AgentTool : Tool
     /// <summary>True when at least one model carries this tag (tag matching is case-insensitive, as elsewhere).</summary>
     internal static bool IsRealTag(AppSettings settings, string tag) =>
         settings.ModelTags.Any(kv => kv.Value.Contains(tag.Trim(), StringComparer.OrdinalIgnoreCase));
+}
+
+/// <summary>
+/// Lists the models and model TAGS this install can spawn agents on, so a session does not have to guess an id.
+/// </summary>
+/// <remarks>
+/// Asked 2026-10-16: "Can sessions get list of available models/tags? So I could tell spawn random agents from X tag and
+/// it will understand". Before this, the tags existed only inside the model picker's UI state and the only feedback a
+/// session got was an error after passing a tag that did not exist — so "spawn three agents on the cheap tag" was not
+/// something it could act on. The Agent tool's own error already lists the tags; this makes the list something the
+/// session can FETCH, with the models each tag covers and the model ids that are valid in `model`.
+/// </remarks>
+public sealed class ModelsTool : Tool
+{
+    public override SessionToolRole SessionRole => SessionToolRole.Subagent;
+    public override string Name => "Models";
+    public override string Description => "Lists the model tags and the model ids available on this install, so `Agent` can be given a real tag or a real model id. Read-only.";
+    public override JsonNode Schema => JsonNode.Parse("""{"type":"object","properties":{}}""")!;
+
+    public override Task<ToolResult> RunAsync(JsonObject input, ToolContext ctx, CancellationToken ct)
+    {
+        var settings = ctx.Session.Settings;
+        var sb = new System.Text.StringBuilder();
+
+        // tags first: they are what a session is most likely to be told to use ("cheap", "smart")
+        if (settings.ModelTags.Count > 0)
+        {
+            sb.AppendLine($"Model tags ({settings.ModelTags.Count}) — pass one as `model_tag`:");
+            foreach (var kv in settings.ModelTags.OrderBy(k => k.Key, StringComparer.OrdinalIgnoreCase))
+                sb.AppendLine($"- {string.Join(", ", kv.Value)}");   // key = the model id; the TAGS are the values
+            sb.AppendLine();
+            // The map above is id -> tags; invert it, because that is how the question is asked
+            var byTag = new SortedDictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+            foreach (var kv in settings.ModelTags)
+                foreach (var t in kv.Value)
+                {
+                    if (!byTag.TryGetValue(t, out var list)) byTag[t] = list = new List<string>();
+                    if (!list.Contains(kv.Key, StringComparer.OrdinalIgnoreCase)) list.Add(kv.Key);
+                }
+            sb.AppendLine("By tag:");
+            foreach (var kv in byTag) sb.AppendLine($"- {kv.Key}: {string.Join(", ", kv.Value)}");
+        }
+        else sb.AppendLine("No model tags are set (they are created in the model picker), so use a model id in `model`.");
+
+        var models = ctx.Session.ModelListProvider?.Invoke() ?? Array.Empty<(string Id, string Name, int Context)>();
+        sb.AppendLine();
+        if (models.Count == 0)
+            sb.AppendLine("The model list is not available in this session; pass `model` as the exact id from the model picker.");
+        else
+        {
+            sb.AppendLine($"Models available ({models.Count}) — pass the ID as `model`:");
+            foreach (var m in models.OrderBy(x => x.Id, StringComparer.OrdinalIgnoreCase))
+                sb.AppendLine($"- {m.Id}" + (string.IsNullOrEmpty(m.Name) || m.Name == m.Id ? "" : $"  ({m.Name})") + (m.Context > 0 ? $", {m.Context / 1000}k ctx" : ""));
+        }
+
+        sb.AppendLine();
+        var s = ctx.Session.Settings;
+        sb.AppendLine($"Defaults: this session runs {ctx.Session.Model}; a subagent with neither `model` nor `model_tag` inherits it."
+                      + (string.IsNullOrWhiteSpace(s.DefaultSubagentModel) ? "" : $" The configured default subagent model is {s.DefaultSubagentModel}.")
+                      + (string.IsNullOrWhiteSpace(s.DefaultSubagentModelTag) ? "" : $" Its default tag is {s.DefaultSubagentModelTag}."));
+        return Task.FromResult(ToolResult.Ok(sb.ToString().TrimEnd()));
+    }
 }
 
 public sealed class AgentOutputTool : Tool

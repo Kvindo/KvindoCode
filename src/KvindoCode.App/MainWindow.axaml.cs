@@ -510,6 +510,26 @@ public partial class MainWindow : Window
         return _models.Any(m => string.Equals(m.Id, name, StringComparison.OrdinalIgnoreCase)) ? name : null;
     }
 
+    /// <summary>The models this install can run, for the Models tool (id, display name, context window).</summary>
+    /// <remarks>
+    /// Built from the loaded catalog when it is there (it carries the pretty names and the real context windows) and
+    /// from the plain model list otherwise, so the tool still answers before the catalog has loaded.
+    /// </remarks>
+    IReadOnlyList<(string Id, string Name, int Context)> ModelInventory()
+    {
+        try
+        {
+            if (_catalog.Count > 0)
+                return _catalog.Where(c => !string.IsNullOrWhiteSpace(c.Id))
+                               .Select(c => (Id: c.Id, Name: c.Display, Context: c.Context))
+                               .ToList();
+            return _models.Where(m => !string.IsNullOrWhiteSpace(m.Id))
+                          .Select(m => (Id: m.Id, Name: m.Id, Context: m.ContextWindow))
+                          .ToList();
+        }
+        catch { return Array.Empty<(string, string, int)>(); }
+    }
+
     string? ResolveModel(SessionInfo info)
     {
         if (!string.IsNullOrEmpty(info.KvModel)) return info.KvModel;
@@ -570,7 +590,7 @@ public partial class MainWindow : Window
             var inter = new UiInteraction();
             var session = await Task.Run(() => AgentSession.Resume(_settings, _llm, info, inter, _storage, ResolveModel));
             resumeMs = sw.ElapsedMilliseconds; sw.Restart();
-            session.ModelLookup = LookupModel; session.ModelNameLookup = LookupModelByName; session.AutoTitle = _settings.AutoTitle;
+            session.ModelLookup = LookupModel; session.ModelNameLookup = LookupModelByName; session.ModelListProvider = ModelInventory; session.AutoTitle = _settings.AutoTitle;
             var sv = Attach(session, inter, replay: true);
             replayMs = sw.ElapsedMilliseconds; sw.Restart();
             _project = sv.Session.Project.Cwd;
@@ -1029,7 +1049,7 @@ public partial class MainWindow : Window
             AgentSession session;
             try { session = await Task.Run(() => AgentSession.Resume(_settings, _llm, target, inter, _storage, ResolveModel)); }
             catch (Exception e) { return $"Could not open session \"{title}\": {e.Message}"; }
-            session.ModelLookup = LookupModel; session.ModelNameLookup = LookupModelByName; session.AutoTitle = _settings.AutoTitle;
+            session.ModelLookup = LookupModel; session.ModelNameLookup = LookupModelByName; session.ModelListProvider = ModelInventory; session.AutoTitle = _settings.AutoTitle;
             sv = Attach(session, inter, replay: true);
             RebuildSidebar();
         }

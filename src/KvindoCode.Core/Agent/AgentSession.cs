@@ -195,6 +195,12 @@ public sealed class AgentSession : IDisposable
     /// matched nothing, so every subagent silently ran the parent's model (reported 2026-10-09).
     /// </summary>
     public Func<string, string?>? ModelNameLookup { get; set; }
+    /// <summary>
+    /// The models this install can run, as (id, display name, context window). Set by the window from the catalog it
+    /// loaded, so a session can DISCOVER what is available instead of guessing an id — asked 2026-10-16: "Can sessions
+    /// get list of available models/tags? So i could tell spawn random agents from X tag and it will understand".
+    /// </summary>
+    public Func<IReadOnlyList<(string Id, string Name, int Context)>>? ModelListProvider { get; set; }
     /// <summary>How `Secrets get to=clipboard` hands a value to the human (the UI wires this to the system clipboard).</summary>
     public Func<string, Task<bool>>? ClipboardSetter { get; set; }
     /// <summary>The local secret auditor — scans tool results for leaked secrets before they reach the transcript.</summary>
