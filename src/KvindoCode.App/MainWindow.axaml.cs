@@ -211,6 +211,7 @@ public partial class MainWindow : Window
         SearchBox.TextChanged += (_, _) => { SearchClear.IsVisible = !string.IsNullOrEmpty(SearchBox.Text); _debounce.Stop(); _debounce.Start(); };
 
         // find inside the current session: the same regexp engine, applied to the transcript
+        FindBtn.Content = Ui.Icon("IconSearch", "KvMuted", 15);
         FindBtn.Click += (_, _) => OpenFindInPane();
 
         SearchClear.Click += (_, _) => SearchBox.Text = "";
@@ -2414,10 +2415,11 @@ public partial class MainWindow : Window
             if (lag >= 60) text += $" · lag {lag:0}ms";                     // only when it is actually felt
             if (HealthText.Text != text) HealthText.Text = text;
 
-            // normal / getting heavy / this is what is slowing you down
-            HealthText.Foreground = lag >= 400 || ui >= 85 ? new SolidColorBrush(Color.Parse("#EF4444"))
-                                  : lag >= 120 || ui >= 50 ? new SolidColorBrush(Color.Parse("#F59E0B"))
-                                  : null;
+            // The figures stay MUTED, exactly like the context/usage figure in the other header — this is a readout,
+            // not an alarm. The first version turned amber from 50% UI or 120 ms of lag, which with several sessions
+            // running is the normal state: the label was amber most of the time and amber "muted" text on the panel
+            // background is hard to read (reported 2026-10-16). The colour is left to the `muted` class in XAML.
+            _ = lag;
             ToolTip.SetTip(HealthText,
                 $"{FormatBytes(mem)} resident memory.\n" +
                 (ui is { } u ? $"UI thread: {u:0.0}% of one core, over the last {HealthSeconds:0}s.\n" : "UI thread CPU: unavailable.\n") +

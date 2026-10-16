@@ -7,6 +7,10 @@ namespace KvindoCode.Core.Agent;
 public sealed class SessionInfo
 {
     public string Id { get; set; } = "";              // transcript id (Claude: cliSessionId)
+    /// <summary>For a SUBAGENT transcript: the session that spawned it, so the agents can be re-listed after a
+    /// restart. Without it the child exists on disk with no way to say whose it was, and restarting lost them
+    /// (reported 2026-10-16: "session looses agents on app restart").</summary>
+    public string? ParentSessionId { get; set; }
     public string Path { get; set; } = "";            // transcript file
     public string Cwd { get; set; } = "";
     public string Title { get; set; } = "New session";
@@ -62,6 +66,8 @@ public sealed class Entry
     public bool? WasRunning { get; set; }
     /// <summary>A subagent transcript, not one of the human's sessions.</summary>
     public bool? Subagent { get; set; }
+    /// <summary>For a subagent transcript: the session that spawned it (see <see cref="SessionInfo.ParentSessionId"/>).</summary>
+    public string? ParentSessionId { get; set; }
     public DateTimeOffset Ts { get; set; } = DateTimeOffset.UtcNow;
     public ChatMessage? M { get; set; }
 }
@@ -125,14 +131,14 @@ public static class SessionStore
                 // was overwritten on the next turn — the fix is only as good as this path.
                 if (line.StartsWith("{\"kind\":\"title\"")) { try { var te = JsonSerializer.Deserialize<Entry>(line, Json); if (!string.IsNullOrEmpty(te?.Title)) { info.Title = te.Title!; if (te!.TitleSource is { Length: > 0 } ts) info.TitleSource = ts; } } catch { } }
                 else if (line.StartsWith("{\"kind\":\"msg\"") && MessageTime(line) is { } mt) lastMessage = mt;
-                else if (line.StartsWith("{\"kind\":\"meta\"")) { try { var me = JsonSerializer.Deserialize<Entry>(line, Json); if (me?.WasRunning is { } wr) info.WasRunning = wr; if (me?.Subagent is { } sub) info.Subagent = sub; if (Enum.TryParse<SessionMode>(me?.WorkMode, out var wmode)) info.WorkMode = wmode; if (!string.IsNullOrEmpty(me?.Title)) { info.Title = me!.Title!; if (me.TitleSource is { Length: > 0 } ts) info.TitleSource = ts; } } catch { } }
+                else if (line.StartsWith("{\"kind\":\"meta\"")) { try { var me = JsonSerializer.Deserialize<Entry>(line, Json); if (me?.WasRunning is { } wr) info.WasRunning = wr; if (me?.Subagent is { } sub) info.Subagent = sub; if (me?.ParentSessionId is { Length: > 0 } ps) info.ParentSessionId = ps; if (Enum.TryParse<SessionMode>(me?.WorkMode, out var wmode)) info.WorkMode = wmode; if (!string.IsNullOrEmpty(me?.Title)) { info.Title = me!.Title!; if (me.TitleSource is { Length: > 0 } ts) info.TitleSource = ts; } } catch { } }
                 continue;
             }
             if (line.Length == 0) continue;
             Entry? e;
             try { e = JsonSerializer.Deserialize<Entry>(line, Json); } catch { continue; }
             if (e is null) continue;
-            if (e.Kind == "meta") { info.Cwd = e.Cwd ?? ""; info.Created = e.Ts; info.WasRunning = e.WasRunning ?? false; if (e.Subagent is { } sub2) info.Subagent = sub2; if (Enum.TryParse<SessionMode>(e.WorkMode, out var wm0)) info.WorkMode = wm0; if (!string.IsNullOrEmpty(e.Title)) info.Title = e.Title; if (e.TitleSource is { Length: > 0 } src0) info.TitleSource = src0; }
+            if (e.Kind == "meta") { info.Cwd = e.Cwd ?? ""; info.Created = e.Ts; info.WasRunning = e.WasRunning ?? false; if (e.Subagent is { } sub2) info.Subagent = sub2; if (e.ParentSessionId is { Length: > 0 } ps2) info.ParentSessionId = ps2; if (Enum.TryParse<SessionMode>(e.WorkMode, out var wm0)) info.WorkMode = wm0; if (!string.IsNullOrEmpty(e.Title)) info.Title = e.Title; if (e.TitleSource is { Length: > 0 } src0) info.TitleSource = src0; }
             else if (e.Kind == "title" && !string.IsNullOrEmpty(e.Title)) { info.Title = e.Title; if (e.TitleSource is { Length: > 0 } src1) info.TitleSource = src1; }
             else if (e.Kind == "msg") { hasMsg = true; lastMessage = e.Ts; if (info.Title == "New session" && e.M?.Role == "user") info.Title = TitleFrom(e.M.Content ?? ""); }
         }

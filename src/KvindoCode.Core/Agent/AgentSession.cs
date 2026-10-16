@@ -891,6 +891,9 @@ public sealed class AgentSession : IDisposable
         var loaded = storage.Load(info);
         var cwd = Directory.Exists(info.Cwd) ? info.Cwd : (Directory.Exists(loaded.Info.Cwd) ? loaded.Info.Cwd : Directory.GetCurrentDirectory());
         var s = new AgentSession(settings, llm, cwd, interaction, info, storage);
+        // Re-list the subagents this session spawned in an earlier run, from their transcripts: a handle lives only in
+        // memory, so a restart used to lose every agent the session had (reported 2026-10-16).
+        try { s.Subagents.Restore(); } catch { }
         s._mode = loaded.Mode;
         s._workMode = loaded.Info.WorkMode != SessionMode.Normal ? loaded.Info.WorkMode : info.WorkMode;
         s.AuditSecretsOverride = loaded.Info.AuditSecrets ?? info.AuditSecrets;

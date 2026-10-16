@@ -27,19 +27,21 @@
     <!-- ================= Sidebar ================= -->
     <Border Classes="sidebar edge" BorderThickness="0,0,1,0" x:Name="SidebarBorder">
       <Grid RowDefinitions="Auto,Auto,Auto,Auto,*,Auto">
-        <!-- THREE columns, and the live figures live in the LAST one which is sized `*`: in an Auto column they made
-             the header wider than the 300px sidebar, which made the sidebar's ScrollViewer content wider than its
-             viewport, which pushed every row's controls (the Needs-attention X at x=308) outside the clipped area —
-             so clicks on them silently missed (caught by the Needs-attention UI tests). Confining the text to `*` keeps
-             the header inside the sidebar and trims the figures instead. -->
-        <Grid Grid.Row="0" ColumnDefinitions="Auto,Auto,*" Margin="16,16,12,8">
-          <!-- The Kvindo mark (extracted from the Cloud logo) rather than a letter in a coloured box: same product. -->
-          <Image Grid.Column="0" Source="avares://kvindocode/Assets/kvindo-k.png" Width="26" Height="26" VerticalAlignment="Center"/>
-          <TextBlock Grid.Column="1" Name="BrandText" Text="Kvindo™ Code" FontWeight="SemiBold" FontSize="15" Margin="10,0,0,0" VerticalAlignment="Center"/>
-          <!-- Live process figures: memory held, and how busy/blocked the UI thread is. Filled by UpdateHealth(). -->
-          <TextBlock Grid.Column="2" Name="HealthText" FontSize="11" Opacity="0.55" VerticalAlignment="Center"
-                     Margin="8,0,0,0" HorizontalAlignment="Right" TextTrimming="CharacterEllipsis"
-                     ToolTip.Tip="Memory this process holds, and UI-thread load: its CPU share plus the last dispatcher round-trip, which measures blocking even when the CPU is idle."/>
+        <!-- The mark, then a STACK: name on the first line, the live figures on the second.
+             Two reasons for the stack rather than one row. (a) Width: in a single row the figures had to share 300px
+             with the mark and the name, so they were squeezed into ~100px and ellipsised away — and putting them in an
+             Auto column instead made the header wider than the sidebar, which stopped every row's controls past the
+             viewport edge from receiving clicks (the Needs-attention X at x=308; caught by those UI tests). (b) The
+             name then aligns with the TOP of the mark, since more information follows it (asked 2026-10-16). -->
+        <Grid Grid.Row="0" ColumnDefinitions="Auto,*" Margin="16,14,12,10">
+          <!-- The Kvindo mark (the K from the Cloud logo) rather than a letter in a coloured box: same product. -->
+          <Image Grid.Column="0" Source="avares://kvindocode/Assets/kvindo-k.png" Width="26" Height="26" VerticalAlignment="Top"/>
+          <StackPanel Grid.Column="1" Margin="10,1,0,0" Spacing="1" VerticalAlignment="Top">
+            <TextBlock Name="BrandText" Text="Kvindo™ Code" FontWeight="SemiBold" FontSize="15" TextTrimming="CharacterEllipsis"/>
+            <!-- Live process figures: memory held, and how busy/blocked the UI thread is. Filled by UpdateHealth(). -->
+            <TextBlock Name="HealthText" Classes="muted" FontSize="11" TextTrimming="CharacterEllipsis"
+                       ToolTip.Tip="Memory this process holds, and UI-thread load: its UI-thread CPU share plus the last dispatcher round-trip, which measures blocking even when the CPU is idle."/>
+          </StackPanel>
         </Grid>
 
         <Button Grid.Row="1" x:Name="NewSessionBtn" Classes="ghost" HorizontalAlignment="Stretch" HorizontalContentAlignment="Left" Margin="10,2,10,4" Padding="10,8">
@@ -100,8 +102,10 @@
             <TextBlock Grid.Column="1" x:Name="ProjectText" Classes="muted" FontSize="12.5" TextTrimming="CharacterEllipsis" MaxWidth="200" Margin="8,0,0,0" VerticalAlignment="Center"/>
             <!-- Find moved to the SIDE PANEL (asked 2026-10-15): a result list needs room and you want to click through
                  results. This button opens it and searches the whole history, not just the rendered window. -->
-            <Button Grid.Column="2" x:Name="FindBtn" Classes="ghost" Padding="8,4" Margin="8,0,0,0" VerticalAlignment="Center"
-                    Content="Find" FontSize="12.5"
+            <!-- An ICON, not the word "Find": it sits in a row of icon buttons (pin, panel, attach) and the label made
+                 the row uneven (asked 2026-10-16: "search should be shown as icon"). Its content is set in code-behind
+                 next to the other icon buttons, so the geometry comes from the same place. -->
+            <Button Grid.Column="2" x:Name="FindBtn" Classes="ghost" Padding="6" Margin="8,0,0,0" VerticalAlignment="Center"
                     ToolTip.Tip="Find in this session (Ctrl+F) — opens in the side panel and searches every message, including text inside collapsed tool calls."/>
             <TextBlock Grid.Column="3" x:Name="FindStatus" Classes="muted" FontSize="11.5" VerticalAlignment="Center" Margin="6,0,0,0" Width="44" TextAlignment="Right" IsVisible="False"/>
             <StackPanel Grid.Column="4" Orientation="Horizontal" Margin="4,0,0,0" VerticalAlignment="Center">

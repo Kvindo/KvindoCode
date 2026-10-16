@@ -2,6 +2,8 @@ using System.Diagnostics;
 using System.Reflection;
 using System.Text.RegularExpressions;
 using Avalonia.Controls;
+using Avalonia.Layout;
+using Avalonia.VisualTree;
 using Avalonia.Headless.XUnit;
 using Avalonia.Media.Imaging;
 using Avalonia.Platform;
@@ -43,10 +45,17 @@ public sealed class HeaderHealthAndBrandTests(ITestOutputHelper o)
         Assert.NotNull(brand);
         Assert.Equal("Kvindo™ Code", brand!.Text);
 
-        // and the header really shows an Image bound to the mark asset
-        var img = brand.Parent is Grid g ? g.Children.OfType<Image>().FirstOrDefault() : null;
+        // The header shows the mark as an Image. The name and the figures now sit in a STACK beside it (name on top,
+        // figures underneath), so the image is found from the window rather than from the text's parent.
+        var img = app.Window.GetVisualDescendants().OfType<Image>().FirstOrDefault();
         Assert.NotNull(img);
         Assert.NotNull(img!.Source);
+        // ...and the name is at the TOP of that stack, because the figures follow it (asked 2026-10-16: "KvindoCode
+        // text should be alligned to bottom of brand icon or to top if you planning add resources after name")
+        var stack = brand.Parent as StackPanel;
+        Assert.NotNull(stack);
+        Assert.Equal(VerticalAlignment.Top, stack!.VerticalAlignment);
+        Assert.Equal(VerticalAlignment.Top, img.VerticalAlignment);
 
         // The asset itself is the check that means something: headless drawing DECODES A 1x1 STUB (measured), so
         // asserting Bitmap.PixelSize here would pass for any file at all. Read the PNG header of the bytes avares
@@ -135,5 +144,45 @@ public sealed class HeaderHealthAndBrandTests(ITestOutputHelper o)
         Assert.True(m.Success, $"no RAM figure in \"{text}\"");
         var v = double.Parse(m.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture);
         return m.Groups[2].Value switch { "K" => v / 1024, "M" => v, "G" => v * 1024, _ => v * 1024 * 1024 };
+    }
+
+    /// <summary>
+    /// The figures must be VISIBLE in the idle state.
+    /// </summary>
+    /// <remarks>
+    /// Reported 2026-10-16: "i dont see that numbers". The cause was not the text — it was a local
+    /// <c>Foreground = null</c> in the normal branch of <c>UpdateHealth</c>, which overrides the inherited theme brush
+    /// and paints nothing: the label had its text and its layout box and drew no pixels. A null foreground is
+    /// therefore a failing state, and this pins it.
+    /// </remarks>
+    [AvaloniaFact]
+    public void The_figures_are_visible_when_nothing_is_wrong()
+    {
+        using var sb = new Sandbox();
+        using var app = SecretAuditorRealUiTests.StartUi(sb, new System.Text.Json.Nodes.JsonArray { Script.Text("hi") });
+        Sample(app.Window);
+        var text = Health(app.Window);
+
+        Assert.False(string.IsNullOrWhiteSpace(text.Text), "no figures were produced at all");
+        Assert.NotNull(text.Foreground);                       // null paints nothing on a TextBlock
+        Assert.True(text.IsVisible && text.Bounds.Width > 0 && text.Bounds.Height > 0,
+            $"the figures have no box to draw in: visible={text.IsVisible} bounds={text.Bounds}");
+        o.WriteLine($"figures: '{text.Text}' in {text.Bounds}");
+        // The cell must be wide enough for the whole figure: in the one-line header it was squeezed to ~100px and the
+        // ellipsis ate most of it, which is the other half of why it read as missing.
+        Assert.True(text.Bounds.Width > 150, $"the figures were squeezed into {text.Bounds.Width}px");
+    }
+
+    /// <summary>Find-in-session is an icon button in a row of icon buttons (asked 2026-10-16), not a word.</summary>
+    [AvaloniaFact]
+    public void Find_is_an_icon_button()
+    {
+        using var sb = new Sandbox();
+        using var app = SecretAuditorRealUiTests.StartUi(sb, new System.Text.Json.Nodes.JsonArray { Script.Text("hi") });
+        var find = app.Window.FindControl<Button>("FindBtn");
+        Assert.NotNull(find);
+        Assert.IsNotType<string>(find!.Content);               // no "Find" label
+        Assert.NotNull(find.Content);                          // but something drawn
+        Assert.Contains("search", ToolTip.GetTip(find)?.ToString() ?? "", StringComparison.OrdinalIgnoreCase);
     }
 }
