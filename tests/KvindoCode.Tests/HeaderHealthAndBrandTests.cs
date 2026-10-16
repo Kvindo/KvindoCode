@@ -320,4 +320,67 @@ public sealed class HeaderHealthAndBrandTests(ITestOutputHelper o)
         using var path = paint.GetTextPath(text, 0, 0);
         return (descent, path.Bounds.Bottom, descent, face);
     }
+
+    /// <summary>
+    /// The figures include the root partition's usage and the 1-minute load average as a percentage.
+    /// </summary>
+    /// <remarks>
+    /// Asked 2026-10-16: "Also add to metrics: root partition usage, 1 minute LA in %". Full disks and a loaded box are
+    /// the two machine-level causes of "the app is slow" that the app's own RAM/UI numbers cannot show, so they belong
+    /// next to them. The load is a PERCENTAGE OF THE CORES (100% = every core has a runnable task), which is why it is
+    /// read from /proc/loadavg and divided by the core count rather than shown raw — "load 3.4" means nothing without
+    /// knowing the machine has 16 cores.
+    /// </remarks>
+    [AvaloniaFact]
+    public void The_figures_include_root_disk_and_load_average()
+    {
+        using var sb = new Sandbox();
+        using var app = SecretAuditorRealUiTests.StartUi(sb, new System.Text.Json.Nodes.JsonArray { Script.Text("hi") });
+        Sample(app.Window);
+        var text = Health(app.Window);
+        o.WriteLine("figures: " + text.Text);
+        var tip = ToolTip.GetTip(text)?.ToString() ?? "";
+        o.WriteLine("tip: " + tip.Replace("\n", " | "));
+
+        Assert.Contains("RAM ", text.Text);
+        // disk: only asserted when the machine reports it (the figures omit a metric they cannot read)
+        if ((text.Text ?? "").Contains("disk"))
+            Assert.Matches(new System.Text.RegularExpressions.Regex(@"disk \d+%"), text.Text!);
+        Assert.Contains("Root partition", tip);
+        if ((text.Text ?? "").Contains("LA"))
+            Assert.Matches(new System.Text.RegularExpressions.Regex(@"LA \d+%"), text.Text!);
+        Assert.Contains("Load average (1 min)", tip);
+
+        // The load figure must be the real one, computed from /proc/loadavg over the core count.
+        var raw = File.ReadAllText("/proc/loadavg").Trim().Split(' ')[0];
+        var expected = double.Parse(raw, System.Globalization.CultureInfo.InvariantCulture) / Math.Max(1, Environment.ProcessorCount) * 100.0;
+        var shown = (double?)typeof(MainWindow).GetMethod("LoadPercent", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.Invoke(app.Window, null);
+        o.WriteLine($"/proc/loadavg[0]={raw} cores={Environment.ProcessorCount} -> expected {expected:0.#}%, shown {shown:0.#}%");
+        Assert.NotNull(shown);
+        Assert.True(Math.Abs(shown!.Value - expected) < 40, $"the load figure ({shown:0.#}%) does not match /proc/loadavg ({expected:0.#}%)");
+    }
+
+    /// <summary>The disk figure is the ROOT filesystem, not the session's worktree — they can be different mounts.</summary>
+    [AvaloniaFact]
+    public void The_disk_figure_is_the_root_filesystem()
+    {
+        using var sb = new Sandbox();
+        using var app = SecretAuditorRealUiTests.StartUi(sb, new System.Text.Json.Nodes.JsonArray { Script.Text("hi") });
+        var pct = (double?)typeof(MainWindow).GetMethod("RootDiskPercent", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.Invoke(app.Window, null);
+        o.WriteLine($"root disk: {pct:0.#}%");
+        Assert.NotNull(pct);
+        Assert.InRange(pct!.Value, 0, 100);
+
+        // compare against df for "/" directly
+        var psi = new System.Diagnostics.ProcessStartInfo("df", "-Pk /") { RedirectStandardOutput = true, UseShellExecute = false };
+        using var dp = System.Diagnostics.Process.Start(psi)!;
+        var line = dp.StandardOutput.ReadToEnd().Split('\n').Skip(1).First(l => l.Trim().Length > 0);
+        dp.WaitForExit(5000);
+        var f = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        var used = double.Parse(f[2], System.Globalization.CultureInfo.InvariantCulture);
+        var avail = double.Parse(f[3], System.Globalization.CultureInfo.InvariantCulture);
+        var expected = used / (used + avail) * 100.0;
+        o.WriteLine($"df says {expected:0.#}%");
+        Assert.True(Math.Abs(pct.Value - expected) < 1.0, $"shown {pct:0.#}% vs df {expected:0.#}%");
+    }
 }
