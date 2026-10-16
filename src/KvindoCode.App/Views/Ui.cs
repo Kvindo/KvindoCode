@@ -75,10 +75,40 @@ public static class Ui
 
     public static TextBlock Muted(string text, double size = 12.5) => new() { Text = text, Classes = { "muted" }, FontSize = size, TextWrapping = TextWrapping.Wrap };
 
-    /// <summary>Pulsing opacity animation used for "running" indicators.</summary>
+    /// <summary>
+    /// Pulsing opacity animation used for "running" indicators. Cancels ITSELF when the control leaves the visual tree.
+    /// </summary>
+    /// <remarks>
+    /// This animation runs <see cref="IterationCount.Infinite"/>, so until its token is cancelled it ticks on the UI
+    /// thread for ever and keeps the control it animates alive. Six call sites discard the returned source — the
+    /// sidebar's activity dot, a running session row, the task rows and the search spinner — and those rows are
+    /// rebuilt on nearly every session event and every 4 seconds, so each rebuild started a fresh endless animation on
+    /// a dot it then threw away, and the previous one could never be stopped.
+    ///
+    /// Measured on this machine over ten quiet minutes (2026-10-16, answering "after some time app cpu and ram
+    /// climbs"): timers 9 -> 16, CPU ~1.07 of one core continuously, gen2 2117 -> 2288 MB with 107 collections that
+    /// never reclaimed it. A control removed from the visual tree is exactly the discarded one, so cancelling here is
+    /// the moment the animation stops being needed — no call site has to change, and a control that is re-attached is
+    /// re-pulsed by whoever rebuilt it.
+    /// </remarks>
     public static CancellationTokenSource Pulse(Control c)
     {
         var cts = new CancellationTokenSource();
+        Interlocked.Increment(ref _pulsesStarted);
+        Interlocked.Increment(ref _activePulses);
+        // one handler per control: a re-pulsed control must not accumulate handlers
+        void OnDetached(object? _, VisualTreeAttachmentEventArgs __)
+        {
+            c.DetachedFromVisualTree -= OnDetached;
+            Stop();
+        }
+        void Stop()
+        {
+            try { cts.Cancel(); } catch (ObjectDisposedException) { /* the caller cancelled first: fine */ }
+            if (Interlocked.Decrement(ref _activePulses) < 0) Interlocked.Exchange(ref _activePulses, 0);
+        }
+        cts.Token.Register(Stop);                     // a caller that cancels it itself also releases the count
+        c.DetachedFromVisualTree += OnDetached;
         var anim = new Animation
         {
             Duration = TimeSpan.FromMilliseconds(1100),
@@ -93,6 +123,15 @@ public static class Ui
         _ = anim.RunAsync(c, cts.Token);
         return cts;
     }
+
+    /// <summary>Pulses started, and those whose animation is still expected to be running.</summary>
+    /// <remarks>Diagnostics and tests only. Before the self-cancel above, <c>ActivePulses</c> grew without bound because
+    /// every rebuild discarded the source that could stop the previous animation — the measured CPU/RAM climb of
+    /// 2026-10-16.</remarks>
+    public static int PulsesStarted => _pulsesStarted;
+    public static int ActivePulses => _activePulses;
+    internal static void ResetPulseCountersForTest() { _pulsesStarted = 0; _activePulses = 0; }
+    static int _pulsesStarted, _activePulses;
 
     public static string Ago(DateTimeOffset t)
     {
