@@ -31,9 +31,31 @@ public sealed class HeaderHealthAndBrandTests(ITestOutputHelper o)
 
     static void Sample(MainWindow w)
     {
-        typeof(MainWindow).GetMethod("ProbeUiLag", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(w, null);
-        Dispatcher.UIThread.RunJobs();
         typeof(MainWindow).GetMethod("UpdateHealth", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(w, null);
+    }
+
+    /// <summary>
+    /// The figures line carries RAM, UI, disk and load — and NOT a lag figure.
+    /// </summary>
+    /// <remarks>
+    /// Asked 2026-10-16: "remove lag indication, it overflows anyway". Four figures already fill the line beside the
+    /// title, and the lag number was the one that pushed it over; the UI-thread percentage and the load average answer
+    /// the same question ("is the app starved?") without it. Pinned here so it does not creep back.
+    /// </remarks>
+    [AvaloniaFact]
+    public void The_figures_line_has_no_lag_figure()
+    {
+        using var sb = new Sandbox();
+        using var app = SecretAuditorRealUiTests.StartUi(sb, new System.Text.Json.Nodes.JsonArray { Script.Text("hi") });
+        Sample(app.Window);
+        Dispatcher.UIThread.RunJobs();
+        var text = Health(app.Window).Text ?? "";
+        o.WriteLine("figures: " + text);
+        Assert.Contains("RAM ", text);
+        Assert.DoesNotContain("lag", text);
+        // and nothing is left to measure it
+        Assert.Null(typeof(MainWindow).GetMethod("ProbeUiLag", BindingFlags.Instance | BindingFlags.NonPublic));
+        Assert.Null(typeof(MainWindow).GetField("_uiLagMs", BindingFlags.Instance | BindingFlags.NonPublic));
     }
 
     /// <summary>The header carries the Kvindo mark (not a letter in a box) and the trademarked name.</summary>

@@ -304,9 +304,9 @@ public partial class MainWindow : Window
 
         // The header's live figures (memory + UI-thread load). The lag probe runs FIRST and the readout second, so the
         // number shown is the round-trip that just completed rather than the previous interval's.
-        UpdateHealth(); ProbeUiLag();
+        UpdateHealth();
         var health = new DispatcherTimer { Interval = TimeSpan.FromSeconds(HealthSeconds) };
-        health.Tick += (_, _) => { UpdateHealth(); ProbeUiLag(); };
+        health.Tick += (_, _) => UpdateHealth();
         health.Start();
         Input.Focus();
         _ = RunStartupChecksAsync();                          // offer to continue what was active in the previous run
@@ -2506,15 +2506,14 @@ public partial class MainWindow : Window
     /// </summary>
     /// <remarks>
     /// Asked for 2026-10-15: after the title, show the app's memory usage and the UI thread's CPU usage. The UI figure
-    /// has TWO parts on purpose, because either alone lies:
-    /// <list type="bullet">
-    /// <item><b>CPU</b> — the UI thread's own processor time as a share of ONE core, over the sampling interval. The
-    /// Avalonia UI thread is this process's main thread, whose OS thread id equals the process id on Linux, which is
-    /// how it is located. When it cannot be found the CPU part is omitted rather than shown wrong.</item>
-    /// <item><b>lag</b> — how long a <see cref="DispatcherPriority.Background"/> callback waited to run. That is what
-    /// makes a starved UI visible even at a LOW CPU number: the thread can be blocked (on the vault lock, say) with no
-    /// CPU to show for it. Only one probe is ever outstanding, so measuring cannot become the load it measures.</item>
-    /// </list>
+    /// carries the UI thread's own processor time as a share of ONE core, over the sampling interval. The Avalonia UI
+    /// thread is this process's main thread, whose OS thread id equals the process id on Linux, which is how it is
+    /// located; when it cannot be found the figure is omitted rather than shown wrong.
+    ///
+    /// A dispatcher round-trip ("lag") used to be shown alongside it and is deliberately GONE (asked 2026-10-16):
+    /// the line already carries RAM, UI, disk and load, and the lag overran the header. The UI figure and the load
+    /// average answer the same question — is the app starved — without one more number.
+    ///
     /// Every read is cheap, and the 2 s timer keeps this off any hot path.
     /// </remarks>
     void UpdateHealth()
@@ -2524,8 +2523,6 @@ public partial class MainWindow : Window
             _proc.Refresh();                                               // Process caches its counters: without this the figure cannot be trusted to be current
             var mem = _proc.WorkingSet64;                                  // resident set on Linux: what a user calls "app memory"
             var ui = UiThreadLoadPercent();
-            var lag = _uiLagMs;
-
             var disk = RootDiskPercent();
             var load = LoadPercent();
 
@@ -2533,20 +2530,17 @@ public partial class MainWindow : Window
             if (ui is { } pct) text += $" · UI {pct:0}%";
             if (disk is { } d) text += $" · disk {d:0}%";
             if (load is { } l) text += $" · LA {l:0}%";
-            if (lag >= 60) text += $" · lag {lag:0}ms";                     // only when it is actually felt
             if (HealthText.Text != text) HealthText.Text = text;
 
             // The figures stay MUTED, exactly like the context/usage figure in the other header — this is a readout,
-            // not an alarm. The first version turned amber from 50% UI or 120 ms of lag, which with several sessions
-            // running is the normal state: the label was amber most of the time and amber "muted" text on the panel
-            // background is hard to read (reported 2026-10-16). The colour is left to the `muted` class in XAML.
-            _ = lag;
+            // not an alarm. The first version turned amber from 50% UI or lag, which with several sessions running is
+            // the normal state: the label was amber most of the time and amber "muted" text on the panel background is
+            // hard to read (reported 2026-10-16). The colour is left to the `muted` class in XAML.
             ToolTip.SetTip(HealthText,
                 $"{FormatBytes(mem)} resident memory.\n" +
                 (ui is { } u ? $"UI thread: {u:0.0}% of one core, over the last {HealthSeconds:0}s.\n" : "UI thread CPU: unavailable.\n") +
                 (disk is { } dd ? $"Root partition: {dd:0.#}% used ({_diskDetail}).\n" : "Root partition: unavailable.\n") +
-                (load is { } ll ? $"Load average (1 min): {ll:0}% — {load * Environment.ProcessorCount / 100.0:0.0} of {Environment.ProcessorCount} cores busy; 100% means every core has a runnable task.\n" : "Load average: unavailable.\n") +
-                $"Last dispatcher round-trip: {lag:0} ms at Background priority — the figure to watch: high lag with low CPU means the UI thread is blocked, not busy.");
+                (load is { } ll ? $"Load average (1 min): {ll:0}% — {load * Environment.ProcessorCount / 100.0:0.0} of {Environment.ProcessorCount} cores busy; 100% means every core has a runnable task.\n" : "Load average: unavailable.\n"));
         }
         catch { /* a display figure must never take the window down */ }
     }
@@ -2652,22 +2646,9 @@ public partial class MainWindow : Window
         try { return gettid(); } catch { return Environment.ProcessId; }        // old libc without gettid
     }
 
-    /// <summary>Milliseconds a background dispatcher callback waited: the UI thread's real "am I keeping up" figure.</summary>
-    double _uiLagMs;
-    bool _uiLagProbeOutstanding;
     const double HealthSeconds = 2;
 
-    void ProbeUiLag()
-    {
-        if (_uiLagProbeOutstanding) return;                 // never queue a second probe behind the first
-        _uiLagProbeOutstanding = true;
-        var posted = System.Diagnostics.Stopwatch.GetTimestamp();
-        Dispatcher.UIThread.Post(() =>
-        {
-            _uiLagMs = (System.Diagnostics.Stopwatch.GetTimestamp() - posted) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
-            _uiLagProbeOutstanding = false;
-        }, DispatcherPriority.Background);
-    }
+
 
     static string FormatBytes(long b) => b >= 1L << 30 ? $"{b / (double)(1L << 30):0.0}G"
                                        : b >= 1L << 20 ? $"{b / (double)(1L << 20):0}M"
