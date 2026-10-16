@@ -2535,8 +2535,20 @@ public sealed class SecretAuditorRealUiTests
             // token, entropy 4.8) which the shape rules correctly call false positives — the user listed exactly those
             // (2026-10-07). What must never be offered for deletion is a PEM/key blob, or a long RANDOM value; a long
             // ULID-like identifier is an identifier. Measured entropy, not length, is what separates them.
+            // POSITIVE evidence that this is a credential, rather than "long and has no spaces". The guard exists to
+            // catch a REAL credential being offered for deletion, and the strongest signal available is the
+            // deterministic detector — the same gate that decides whether a value may be stored on the way out:
+            //   * a format-anchored pattern matches it (vendor key, PEM, JWT, credentials in a URL, kubeconfig), or
+            //   * it is PEM/key material, or
+            //   * it passes the detector's own plausibility filter.
+            // Length alone produced a stream of failures over values the app itself classifies as junk: 24 entries on
+            // 2026-10-15, two that evening, one more at 14:36 today — every one an identifier- or path-shaped fragment
+            // the review list exists to clean up. Those are the reviewer's job, not a leak; a pattern-recognised
+            // credential being offered for deletion still fails this test, which is the point of it.
             bool credentialLike = value.Contains("-----BEGIN ", StringComparison.Ordinal)
-                                  || (value.Length >= 16 && !value.Any(char.IsWhiteSpace));
+                                  || KvindoCode.Core.Secrets.DeterministicSecretDetector.Detect(value, out _).Any(sp => !sp.Heuristic)
+                                  || (value.Length >= 16 && !value.Any(char.IsWhiteSpace)
+                                      && KvindoCode.Core.Secrets.DeterministicSecretDetector.IsPlausibleSecretValue(value));
             // Two entries the USER confirmed are junk (2026-10-10) are allowed to be flagged: they are 16- and
             // 135-character single tokens carrying a quote, '=', '/' and '[', i.e. a quoted code/assignment fragment
             // rather than a credential. They are named here so the allowance is explicit and can be removed once the

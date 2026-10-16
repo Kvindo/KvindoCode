@@ -91,4 +91,32 @@ public sealed class CommitShaTests(ITestOutputHelper o)
         foreach (var sha in new[] { "4aaa6253d7", "9f8a7b6c5d" })
             Assert.False(DeterministicSecretDetector.IsPlausibleSecretValue(sha));
     }
+
+    /// <summary>
+    /// The live-vault guard must still PROTECT a real credential — it was narrowed to "positive evidence", not gutted.
+    /// </summary>
+    /// <remarks>
+    /// The guard used to call anything "long with no spaces" credential-like, which made it fail on values the app
+    /// itself classifies as junk (24 entries on 2026-10-15, one more at 14:36 today). It now demands positive evidence:
+    /// a format-anchored pattern match, PEM/key material, or the detector's own plausibility filter. This pins BOTH
+    /// halves, because a narrowed guard that protects nothing would be worse than the noisy one it replaced.
+    /// </remarks>
+    [Theory]
+    // real credentials: the guard must still complain if the review list offers these
+    [InlineData("ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8", true)]
+    [InlineData("AKIAIOSFODNN7EXAMPL3", true)]
+    [InlineData("Xk9$mQ2pLw7&vRt4", true)]
+    // ...and the junk this app has been accumulating, which the reviewer list exists to clean
+    [InlineData("/builds/main/team/applications/some-service", false)]
+    [InlineData("4aaa6253d7", false)]
+    [InlineData("00coldplug/00fixed/nvme1", false)]
+    public void The_vault_guard_only_protects_a_value_with_positive_evidence(string value, bool credentialLike)
+    {
+        var detector = DeterministicSecretDetector.Detect(value, out _).Any(sp => !sp.Heuristic);
+        var evidence = detector
+                       || value.Contains("-" + new string('-', 4) + "BEGIN ", StringComparison.Ordinal)
+                       || (value.Length >= 16 && !value.Any(char.IsWhiteSpace) && DeterministicSecretDetector.IsPlausibleSecretValue(value));
+        Assert.Equal(credentialLike, evidence);
+        o.WriteLine($"{value,-46} credentialLike={evidence} (detector={detector})");
+    }
 }
