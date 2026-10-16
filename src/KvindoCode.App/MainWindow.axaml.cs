@@ -212,6 +212,8 @@ public partial class MainWindow : Window
 
         // find inside the current session: the same regexp engine, applied to the transcript
         FindBtn.Content = Ui.Icon("IconSearch", "KvMuted", 15);
+        MergeBtn.Content = Ui.Icon("IconMerge", "KvMuted", 15);
+        MergeBtn.Click += (_, _) => AskToMergeAndPush();
         FindBtn.Click += (_, _) => OpenFindInPane();
 
         SearchClear.Click += (_, _) => SearchBox.Text = "";
@@ -1145,6 +1147,44 @@ public partial class MainWindow : Window
         Input.Text = ""; sv.Draft = ""; sv.Attachments.Clear(); RefreshAttachStrip();
         if (sv.Running) { sv.Enqueue(new QueuedMessage(text, images)); UpdateQueue(); return; }
         Start(sv, text, images);
+    }
+
+    /// <summary>
+    /// The merge button: send the session a prompt asking it to merge its own work and push.
+    /// </summary>
+    /// <remarks>
+    /// Asked 2026-10-16: a merge glyph beside the workspace chip that "will send promt telling llm to merge and push to
+    /// dev". It SENDS rather than running git: which branch is the target differs per repository, the thing to merge is
+    /// the session's own worktree branch (which the chip names), and the model can run the tests first, resolve
+    /// conflicts and report. The branch is read from the live workspace so the prompt is about THIS session, and the
+    /// prompt names the fallback explicitly because a repository may have no <c>dev</c> branch at all — KvindoCode's own
+    /// has only <c>master</c> — and a model told bare "push to dev" would either fail or invent the branch.
+    /// </remarks>
+    void AskToMergeAndPush()
+    {
+        var sv = _current;
+        if (sv is null) return;
+        var s = sv.Session;
+        var shortId = s.Info.Id.Length > 8 ? s.Info.Id[..8] : s.Info.Id;
+        var branch = s.Workspace?.Branch is { Length: > 0 } b ? b : "kv/" + shortId;
+        SendSessionPrompt(sv,
+            "Merge this session's work and push it.\n\n" +
+            $"This session worked in its own git worktree(s) on branch `{branch}`; the workspace chip in the header " +
+            "shows the exact merge command(s) for each repository it touched. Merge that branch into the repository's " +
+            "`dev` branch — or its mainline branch when there is no `dev` (KvindoCode itself uses `master`) — in the " +
+            "project checkout, then push. Run the test suite before pushing and fix anything it breaks. Report exactly " +
+            "what you merged and pushed, and say plainly if something could not be merged.");
+    }
+
+    /// <summary>Send a prompt as if the human had typed it (used by the buttons that act ON the session).</summary>
+    void SendSessionPrompt(SessionView sv, string text)
+    {
+        if (string.IsNullOrEmpty(_settings.EffectiveKey)) { _ = OpenSettingsAsync(); return; }
+        sv.SentPrompts.Add(text);
+        if (sv.SentPrompts.Count > 100) sv.SentPrompts.RemoveAt(0);
+        sv.HistoryCursor = -1; sv.HistoryDraft = "";
+        if (sv.Running) { sv.Enqueue(new QueuedMessage(text, null)); UpdateQueue(); return; }
+        Start(sv, text, null);
     }
 
     /// <summary>text == null starts a "wake" turn (a background task reported something).</summary>
@@ -2624,15 +2664,19 @@ public partial class MainWindow : Window
         var life = _current.LifetimePromptTokens;
         // 64-bit + clamped: with millions of lifetime tokens a naive int "cached * 100" overflowed and the figure went negative
         var lifePct = Ui.Pct(_current.LifetimeCachedTokens, life);
-        var text = $"{Ui.Tokens(_current.PromptTokens)} / {Ui.Tokens(w)}  ({pct}%)";
+        // TWO LINES, not one long row (asked 2026-10-16: "lets do this parts in 2 lines to occupy less space"). The row
+        // is in an Auto column of the top bar, so every extra figure made the session title narrower; splitting at the
+        // context/cache boundary halves the width and costs one line of height in a bar that is already 52px.
+        var line1 = $"{Ui.Tokens(_current.PromptTokens)} / {Ui.Tokens(w)}  ({pct}%)";
         // ONLY the session average is shown (asked 2026-10-10). A single request is either a full hit or a miss, so the
         // last-request figure swings between 0% and ~99% and says nothing; the average is the honest number.
-        if (life > 0) text += $"  ·  ↓{lifePct}% avg";
+        if (life > 0) line1 += $"  ·  ↓{lifePct}% avg";
         // Generation speed right beside the cache figure (asked 2026-10-11): a 5-minute weighted average over the
         // session's completed calls, so it says what the provider is actually delivering now, not what one call did.
         var speed = CurrentSpeed();
-        if (speed > 0) text += $"  ·  {speed:0.#} tok/s avg5m";
-        if (_current.CostRub > 0) text += $"  ·  ₽{_current.CostRub:0.00}";
+        var line2 = speed > 0 ? $"{speed:0.#} tok/s avg5m" : "";
+        if (_current.CostRub > 0) line2 += (line2.Length > 0 ? "  ·  " : "") + $"₽{_current.CostRub:0.00}";
+        var text = line2.Length > 0 ? line1 + "\n" + line2 : line1;
         if (UsageText.Text != text) UsageText.Text = text;          // ditto: only when the figure really changed
         var tip = $"Context used by the last request (older messages are summarised automatically at {KvindoCode.Core.Agent.AgentSession.CompactionThreshold * 100:0}%) · session cost reported by the gateway";
         if (life > 0) tip += $"\nPrompt cache, whole session: {Ui.Tokens(_current.LifetimeCachedTokens)} of {Ui.Tokens(life)} tokens ({lifePct}%). A single request is either a full hit or a miss, so the per-request figure jumps — the session average is the one to watch.";

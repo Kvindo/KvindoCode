@@ -171,4 +171,68 @@ public class LlmClientTests
         using var cts = new CancellationTokenSource(); cts.Cancel();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => new LlmClient(S(), h).StreamAsync(Req(new ChatMessage { Content = "x" }), null, cts.Token));
     }
+
+    // ---------------------------------------------------------------- the mid-stream failure the user keeps seeing
+
+    /// <summary>
+    /// A stream that dies AFTER announcing a tool call but before any text must be retried.
+    /// </summary>
+    /// <remarks>
+    /// Reported repeatedly (2026-10-15 and again 2026-10-16): the turn ends with
+    /// "API error: Поток ответа завершился до окончания генерации. Повторите запрос." and no retry.
+    ///
+    /// The gate refused to retry whenever the attempt had "produced output", and a TOOL-CALL delta counts as output
+    /// (<c>markOutput()</c> fires on the first delta of a tool call, which only names the function and carries empty
+    /// arguments). Nothing is executed at that point — a tool call is run by AgentSession only after the attempt
+    /// returns normally — so a retry cannot repeat any work and cannot duplicate any text the user has READ. It only
+    /// has to avoid duplicating visible TEXT, which is a narrower condition than "produced output".
+    /// </remarks>
+    [Fact]
+    public async Task A_cut_after_a_tool_call_delta_is_retried()
+    {
+        var h = new FakeHandler();
+        h.Responses.Enqueue(_ => FakeHandler.Sse(
+            """{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"Bash","arguments":""}}]}}]}""",
+            """{"error":{"message":"Поток ответа завершился до окончания генерации. Повторите запрос."}}"""));
+        h.Responses.Enqueue(_ => FakeHandler.Sse("""{"choices":[{"delta":{"content":"recovered"},"finish_reason":"stop"}]}""", "[DONE]"));
+
+        var retries = new List<string>();
+        var r = await new LlmClient(S(), h).StreamAsync(Req(new ChatMessage { Content = "x" }), new LlmCallbacks { OnRetry = retries.Add }, default);
+
+        Assert.Equal("recovered", r.Content);
+        Assert.Single(retries);
+        Assert.Contains("Поток ответа", retries[0]);
+    }
+
+    /// <summary>A cut after COMPLETE tool-call arguments is still retryable: nothing ran, and no text was shown.</summary>
+    [Fact]
+    public async Task A_cut_after_complete_tool_arguments_is_retried()
+    {
+        var h = new FakeHandler();
+        h.Responses.Enqueue(_ => FakeHandler.Sse(
+            """{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"Bash","arguments":"{\"command\":\"ls\"}"}}]}}]}""",
+            """{"error":{"message":"Поток ответа завершился до окончания генерации"}}"""));
+        h.Responses.Enqueue(_ => FakeHandler.Sse("""{"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}""", "[DONE]"));
+
+        var retries = new List<string>();
+        var r = await new LlmClient(S(), h).StreamAsync(Req(new ChatMessage { Content = "x" }), new LlmCallbacks { OnRetry = retries.Add }, default);
+        Assert.Equal("ok", r.Content);
+        Assert.Single(retries);
+    }
+
+    /// <summary>...but text the user has already seen still must not be retried: it would be shown twice.</summary>
+    [Fact]
+    public async Task A_cut_after_text_then_a_tool_call_is_not_retried()
+    {
+        var h = new FakeHandler();
+        h.Responses.Enqueue(_ => FakeHandler.Sse(
+            """{"choices":[{"delta":{"content":"I will run this:"}}]}""",
+            """{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"Bash","arguments":"{}"}}]}}]}""",
+            """{"error":{"message":"Поток ответа завершился до окончания генерации"}}"""));
+
+        var retries = new List<string>();
+        await Assert.ThrowsAsync<LlmException>(() =>
+            new LlmClient(S(), h).StreamAsync(Req(new ChatMessage { Content = "x" }), new LlmCallbacks { OnRetry = retries.Add }, default));
+        Assert.Empty(retries);
+    }
 }

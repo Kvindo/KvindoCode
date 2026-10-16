@@ -27,21 +27,28 @@
     <!-- ================= Sidebar ================= -->
     <Border Classes="sidebar edge" BorderThickness="0,0,1,0" x:Name="SidebarBorder">
       <Grid RowDefinitions="Auto,Auto,Auto,Auto,*,Auto">
-        <!-- The mark, then a STACK: name on the first line, the live figures on the second.
-             Two reasons for the stack rather than one row. (a) Width: in a single row the figures had to share 300px
-             with the mark and the name, so they were squeezed into ~100px and ellipsised away — and putting them in an
-             Auto column instead made the header wider than the sidebar, which stopped every row's controls past the
-             viewport edge from receiving clicks (the Needs-attention X at x=308; caught by those UI tests). (b) The
-             name then aligns with the TOP of the mark, since more information follows it (asked 2026-10-16). -->
+        <!-- The mark, then the two text lines beside it: the name on the first line, the live figures on the second.
+             Two levels, for two reasons. (a) Width: in a single row the figures had to share 300px with the mark and
+             the name, so they were squeezed into ~100px and ellipsised away — and putting them in an Auto column
+             instead made the header wider than the sidebar, which stopped every row's controls past the viewport edge
+             from receiving clicks (the Needs-attention X at x=308; caught by those UI tests). (b) The two lines must
+             SPAN the mark — first line's top edge on the mark's top edge, last line's bottom edge on the mark's bottom
+             edge (asked 2026-10-16) — so the stack became a Grid of the mark's height with one line pinned Top and the
+             other pinned Bottom, and both keep TextTrimming so neither can widen the header. -->
         <Grid Grid.Row="0" ColumnDefinitions="Auto,*" Margin="16,14,12,10">
-          <!-- The Kvindo mark (the K from the Cloud logo) rather than a letter in a coloured box: same product. -->
-          <Image Grid.Column="0" Source="avares://kvindocode/Assets/kvindo-k.png" Width="26" Height="26" VerticalAlignment="Top"/>
-          <StackPanel Grid.Column="1" Margin="10,1,0,0" Spacing="1" VerticalAlignment="Top">
-            <TextBlock Name="BrandText" Text="Kvindo™ Code" FontWeight="SemiBold" FontSize="15" TextTrimming="CharacterEllipsis"/>
+          <!-- The Kvindo mark (the K from the Cloud logo) rather than a letter in a coloured box: same product.
+               34px, not 26: the two lines are Inter 15 and Inter 11, whose real line boxes are 18.15 + 13.31 = 31.5px
+               (measured with Skia, and confirmed against the mark's 26 exact pixels in a screenshot of the running
+               app), so a 26px mark could not contain them — they overlapped it by 5.5px. 34 leaves a 2.5px gap
+               between the lines. Square PNG: Width and Height must stay equal. -->
+          <Image Grid.Column="0" Source="avares://kvindocode/Assets/kvindo-k.png" Width="34" Height="34" VerticalAlignment="Top"/>
+          <!-- The same 34 as the mark (a vertical Margin here would push the lines off by a pixel). -->
+          <Grid Grid.Column="1" Height="34" Margin="10,0,0,0">
+            <TextBlock Name="BrandText" Text="Kvindo™ Code" FontWeight="SemiBold" FontSize="15" TextTrimming="CharacterEllipsis" VerticalAlignment="Top"/>
             <!-- Live process figures: memory held, and how busy/blocked the UI thread is. Filled by UpdateHealth(). -->
-            <TextBlock Name="HealthText" Classes="muted" FontSize="11" TextTrimming="CharacterEllipsis"
+            <TextBlock Name="HealthText" Classes="muted" FontSize="11" TextTrimming="CharacterEllipsis" VerticalAlignment="Bottom"
                        ToolTip.Tip="Memory this process holds, and UI-thread load: its UI-thread CPU share plus the last dispatcher round-trip, which measures blocking even when the CPU is idle."/>
-          </StackPanel>
+          </Grid>
         </Grid>
 
         <Button Grid.Row="1" x:Name="NewSessionBtn" Classes="ghost" HorizontalAlignment="Stretch" HorizontalContentAlignment="Left" Margin="10,2,10,4" Padding="10,8">
@@ -112,10 +119,19 @@
               <ToggleButton x:Name="OnlyMineBtn" Classes="ghost" Padding="6" ToolTip.Tip="Show only my messages (hide the assistant's answers, tool calls and notices)"/>
               <Button x:Name="AuditBtn" Classes="ghost" Padding="6" ToolTip.Tip="Enable/disable secret auditing for this session"/>
               <Button x:Name="WorkModeBtn" Classes="ghost" Padding="6" ToolTip.Tip="How this session works: Normal (the model uses every tool itself), Delegate (it only answers, asks and works through subagents)"/>
+              <!-- Beside the workspace chip, because that chip is what says WHICH branch would be merged (asked
+                   2026-10-16: "lets add here merge glyph button that will send promt telling llm to merge and push to
+                   dev"). It sends a prompt rather than running git itself: the merge command differs per repo, the
+                   session's own branch is the thing to merge, and the model can run the tests first and report back.
+                   Content is set in code-behind with the other icons. -->
+              <Button x:Name="MergeBtn" Classes="ghost" Padding="6"
+                      ToolTip.Tip="Ask the model to merge this session's work (its own worktree branch) and push it — into dev where the repository has one, otherwise the mainline. It runs the tests before pushing and reports what it merged."/>
               <Button x:Name="WorkspaceBtn" Classes="ghost" Padding="6,3" IsVisible="False" FontSize="12" ToolTip.Tip="This session works in its own git worktree. Click to copy the merge command."/>
             </StackPanel>
           </Grid>
-          <TextBlock Grid.Column="1" x:Name="UsageText" Classes="muted" FontSize="12" VerticalAlignment="Center" Margin="0,0,10,0"/>
+          <!-- Two right-aligned lines: the context/cache figures, then the speed and cost. -->
+          <TextBlock Grid.Column="1" x:Name="UsageText" Classes="muted" FontSize="12" VerticalAlignment="Center"
+                     Margin="0,0,10,0" TextAlignment="Right" TextWrapping="NoWrap"/>
           <Button Grid.Column="2" x:Name="BrowserBtn" Classes="ghost" ToolTip.Tip="Chrome connection for the Browser tool">
             <StackPanel Orientation="Horizontal" Spacing="7" x:Name="BrowserContent"/>
           </Button>
