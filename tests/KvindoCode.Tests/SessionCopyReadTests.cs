@@ -112,6 +112,57 @@ public sealed class SessionCopyReadTests(ITestOutputHelper o)
     }
 
     /// <summary>
+    /// Both reads the reporting session used to pin the bug, replayed: an ABSOLUTE path inside the session's worktree,
+    /// and the container-relative form.
+    /// </summary>
+    /// <remarks>
+    /// The absolute one is the dangerous half. <c>Canonical</c> maps a path under the session's worktree onto the shared
+    /// tree (prefix stripped, remainder re-rooted), so a stale absolute path resolves to the SHARED file — and when that
+    /// file also exists there, the read SUCCEEDS with the WRONG CONTENT instead of failing. Its sibling: the file exists
+    /// only in the session's copy, so the read failed naming the shared path ("File does not exist: &lt;shared path&gt;"
+    /// — reported verbatim on 2026-10-17). This asserts the content, not just the absence of an error, which is what
+    /// catches the wrong-content case.
+    /// </remarks>
+    [Fact]
+    public async Task An_absolute_path_to_the_session_worktree_reads_the_session_copy_not_the_shared_file()
+    {
+        using var sb = new Sandbox();
+        var repo = Build(sb);
+        var settings = sb.Settings(x => x.IsolateSessions = true);
+        var session = new AgentSession(settings, Script.Client(), sb.Project, new FakeInteraction());
+        var ws = Workspaces.Ensure(sb.Project, session.Info.Id, settings);
+        var (ctx, _) = (CtxFor(sb, session, ws), ws);
+
+        // the same repo-relative file exists in BOTH trees, with different content
+        const string rel = "KvindoCloud.Tests/UnitTests/both-trees.cs";
+        await new WriteTool().RunAsync(new JsonObject { ["file_path"] = RepoRel + "/" + rel, ["content"] = "// SESSION_COPY\n" }, ctx, default);
+        File.WriteAllText(Path.Combine(repo, rel), "// SHARED_TREE\n");
+        var worktreeFile = Path.Combine(ws.WorkDir, RepoRel, rel);
+        Assert.True(File.Exists(worktreeFile));
+
+        // the empty-map state (a restarted session), then the two reads
+        var ws2 = EmptyMapOver(ws, ws);
+        var ctx2 = CtxFor(sb, session, ws2);
+
+        var absolute = await new ReadTool().RunAsync(new JsonObject { ["file_path"] = worktreeFile }, ctx2, default);
+        o.WriteLine("absolute worktree path -> " + absolute.Output.Trim().Replace("\n", " | "));
+        Assert.False(absolute.IsError, absolute.Output);
+        Assert.Contains("SESSION_COPY", absolute.Output);
+        Assert.DoesNotContain("SHARED_TREE", absolute.Output);       // the wrong-content case
+
+        var relative = await new ReadTool().RunAsync(new JsonObject { ["file_path"] = RepoRel + "/" + rel }, ctx2, default);
+        o.WriteLine("container-relative    -> " + relative.Output.Trim().Replace("\n", " | "));
+        Assert.False(relative.IsError, relative.Output);
+        Assert.Contains("SESSION_COPY", relative.Output);
+        // and the path it resolves through is inside the session's tree: the reported doubled "APPLICATIONS/kvindo.cloud/
+        // APPLICATIONS/kvindo.cloud" prefix came from a base that had been poisoned by a `cd` into the shared checkout
+        var resolved = ctx2.MapRead(ctx2.Resolve(RepoRel + "/" + rel));
+        o.WriteLine("resolved              -> " + resolved);
+        Assert.StartsWith(ws2.WorkDir, resolved);
+        Assert.DoesNotContain(RepoRel + "/" + RepoRel, resolved);
+    }
+
+    /// <summary>
     /// The reported search: Grep must search the session's copy of a repo that has one, not the older shared checkout.
     /// </summary>
     [Fact]
