@@ -2450,8 +2450,13 @@ public partial class MainWindow : Window
             var ui = UiThreadLoadPercent();
             var lag = _uiLagMs;
 
+            var disk = RootDiskPercent();
+            var load = LoadPercent();
+
             var text = $"RAM {FormatBytes(mem)}";
             if (ui is { } pct) text += $" · UI {pct:0}%";
+            if (disk is { } d) text += $" · disk {d:0}%";
+            if (load is { } l) text += $" · LA {l:0}%";
             if (lag >= 60) text += $" · lag {lag:0}ms";                     // only when it is actually felt
             if (HealthText.Text != text) HealthText.Text = text;
 
@@ -2463,10 +2468,64 @@ public partial class MainWindow : Window
             ToolTip.SetTip(HealthText,
                 $"{FormatBytes(mem)} resident memory.\n" +
                 (ui is { } u ? $"UI thread: {u:0.0}% of one core, over the last {HealthSeconds:0}s.\n" : "UI thread CPU: unavailable.\n") +
+                (disk is { } dd ? $"Root partition: {dd:0.#}% used ({_diskDetail}).\n" : "Root partition: unavailable.\n") +
+                (load is { } ll ? $"Load average (1 min): {ll:0}% — {load * Environment.ProcessorCount / 100.0:0.0} of {Environment.ProcessorCount} cores busy; 100% means every core has a runnable task.\n" : "Load average: unavailable.\n") +
                 $"Last dispatcher round-trip: {lag:0} ms at Background priority — the figure to watch: high lag with low CPU means the UI thread is blocked, not busy.");
         }
         catch { /* a display figure must never take the window down */ }
     }
+
+    /// <summary>Root filesystem used, as a percentage. Cached for a few seconds: a statfs per 2s tick is cheap but pointless.</summary>
+    string _diskDetail = "";
+    double? RootDiskPercent()
+    {
+        try
+        {
+            if (_diskAt is { } at && (DateTime.UtcNow - at).TotalSeconds < 15) return _diskPct;
+            // statvfs on "/" itself, not on the process cwd: the cwd is a session worktree under a directory that could
+            // be another mount, and the question is about the root partition (asked 2026-10-16).
+            var psi = new System.Diagnostics.ProcessStartInfo("df", "-Pk /") { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
+            using var p = System.Diagnostics.Process.Start(psi);
+            if (p is null) return null;
+            var output = p.StandardOutput.ReadToEnd();
+            p.StandardError.ReadToEnd();
+            if (!p.WaitForExit(3000)) { try { p.Kill(true); } catch { } return null; }
+            // "Filesystem 1024-blocks Used Available Capacity Mounted on" then one line
+            var line = output.Split('\n').Skip(1).FirstOrDefault(l => l.Trim().Length > 0);
+            if (line is null) return null;
+            var parts = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length < 6) return null;
+            var used = double.Parse(parts[2], System.Globalization.CultureInfo.InvariantCulture);
+            var avail = double.Parse(parts[3], System.Globalization.CultureInfo.InvariantCulture);
+            if (used + avail <= 0) return null;
+            _diskPct = used / (used + avail) * 100.0;                  // capacity column has a "%" that rounds; compute it
+            _diskDetail = $"{used / 1048576.0:0.#}G of {(used + avail) / 1048576.0:0.#}G used, {avail / 1048576.0:0.#}G free";
+            _diskAt = DateTime.UtcNow;
+            return _diskPct;
+        }
+        catch { return null; }
+    }
+    double? _diskPct;
+    DateTime? _diskAt;
+
+    /// <summary>One-minute load average as a percentage of the machine's cores (100% = every core has a runnable task).</summary>
+    double? LoadPercent()
+    {
+        try
+        {
+            if (_loadAt is { } at && (DateTime.UtcNow - at).TotalSeconds < 5) return _loadPct;
+            var raw = File.ReadAllText("/proc/loadavg").Trim().Split(' ');
+            if (raw.Length == 0 || !double.TryParse(raw[0], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var one))
+                return null;
+            var cores = Math.Max(1, Environment.ProcessorCount);
+            _loadPct = one / cores * 100.0;
+            _loadAt = DateTime.UtcNow;
+            return _loadPct;
+        }
+        catch { return null; }                                          // not Linux, or /proc unavailable
+    }
+    double? _loadPct;
+    DateTime? _loadAt;
 
     /// <summary>Percentage of one core the UI thread used since the previous sample, or null when unreadable.</summary>
     /// <remarks>
