@@ -59,7 +59,10 @@ public sealed class TelegramUserClient : IDisposable
     /// Signatures verified against WTelegramClient 4.4.9 rather than assumed. Only the FIRST login needs the phone
     /// number: afterwards the session file holds the auth key and the library asks for nothing.
     /// </remarks>
-    internal static Func<string, string?> BuildConfig(string apiId, string apiHash, string sessionPath, Func<string, string?> ask) => what => what switch
+    internal static Func<string, string?> BuildConfig(string apiId, string apiHash, string sessionPath, Func<string, string?> ask) => BuildConfigForTest(apiId, apiHash, sessionPath, ask);
+
+    /// <summary>Test seam for <see cref="BuildConfig"/>: proves the KEY SET, which is what a login fails on.</summary>
+    internal static Func<string, string?> BuildConfigForTest(string apiId, string apiHash, string sessionPath, Func<string, string?> ask) => what => what switch
     {
         "api_id" => apiId,
         "api_hash" => apiHash,
@@ -104,8 +107,21 @@ public sealed class TelegramUserClient : IDisposable
         return new TelegramUserClient(apiId, apiHash, sessionPath);
     }
 
-    /// <summary>True once the session file exists AND logs in without asking for anything.</summary>
-    public bool IsSignedIn => File.Exists(_sessionPath) && new FileInfo(_sessionPath).Length > 0;
+    /// <summary>
+    /// Whether a session FILE is present. NOT whether it is authorised.
+    /// </summary>
+    /// <remarks>
+    /// A file exists as soon as the login starts — it holds the DC address and the connection state — so a login that
+    /// was abandoned half way leaves a 7 KB file with no account in it, and this returned <c>true</c> for exactly that
+    /// (measured on the user's own file on 2026-10-16: it decrypts with the right api_hash, so it is a genuine session
+    /// file, but it carries no user id, so every call failed with "You must provide a config value for phone_number").
+    /// Only <see cref="WhoAmIAsync"/> can tell the difference, because only it asks the server.
+    /// </remarks>
+    public bool HasSessionFile => File.Exists(_sessionPath) && new FileInfo(_sessionPath).Length > 0;
+
+    /// <summary>Kept for callers that only mean "there is a session file"; see <see cref="HasSessionFile"/>.</summary>
+    [Obsolete("This is not proof of a login; use HasSessionFile or WhoAmIAsync.")]
+    public bool IsSignedIn => HasSessionFile;
 
     /// <summary>
     /// Connect using the session ALREADY on disk (created once by <c>kvindocode --telegram-login</c>). Asks the human
@@ -113,11 +129,22 @@ public sealed class TelegramUserClient : IDisposable
     /// </summary>
     public async Task SignInAsync(CancellationToken ct)
     {
-        if (!IsSignedIn)
+        if (!HasSessionFile)
             throw new TelegramException("No Telegram user session on this machine. Run `kvindocode --telegram-login` once " +
                                         "(it asks for the phone code and, if set, the 2FA password) and this tool reuses it afterwards.");
         WTelegram.Helpers.Log = (_, _) => { };
-        var me = await _client.LoginUserIfNeeded();
+        User me;
+        try
+        {
+            me = await _client.LoginUserIfNeeded();
+        }
+        catch (WTelegram.WTException e) when (e.Message.Contains("must provide a config value for phone_number", StringComparison.Ordinal))
+        {
+            // The library says this when the stored session has no account: it fell back to a fresh login, which needs a
+            // phone number, and nothing may answer that here (nobody is watching). "Half a login" is the real cause —
+            // a run that was abandoned at the code prompt leaves a session file that looks fine and authorises nothing.
+            throw NotSignedIn(e.Message);
+        }
         try { if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(_sessionPath, UnixFileMode.UserRead | UnixFileMode.UserWrite); } catch { }
         _me = me;
     }
@@ -127,9 +154,16 @@ public sealed class TelegramUserClient : IDisposable
     /// <summary>Whether the account of this session is reachable. Proves the stored session still works.</summary>
     public async Task<string> WhoAmIAsync(CancellationToken ct)
     {
-        var me = _me ?? await _client.LoginUserIfNeeded();
+        if (_me is null) await SignInAsync(ct);          // one place decides what "usable session" means
+        var me = _me!;
         return $"{me.first_name} {me.last_name}".Trim() + (me.username is { Length: > 0 } un ? $" @{un}" : "") + $" (id {me.id})";
     }
+
+    /// <summary>The message a human sees when their session file exists but holds no account (a half-finished login).</summary>
+    internal static TelegramException NotSignedIn(string libraryDetail) =>
+        new("Your Telegram session file exists but is NOT signed in: a login was started and never finished, and only " +
+            "finishing it can help. Run `kvindocode --telegram-login` and let it ask for the phone number, the login " +
+            "code Telegram sends you, and your 2FA password if you set one. (Telegram said: " + libraryDetail + ")");
 
     /// <summary>Run the interactive login. The callback supplies what Telegram asks for; only a human can answer.</summary>
     public async Task<string> LoginAsync(Func<string, string?> ask, CancellationToken ct)
