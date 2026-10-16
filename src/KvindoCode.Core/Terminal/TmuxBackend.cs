@@ -71,8 +71,18 @@ public sealed class TmuxBackend
     {
         if (!IsAvailable) return false;
         var name = SessionName(projectPath);
-        if (await HasSessionAsync(projectPath, ct)) return true;
         if (panes < 1) panes = 1;
+        if (await HasSessionAsync(projectPath, ct))
+        {
+            // TOP UP and re-tile. An existing session is not necessarily the session that was asked for: panes can have
+            // been closed (by hand or by a crash), and a grid left in a bad layout stays bad for ever otherwise. This is
+            // also what repairs a session that an earlier version deformed.
+            var existing = await ListPanesAsync(projectPath, ct);
+            for (var i = existing.Count; i < panes; i++)
+                await RunAsync(new[] { "split-window", "-t", $"{name}.0", "-v", "-c", Path.GetFullPath(projectPath) }, ct);
+            await RunAsync(new[] { "select-layout", "-t", name, "tiled" }, ct);
+            return true;
+        }
 
         // -d keeps tmux from attaching to a tty the app does not have; -c is the project directory, so a new pane
         // starts where the work is (asked: "terminals should start in the project directory").
@@ -175,11 +185,50 @@ public sealed class TmuxBackend
         await RunAsync(new[] { "delete-buffer", "-b", buffer }, ct);
     }
 
-    /// <summary>Resize a pane, which is what dragging a splitter ends up doing.</summary>
-    public async Task ResizeAsync(string projectPath, int pane, int columns, int rows, CancellationToken ct = default)
+    /// <summary>
+    /// Resize the whole grid: what the window resize and a splitter drag both come down to.
+    /// </summary>
+    /// <remarks>
+    /// This must resize the WINDOW, not each pane. A detached session has no client, so its window keeps whatever size
+    /// it was created with (80x24) and the grid has to set it — but <c>resize-pane -x/-y</c> resizes one pane AT THE
+    /// EXPENSE OF ITS NEIGHBOUR: measured against tmux 3.4, asking pane 0 of a tiled 80x24 window for 100x20 produced
+    /// 78x20 next to a **1-column** pane, which is exactly the unusable grid that was reported (a real pane came back
+    /// 11 columns wide). <c>resize-window</c> scales the whole window and lets tmux distribute it, which cannot produce
+    /// a degenerate pane. The grid's own layout has one splitter per axis, i.e. an even split, so the total size is all
+    /// tmux needs to know.
+    /// </remarks>
+    public async Task ResizeGridAsync(string projectPath, int columns, int rows, CancellationToken ct = default)
     {
-        if (!IsAvailable || columns < 2 || rows < 2) return;
-        await RunAsync(new[] { "resize-pane", "-t", $"{SessionName(projectPath)}.{pane}", "-x", columns.ToString(), "-y", rows.ToString() }, ct);
+        if (!IsAvailable) return;
+        if (columns < 2 || rows < 2) return;
+        var name = SessionName(projectPath);
+        await RunAsync(new[] { "resize-window", "-t", name, "-x", columns.ToString(), "-y", rows.ToString() }, ct);
+        await RunAsync(new[] { "select-layout", "-t", name, "tiled" }, ct);
+    }
+
+    /// <summary>
+    /// Move the boundary of <paramref name="pane"/> by <paramref name="cells"/>: what dragging a splitter does.
+    /// </summary>
+    /// <param name="direction">One of <c>L R U D</c>.</param>
+    /// <remarks>
+    /// A RELATIVE adjustment, not an absolute size. <c>resize-pane -x/-y</c> (absolute) takes whatever space it needs
+    /// from the neighbour and produced a 1-column pane in the measurements above; <c>-R/-D</c> moves exactly that one
+    /// boundary by exactly that many cells, which is the drag the human made and cannot deform the other panes. The
+    /// grid keeps its ratio this way, which is what a splitter is for — re-tiling instead would silently undo the drag.
+    /// </remarks>
+    public async Task NudgeAsync(string projectPath, int pane, char direction, int cells, CancellationToken ct = default)
+    {
+        if (!IsAvailable || cells <= 0) return;
+        var flag = direction switch
+        {
+            'L' or 'l' => "-L",
+            'R' or 'r' => "-R",
+            'U' or 'u' => "-U",
+            'D' or 'd' => "-D",
+            _ => null,
+        };
+        if (flag is null) return;
+        await RunAsync(new[] { "resize-pane", "-t", $"{SessionName(projectPath)}.{pane}", flag, cells.ToString() }, ct);
     }
 
     /// <summary>Name a pane (the editable tab title). Empty clears it.</summary>

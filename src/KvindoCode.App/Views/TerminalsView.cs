@@ -201,24 +201,68 @@ public sealed class TerminalsView : UserControl
             Grid.SetColumnSpan(s, 3);
         }
         _grid.Children.Add(s);
-        // A tmux session started with -d has no attached client, so OUR layout is the only thing that knows a pane got
-        // bigger: without this the pane keeps wrapping at its old width.
-        s.DragCompleted += (_, _) => PushSizesToTmux();
+        // A tmux session started with -d has no attached client, so OUR layout is the only thing that knows a boundary
+        // moved: without this the pane keeps wrapping at its old width. The delta is measured between the two ends of
+        // the drag and applied as a RELATIVE nudge, so the ratio the human chose survives and no pane can end up
+        // degenerate; pushing a total size here would re-tile and undo the drag.
+        s.DragStarted += (_, _) => _dragStart = CellSizesNow().ToDictionary(x => x.Index, x => x.Cells);
+        s.DragCompleted += (_, _) => PushNudgesToTmux();
     }
 
-    /// <summary>Give every pane a size tmux knows about, after a splitter drag changed the grid.</summary>
+    /// <summary>
+    /// Tell tmux how big the grid is, after a window resize or a splitter drag.
+    /// </summary>
+    /// <remarks>
+    /// ONE call for the whole grid (see <see cref="TmuxBackend.ResizeGridAsync"/>): sizing each pane individually
+    /// mangled the layout, because tmux takes the space for a pane from its neighbour.
+    /// </remarks>
     public void PushSizesToTmux()
     {
-        foreach (var (index, cells) in CurrentCellSizes())
-            _ = _backend.ResizeAsync(_project, index, cells.Columns, cells.Rows);
+        if (_grid.Bounds.Width < 1 || _grid.Bounds.Height < 1) return;     // not laid out yet: a guess would deform the grid
+        var (cols, rows) = _gridCells();
+        if (cols < TerminalGeometry.MinColumns || rows < TerminalGeometry.MinRows) return;
+        _ = _backend.ResizeGridAsync(_project, cols, rows);
     }
 
-    /// <summary>The pixel size of each pane turned into the cell grid tmux takes.</summary>
+    Dictionary<int, (int Columns, int Rows)>? _dragStart;
+
+    /// <summary>Cells per pane right now (the grid's layout, not tmux's).</summary>
+    public IEnumerable<(int Index, (int Columns, int Rows) Cells)> CellSizesNow() => CurrentCellSizes();
+
+    /// <summary>Apply the splitter drag: the pane whose boundary moved gets a relative nudge of the cells it gained.</summary>
+    void PushNudgesToTmux()
+    {
+        var before = _dragStart;
+        _dragStart = null;
+        if (before is null || _closed) return;
+        foreach (var (index, cells) in CurrentCellSizes())
+        {
+            if (!before.TryGetValue(index, out var was)) continue;
+            var dCols = cells.Columns - was.Columns;
+            var dRows = cells.Rows - was.Rows;
+            if (dCols > 0) _ = _backend.NudgeAsync(_project, index, 'R', dCols);
+            else if (dCols < 0) _ = _backend.NudgeAsync(_project, index, 'L', -dCols);
+            if (dRows > 0) _ = _backend.NudgeAsync(_project, index, 'D', dRows);
+            else if (dRows < 0) _ = _backend.NudgeAsync(_project, index, 'U', -dRows);
+        }
+    }
+
+    /// <summary>The grid's own size in cells — the whole 2x2, splitters included, because tmux splits it itself.</summary>
+    (int Columns, int Rows) _gridCells()
+    {
+        // Measured once: the cell metric is the same everywhere in the grid, and re-measuring a font per drag is pointless.
+        var typeface = new Typeface(MonoFont);
+        var text = new FormattedText("MMMMMMMMMM", CultureInfo.InvariantCulture, FlowDirection.LeftToRight, typeface, 12.5, Brushes.Black);
+        return TerminalGeometry.Cells(_grid.Bounds.Width - 20, _grid.Bounds.Height - 30, text.Width / 10.0, text.Height);
+    }
+
+    /// <summary>The monospace family the panes' text is drawn with (the app's own fallback chain).</summary>
+    internal const string MonoFont = "JetBrains Mono, Cascadia Mono, DejaVu Sans Mono, Liberation Mono, monospace";
+
+    /// <summary>What each pane's own box comes to in cells. For reporting and tests; the push uses the whole grid.</summary>
     public IEnumerable<(int Index, (int Columns, int Rows) Cells)> CurrentCellSizes()
     {
-        // Measured once for the whole grid: the cell metric is the same in every pane, and re-measuring a font per pane
-        // per drag would be pointless work.
-        var typeface = new Typeface(FontFamily.Parse("JetBrains Mono, Cascadia Mono, DejaVu Sans Mono, monospace"));
+        var typeface = new Typeface(FontFamily.Parse(MonoFont));
         var text = new FormattedText("MMMMMMMMMM", CultureInfo.InvariantCulture, FlowDirection.LeftToRight, typeface, 12.5, Brushes.Black);
         var charWidth = text.Width / 10.0;
         var lineHeight = text.Height;
@@ -277,11 +321,21 @@ public sealed class TerminalsView : UserControl
     }
 
     /// <summary>
-    /// Read every pane once and render the ones that changed. The poll timer calls this; it is also public so a test
-    /// can ask for a refresh deterministically instead of waiting for a tick (a DispatcherTimer does not fire in a
-    /// headless test, which made an assertion read a stale render).
+    /// Read every pane once and render the ones that changed.
     /// </summary>
-    public Task RefreshAsync() => PollAsync();
+    /// <remarks>
+    /// The poll timer calls this, and it is public so a caller can ask for a refresh deterministically instead of waiting
+    /// for a tick (a DispatcherTimer does not fire in a headless test, and an assertion there read a stale render).
+    ///
+    /// It WAITS for a poll that is already in flight instead of skipping its own: as a bare "return if polling" it was
+    /// a silent no-op whenever the timer happened to be mid-capture — which is how a test asking for five refreshes got
+    /// zero (captures per pane: <empty>).
+    /// </remarks>
+    public async Task RefreshAsync()
+    {
+        for (var waited = 0; _polling && waited < 2000; waited += 15) await Task.Delay(15);
+        await PollAsync();
+    }
 
     async Task PollAsync()
     {
