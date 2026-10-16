@@ -968,6 +968,7 @@ public partial class MainWindow : Window
                     TrySaveSettings();
                     RebuildSidebar();
                 }
+                else MarkPendingAttention(sv.Id);       // parked on you while you watch it: the entry waits for you to leave
                 break;
             case TurnEndEvent:
                 // a session you are looking at is on screen already: only other sessions wait for you
@@ -977,6 +978,7 @@ public partial class MainWindow : Window
                     // a new turn makes it "waiting for you" again: it lights up even if the previous dot was acknowledged
                     if (_settings.AttentionAcknowledged.Remove(sv.Id)) TrySaveSettings();
                 }
+                else MarkPendingAttention(sv.Id);
                 sv.WaitingForUser = false;
                 RebuildSidebar(); if (cur) { UpdateSendButton(); UpdateTodos(); Input.Focus(); } break;
             case ModeChangedEvent: if (cur) UpdateMode(); break;
@@ -2853,6 +2855,7 @@ public partial class MainWindow : Window
     void RebuildSidebarCore()
     {
         RebuildSidebarCount++;      // for the test that a replayed history does not rebuild the panel per event
+        PromotePendingAttention();  // deferred entries whose session is no longer on screen enter the block here
         ProjectsPanel.Children.Clear();
         if (_query.Length > 0) { RebuildSearchResults(); return; }
 
@@ -3023,6 +3026,7 @@ public partial class MainWindow : Window
     void AcknowledgeAttention(string sessionId)
     {
         if (!_settings.AttentionAcknowledged.Contains(sessionId)) _settings.AttentionAcknowledged.Add(sessionId);
+        _settings.AttentionPending.Remove(sessionId);   // acknowledged while on screen: do not hand it to the block later
         TrySaveSettings();
         RebuildSidebar();
     }
@@ -3055,6 +3059,8 @@ public partial class MainWindow : Window
         if (!Workspaces.Forget(s.Cwd, s.Id, out var keepReason) && keepReason.Length > 0)
             ShowInfo($"“{s.Title}” was deleted, but its work tree was kept: {keepReason}. The branch kv/{s.Id} is still there to merge.");
         _storage.Delete(s);
+        _settings.AttentionPending.Remove(s.Id);        // a deleted session must not come back as a deferred entry
+        TrySaveSettings();
         await RefreshSessionsAsync();
         RebuildSidebar();
     }
@@ -3064,8 +3070,41 @@ public partial class MainWindow : Window
     {
         _settings.AttentionSessions.Remove(sessionId);
         _settings.AttentionAcknowledged.Remove(sessionId);
+        _settings.AttentionPending.Remove(sessionId);   // a deferred entry too, or it would reappear when you switch away
         TrySaveSettings();
         RebuildSidebar();
+    }
+
+    /// <summary>
+    /// A turn ended (or parked on a question) in the session that is ON SCREEN. The Needs-attention block lists things
+    /// you cannot see, so the entry is deferred here instead of being added to the block under your nose — see
+    /// <see cref="AppSettings.AttentionPending"/>.
+    /// </summary>
+    void MarkPendingAttention(string sessionId)
+    {
+        if (_settings.AttentionSessions.Contains(sessionId)) return;   // it is already in the block (you opened it from there)
+        if (!_settings.AttentionPending.Contains(sessionId)) { _settings.AttentionPending.Add(sessionId); TrySaveSettings(); }
+    }
+
+    /// <summary>
+    /// Move every deferred entry whose session is no longer on screen into the block. Called from
+    /// <see cref="RebuildSidebarCore"/> — i.e. both the moment you switch away (the block is rebuilt then) and after a
+    /// restart, so a session that finished while you watched it and that you never opened again still shows up.
+    /// </summary>
+    /// <remarks>It must NOT rebuild the sidebar itself: it runs at the top of the rebuild, and re-entering there is how
+    /// a recursive rebuild would start.</remarks>
+    void PromotePendingAttention()
+    {
+        if (_settings.AttentionPending.Count == 0) return;
+        bool moved = false;
+        foreach (var id in _settings.AttentionPending.ToList())
+        {
+            if (_current != null && id == _current.Id) continue;       // still on screen: it stays deferred
+            _settings.AttentionPending.Remove(id);
+            if (!_settings.AttentionSessions.Contains(id)) _settings.AttentionSessions.Add(id);
+            moved = true;
+        }
+        if (moved) TrySaveSettings();
     }
 
     Control? ActivityDot(IEnumerable<SessionInfo> sessions)
