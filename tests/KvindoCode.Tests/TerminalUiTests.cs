@@ -10,6 +10,7 @@ using Avalonia.Controls;
 using Avalonia.Headless;
 using Avalonia.Headless.XUnit;
 using Avalonia.Input;
+using Avalonia.Layout;
 using Avalonia.Threading;
 using Avalonia.Controls.Documents;
 using Avalonia.VisualTree;
@@ -208,6 +209,98 @@ public sealed class TerminalUiTests : IDisposable
             "tmux did not get the pane name");
         // ...and the shell never saw the name as input
         Assert.DoesNotContain("buildlogs", await terminals.Backend.CaptureAsync(sb.Project, 1, 50));
+    }
+
+    /// <summary>
+    /// A window resize must reach tmux. The session has no attached client, so nothing else would tell it the panes
+    /// got bigger — and the pane would keep wrapping at the width it was created with.
+    /// </summary>
+    [AvaloniaFact]
+    public async Task Resizing_the_window_resizes_the_panes_in_tmux()
+    {
+        using var sb = new Sandbox();
+        using var app = Start(sb);
+        if (!new TmuxBackend().IsAvailable) { _out.WriteLine("tmux not available; skipping"); return; }
+        app.Main.Width = 900;
+        Dispatcher.UIThread.RunJobs();
+        app.OpenTerminals();
+        var terminals = app.Terminals!;
+        Assert.True(await Eventually(async () => (await terminals.Backend.ListPanesAsync(sb.Project)).Count == 4));
+        var narrow = (await terminals.Backend.ListPanesAsync(sb.Project)).Max(p => p.Columns);
+
+        // widen the window: the grid is laid out again, and the debounce pushes the new cell size to tmux
+        app.Main.Width = 1600;
+        Dispatcher.UIThread.RunJobs();
+        terminals.Measure(new Size(1600, 900));
+        terminals.Arrange(new Rect(0, 0, 1560, 880));
+        Dispatcher.UIThread.RunJobs();
+        terminals.PushSizesToTmux();
+
+        Assert.True(await Eventually(async () => (await terminals.Backend.ListPanesAsync(sb.Project)).Max(p => p.Columns) > narrow),
+            $"tmux still reports {narrow} columns after the window was widened to 1600");
+    }
+
+    /// <summary>
+    /// The grid must not read all four panes at full rate: that is what made it cost a median of 2.6 cores with the
+    /// grid open (measured 2026-10-16). The pane being typed in is read every tick; the others every few ticks.
+    /// </summary>
+    [AvaloniaFact]
+    public async Task The_panes_you_are_not_typing_in_are_read_less_often()
+    {
+        using var sb = new Sandbox();
+        using var app = Start(sb);
+        if (!new TmuxBackend().IsAvailable) { _out.WriteLine("tmux not available; skipping"); return; }
+        app.OpenTerminals();
+        var terminals = app.Terminals!;
+        Assert.True(await Eventually(async () => (await terminals.Backend.ListPanesAsync(sb.Project)).Count == 4));
+
+        terminals.SetActive(3);
+        terminals.CaptureCalls.Clear();
+        for (var i = 0; i < TerminalsView.BackgroundTicks; i++) await terminals.RefreshAsync();
+        Dispatcher.UIThread.RunJobs();
+
+        _out.WriteLine("captures per pane: " + string.Join(", ", terminals.CaptureCalls.OrderBy(k => k.Key).Select(k => $"{k.Key}={k.Value}")));
+        Assert.Equal(TerminalsView.BackgroundTicks, terminals.CaptureCalls[3]);              // the active pane: every tick
+        foreach (var index in new[] { 0, 1, 2 })
+            Assert.Equal(1, terminals.CaptureCalls[index]);                                  // the rest: once, on the last tick
+        // and over a longer run the ratio holds: a pane you are not using costs a fifth of the reads
+        for (var i = 0; i < TerminalsView.BackgroundTicks * 3; i++) await terminals.RefreshAsync();
+        Dispatcher.UIThread.RunJobs();
+        var active = terminals.CaptureCalls[3];
+        var other = terminals.CaptureCalls[0];
+        Assert.True(active >= other * 3, $"background panes are read almost as often as the active one ({other} vs {active})");
+    }
+
+    /// <summary>
+    /// The grid fills the main area. It used to be capped at 1400 px and left-aligned (the transcript's readability
+    /// rules), so on a wide window the terminals stopped two thirds of the way across with dead space beside them —
+    /// "terminals do not fill all app window" (reported 2026-10-16).
+    /// </summary>
+    [AvaloniaFact]
+    public async Task The_grid_fills_the_main_area()
+    {
+        using var sb = new Sandbox();
+        using var app = Start(sb);
+        if (!new TmuxBackend().IsAvailable) { _out.WriteLine("tmux not available; skipping"); return; }
+        app.Main.Width = 1700;
+        app.Main.Height = 900;
+        Dispatcher.UIThread.RunJobs();
+        app.OpenTerminals();
+        var terminals = app.Terminals!;
+        Dispatcher.UIThread.RunJobs();
+        terminals.Measure(new Size(1700, 900));
+        terminals.Arrange(new Rect(0, 0, terminals.Bounds.Width > 0 ? terminals.Bounds.Width : 1400, 900));
+        await terminals.RefreshAsync();
+        Dispatcher.UIThread.RunJobs();
+
+        var host = app.Main.FindControl<Grid>("Host")!;
+        _out.WriteLine($"host={host.Bounds.Width:0}x{host.Bounds.Height:0} terminals={terminals.Bounds.Width:0}x{terminals.Bounds.Height:0}");
+        Assert.True(double.IsPositiveInfinity(terminals.MaxWidth), "the grid is still capped in width");
+        Assert.Equal(Avalonia.Layout.HorizontalAlignment.Stretch, terminals.HorizontalAlignment);
+        // and it really occupies the width it was given, not a capped slice of it
+        Assert.True(terminals.Bounds.Width > 1000, $"the grid is only {terminals.Bounds.Width:0} px wide");
+        var widest = terminals.Panes.Max(p => p.Bounds.Width);
+        Assert.True(widest > 400, $"the widest pane is only {widest:0} px");
     }
 
     /// <summary>Closing the grid and opening it again keeps what the panes showed: the session lives in tmux.</summary>

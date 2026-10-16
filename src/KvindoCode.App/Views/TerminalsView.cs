@@ -37,11 +37,23 @@ public sealed class TerminalsView : UserControl
     readonly Grid _grid = new();
     readonly Action<string> _onNotice;
 
-    /// <summary>Scrollback lines read per pane. Generous on purpose: it is what makes "scroll up to see the build" work.</summary>
-    public const int HistoryLines = 2000;
+    /// <summary>
+    /// Scrollback lines read per pane: enough to scroll back through a build log, and not more.
+    /// </summary>
+    /// <remarks>
+    /// This was 2000 and it was the grid's largest cost by far. Every changed capture is RENDERED in full, so four
+    /// panes × 8 polls a second × 2000 lines meant up to 64 000 lines a second being parsed, rendered into Runs and
+    /// thrown away again — measured on the live app (2026-10-16) as a median of 2.6 cores of CPU and up to ~140 MB/s
+    /// of allocations with the grid open. 500 keeps "scroll up to see the build" working at a quarter of the work;
+    /// tmux itself (not this view) is what holds the real scrollback.
+    /// </remarks>
+    public const int HistoryLines = 500;
 
     /// <summary>How often the panes are read. Fast enough to feel live, slow enough to be invisible on the CPU.</summary>
-    public int PollMilliseconds { get; init; } = 120;
+    public int PollMilliseconds { get; init; } = 200;
+
+    /// <summary>Every Nth tick the panes you are NOT typing in are read too (they only need to be readable, not live).</summary>
+    public const int BackgroundTicks = 5;
 
     /// <summary>Diagnostics: how many key/text events the grid has handled (tests read these).</summary>
     public int KeysSent { get; private set; }
@@ -49,11 +61,17 @@ public sealed class TerminalsView : UserControl
     public int TextEventsSeen { get; private set; }
     public int KeyEventsSeen { get; private set; }
 
+    readonly DispatcherTimer _sizeDebounce = new() { Interval = TimeSpan.FromMilliseconds(250) };
+
     DispatcherTimer? _timer;
     int _active;
     bool _polling;
     bool _closed;
+    int _tick;
     Task _started = Task.CompletedTask;
+
+    /// <summary>Diagnostics for the tests: how many pane captures were asked of tmux, per pane.</summary>
+    public Dictionary<int, int> CaptureCalls { get; } = new();
 
     public TerminalsView(TmuxBackend backend, string project, Action close, Action<string>? onNotice = null)
     {
@@ -131,8 +149,16 @@ public sealed class TerminalsView : UserControl
             return;
         }
 
+        HorizontalAlignment = HorizontalAlignment.Stretch;
+        VerticalAlignment = VerticalAlignment.Stretch;
         Content = new DockPanel { Children = { head, _grid } };
         DockPanel.SetDock(head, Dock.Top);
+
+        // A window resize moves every cell just as a splitter drag does, and tmux has no attached client to notice it:
+        // without this the panes kept the size they were created with, so the text wrapped at the OLD width and the
+        // terminals did not match the window (reported 2026-10-16: "terminals do not fill all app window"). Debounced,
+        // because a drag produces a size change per pixel.
+        _sizeDebounce.Tick += (_, _) => { _sizeDebounce.Stop(); PushSizesToTmux(); };
         AttachedToVisualTree += (_, _) => _started = StartAsync();
         DetachedFromVisualTree += (_, _) => Stop();
     }
@@ -237,6 +263,17 @@ public sealed class TerminalsView : UserControl
         _closed = true;
         _timer?.Stop();
         _timer = null;
+        _sizeDebounce.Stop();
+    }
+
+    /// <summary>The grid was resized (a window resize, a splitter, the side panel opening): tell tmux.</summary>
+    protected override void OnSizeChanged(SizeChangedEventArgs e)
+    {
+        base.OnSizeChanged(e);
+        if (_closed || !_backend.IsAvailable) return;
+        if (e.NewSize.Width < 1 || e.NewSize.Height < 1) return;
+        _sizeDebounce.Stop();
+        _sizeDebounce.Start();
     }
 
     /// <summary>
@@ -254,8 +291,23 @@ public sealed class TerminalsView : UserControl
         {
             var infos = await _backend.ListPanesAsync(_project);
             if (infos.Count == 0) return;
+            _tick++;
+            // The pane you are typing in is read every tick; the others every few ticks. They are for reading (a log
+            // tail, a build), and a quarter of a second of latency there is invisible — while reading all four at full
+            // rate was most of the grid's cost.
+            var all = _tick % BackgroundTicks == 0;
             var captures = new Dictionary<int, string>();
-            foreach (var info in infos) captures[info.Index] = await _backend.CaptureAsync(_project, info.Index, HistoryLines);
+            foreach (var info in infos)
+            {
+                if (!all && info.Index != _active) continue;
+                // A full-screen program (vim, less, htop) owns the alternate screen: its scrollback is not something the
+                // human can scroll into, and tmux's history there belongs to whatever ran BEFORE it — reading history
+                // around vim made the view enormous and the visible screen a sliver at the bottom. So an
+                // alternate-screen pane is captured as exactly what is on screen.
+                var lines = info.AlternateOn ? 0 : HistoryLines;
+                captures[info.Index] = await _backend.CaptureAsync(_project, info.Index, lines);
+                CaptureCalls[info.Index] = CaptureCalls.TryGetValue(info.Index, out var n) ? n + 1 : 1;
+            }
 
             await Dispatcher.UIThread.InvokeAsync(() =>
             {
