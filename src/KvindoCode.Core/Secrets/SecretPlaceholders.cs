@@ -78,13 +78,24 @@ public static partial class SecretPlaceholders
     }
 
     /// <summary>
-    /// Expand markers in a SHELL command, single-quoting each value.
+    /// Expand markers in a SHELL command, single-quoting a value that STANDS ALONE as a word.
     /// </summary>
     /// <remarks>
     /// A stored value containing a space, `$`, a backtick or `$( )` was spliced into the command text verbatim and
     /// then re-parsed by bash — word splitting and command substitution on what was supposed to be data (audit H-2).
     /// Single quotes make the shell treat the value as one literal word; an embedded single quote is escaped the
     /// POSIX way (<c>'\''</c>).
+    ///
+    /// Quoting only applies when the marker really is a whole word. It used to be applied unconditionally, and that
+    /// CORRUPTED COMMANDS: the vault holds ordinary identifiers (a long-standing false-positive problem), so a
+    /// command that merely contained one — <c>private List&lt;Foo&gt; _clickHouses = new();</c> — was masked and then
+    /// re-expanded as <c>_'clickHouses'</c>, an INVALID identifier, written silently into the file. Reported by another
+    /// session on 2026-10-17 after a heredoc produced exactly that in six places, and reproduced here.
+    ///
+    /// So: standalone → quote (protection); embedded in a token → NO quotes, which is the only way to keep the token
+    /// intact. If the value cannot survive unquoted (it holds a character the shell would act on) the expansion is
+    /// REFUSED with an explanation rather than writing something mangled — an embedded secret in the middle of an
+    /// identifier has no correct shell spelling, and saying so beats a compile error much later.
     /// </remarks>
     public static bool TryExpandForShell(string text, out string expanded, out string? error, SecretVault? vault = null)
     {
@@ -92,6 +103,19 @@ public static partial class SecretPlaceholders
     }
 
     static string ShellQuote(string value) => "'" + value.Replace("'", "'\\''") + "'";
+
+    /// <summary>A character the shell would act on (so a value holding one must be quoted, not embedded).</summary>
+    static bool IsShellSafeBare(string value) =>
+        value.Length > 0 && value.All(c => char.IsLetterOrDigit(c) || "._-/:@+=,%".IndexOf(c) >= 0);
+
+    /// <summary>True when the marker occupies a whole shell word: a delimiter (or an end) on both sides.</summary>
+    static bool IsStandaloneWord(string text, int start, int length)
+    {
+        static bool Delimiter(char c) => char.IsWhiteSpace(c) || "|&;()<>\"'`".IndexOf(c) >= 0;
+        var before = start == 0 || Delimiter(text[start - 1]);
+        var after = start + length >= text.Length || Delimiter(text[start + length]);
+        return before && after;
+    }
 
     static bool TryExpandCore(string text, out string expanded, out string? error, SecretVault? vault, bool quoteForShell)
     {
@@ -108,7 +132,16 @@ public static partial class SecretPlaceholders
                 expanded = text;
                 return false;
             }
-            expanded = expanded.Replace(match.Value, quoteForShell ? ShellQuote(value) : value, StringComparison.Ordinal);
+            var standalone = !quoteForShell || IsStandaloneWord(text, match.Index, match.Length);
+            if (quoteForShell && !standalone && !IsShellSafeBare(value))
+            {
+                error = $"{match.Value} is embedded in the middle of a word, and the value it resolves to contains a " +
+                        "character the shell would act on, so there is no way to place it there literally. Use the marker " +
+                        "as a whole word (or read the value into a variable) instead.";
+                expanded = text;
+                return false;
+            }
+            expanded = expanded.Replace(match.Value, quoteForShell && standalone ? ShellQuote(value) : value, StringComparison.Ordinal);
         }
         return true;
     }
