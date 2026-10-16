@@ -2013,7 +2013,12 @@ public sealed class AgentSession : IDisposable
     /// A brief window of context is returned per hit, flattened to one line, so a result list can show WHY it matched
     /// without re-reading anything.
     /// </remarks>
-    public SessionSearchHits SearchHistory(string pattern, int max = 500)
+    /// <param name="roles">Which kinds of message to search: <c>user</c> (the human's own), <c>assistant</c> (its
+    /// answers and reasoning) and <c>tool</c> (tool-call arguments). Null or empty searches everything. Asked
+    /// 2026-10-16: "in search by session i want results be able to be filtered to assistant message/tool calls/my
+    /// messages. By default search should be by assistant message and my messages" — so the CALLER passes
+    /// user+assistant by default rather than the tool noise a session is full of.</param>
+    public SessionSearchHits SearchHistory(string pattern, int max = 500, IReadOnlyCollection<string>? roles = null)
     {
         if (string.IsNullOrWhiteSpace(pattern)) return SessionSearchHits.None();
         System.Text.RegularExpressions.Regex rx;
@@ -2034,10 +2039,11 @@ public sealed class AgentSession : IDisposable
             foreach (var (text, role) in Searchable(m))
             {
                 if (string.IsNullOrEmpty(text)) continue;
+                if (roles is { Count: > 0 } && !roles.Contains(role)) continue;
                 foreach (System.Text.RegularExpressions.Match mm in rx.Matches(text))
                 {
                     if (mm.Length == 0) continue;
-                    hits.Add(new SessionSearchHit(role, idx, m.Ts, Flatten(text, mm.Index - 60, mm.Index), mm.Value, Flatten(text, mm.Index + mm.Length, -1, 60)));
+                    hits.Add(new SessionSearchHit(role, idx, m.Ts, Flatten(text, mm.Index - 60, mm.Index), mm.Value, Flatten(text, mm.Index + mm.Length, -1, 60, leading: false)));
                     if (hits.Count >= max) return new SessionSearchHits(hits);
                 }
             }
@@ -2054,14 +2060,17 @@ public sealed class AgentSession : IDisposable
     }
 
     /// <summary>A single-line window of <paramref name="text"/>: up to 60 characters either side, newlines flattened.</summary>
-    static string Flatten(string text, int from, int matchStart, int take = 60)
+    /// <param name="leading">True for the part BEFORE the match, false for the part after it. It controls the leading
+    /// ellipsis only: the trailing part starts exactly where the match ends, so it must not be prefixed with "…" (it
+    /// was, which made every result read "needle…-in-a-command" — caught by the role-filter test, 2026-10-16).</param>
+    static string Flatten(string text, int from, int matchStart, int take = 60, bool leading = true)
     {
         var start = Math.Max(0, from);
         // matchStart < 0 means "just take `take` characters from `start`" (the trailing half of a hit)
         var len = matchStart >= 0 ? matchStart - start : Math.Min(take, text.Length - start);
         len = Math.Max(0, Math.Min(len, text.Length - start));
         var slice = text.Substring(start, len);
-        if (start > 0) slice = "…" + slice;
+        if (leading && start > 0) slice = "…" + slice;
         if (start + len < text.Length) slice += "…";
         return slice.Replace("\r", "").Replace("\n", " ⏎ ");
     }

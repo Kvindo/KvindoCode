@@ -1,5 +1,6 @@
 using System.Text.Json.Nodes;
 using Avalonia.Controls;
+using Avalonia.Controls.Primitives;
 using Avalonia.Headless.XUnit;
 using Avalonia.Threading;
 using Avalonia.VisualTree;
@@ -220,5 +221,109 @@ public sealed class SessionSearchAndInjectedTextTests(ITestOutputHelper o)
         Assert.Contains("8551e731", named);                                 // ...and something to reply to
         Assert.Equal("99999999", untitled);                                 // "Untitled" is not a name
         Assert.Equal("abcdef12", unknown);                                  // an unknown session still gets an id
+    }
+
+    // ---------------------------------------------------------------- (5) filtering by kind of message
+
+    /// <summary>
+    /// The role filter: my messages / assistant / tool calls. Default (the UI's) is user+assistant, without tools.
+    /// </summary>
+    /// <remarks>
+    /// Asked 2026-10-16: "in search by session i want results be able to be filtered to assistant message/tool calls/my
+    /// messages. By default search should be by assistant message and my messages". A session is mostly TOOL ARGUMENTS,
+    /// so leaving them in drowns the conversation the user is actually looking for.
+    /// </remarks>
+    [Fact]
+    public async Task History_search_can_be_filtered_by_kind_of_message()
+    {
+        using var sb = new Sandbox();
+        var s = new AgentSession(sb.Settings(), Script.Client(), sb.Project, new FakeInteraction());
+        s.AddMessageForTest(new ChatMessage { Role = "user", Content = "needle in my own message" });
+        s.AddMessageForTest(new ChatMessage { Role = "assistant", Content = "needle in the answer" });
+        s.AddMessageForTest(new ChatMessage { Role = "assistant", Reasoning = "needle in the reasoning" });
+        s.AddMessageForTest(new ChatMessage
+        {
+            Role = "assistant", Content = "",
+            ToolCalls = new() { new ToolCall { Id = "c1", Name = "Bash", Arguments = new JsonObject { ["command"] = "grep needle-in-a-command" }.ToJsonString() } },
+        });
+
+        var all = s.SearchHistory("needle");
+        o.WriteLine("all      : " + string.Join(", ", all.Hits.Select(h => h.Role)));
+        Assert.Equal(4, all.Count);                                    // no filter: everything
+
+        var mine = s.SearchHistory("needle", 500, new[] { "user" });
+        Assert.Single(mine.Hits);
+        Assert.Equal("user", mine.Hits[0].Role);
+
+        var assistant = s.SearchHistory("needle", 500, new[] { "assistant" });
+        Assert.Equal(2, assistant.Count);                              // its answer AND its reasoning
+        Assert.All(assistant.Hits, h => Assert.Equal("assistant", h.Role));
+
+        var tools = s.SearchHistory("needle", 500, new[] { "tool" });
+        Assert.Single(tools.Hits);
+        Assert.Equal("tool", tools.Hits[0].Role);
+        // Match is what the REGEX matched ("needle"); the rest of the token is the context around it
+        Assert.Equal("needle", tools.Hits[0].Match);
+        Assert.Contains("needle-in-a-command", tools.Hits[0].Match + tools.Hits[0].After);
+
+        // the DEFAULT pair the UI starts with: the conversation, not the tool noise
+        var conversation = s.SearchHistory("needle", 500, new[] { "user", "assistant" });
+        o.WriteLine("default  : " + string.Join(", ", conversation.Hits.Select(h => h.Role)));
+        Assert.Equal(3, conversation.Count);
+        Assert.DoesNotContain(conversation.Hits, h => h.Role == "tool");
+    }
+
+    /// <summary>The panel really starts with my messages + assistant, and offers tool calls as the third toggle.</summary>
+    [AvaloniaFact]
+    public async Task The_search_panel_defaults_to_conversation_not_tool_calls()
+    {
+        using var sb = new Sandbox();
+        using var app = SecretAuditorRealUiTests.StartUi(sb, new JsonArray { Script.Text("hi") });
+        var pane = (RightPane)typeof(KvindoCode.App.MainWindow)
+            .GetField("_pane", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(app.Window)!;
+        var session = app.Session.Session;
+        session.AddMessageForTest(new ChatMessage { Role = "user", Content = "findme in mine" });
+        session.AddMessageForTest(new ChatMessage { Role = "assistant", Content = "findme in the answer" });
+        session.AddMessageForTest(new ChatMessage
+        {
+            Role = "assistant", Content = "",
+            ToolCalls = new() { new ToolCall { Id = "c1", Name = "Bash", Arguments = new JsonObject { ["command"] = "findme in a tool" }.ToJsonString() } },
+        });
+
+        pane.SetProject(sb.Project);
+        pane.ShowSearch(session);
+        pane.Measure(new Avalonia.Size(600, 800)); pane.Arrange(new Avalonia.Rect(0, 0, 600, 800));
+        Dispatcher.UIThread.RunJobs();
+
+        var toggles = pane.GetVisualDescendants().OfType<ToggleButton>().ToList();
+        o.WriteLine("toggles: " + string.Join(", ", toggles.Select(t => $"{t.Content}={t.IsChecked}")));
+        Assert.Equal(3, toggles.Count);
+        Assert.True(toggles.Single(t => (t.Content as string) == "My messages").IsChecked);
+        Assert.True(toggles.Single(t => (t.Content as string) == "Assistant").IsChecked);
+        Assert.False(toggles.Single(t => (t.Content as string) == "Tool calls").IsChecked);
+
+        // type a query: two rows, and NOT the tool one
+        var box = pane.GetVisualDescendants().OfType<TextBox>().First(t => (t.Watermark ?? "").Contains("Find in this session"));
+        box.Text = "findme";
+        Dispatcher.UIThread.RunJobs();
+        var rows = pane.GetVisualDescendants().OfType<Button>()
+            .Where(b => b.Content is StackPanel sp && sp.Children.OfType<Grid>().Any()).ToList();
+        o.WriteLine($"rows by default: {rows.Count}");
+        Assert.Equal(2, rows.Count);                                   // mine + the answer, no tool call
+
+        // ...and turning tool calls ON adds the third
+        var tools = toggles.Single(t => (t.Content as string) == "Tool calls");
+        tools.IsChecked = true;
+        Dispatcher.UIThread.RunJobs();
+        rows = pane.GetVisualDescendants().OfType<Button>()
+            .Where(b => b.Content is StackPanel sp && sp.Children.OfType<Grid>().Any()).ToList();
+        o.WriteLine($"rows with tool calls: {rows.Count}");
+        Assert.Equal(3, rows.Count);
+
+        // turning all three off says so instead of searching a default
+        foreach (var t in toggles) t.IsChecked = false;
+        Dispatcher.UIThread.RunJobs();
+        var texts = string.Join(" | ", pane.GetVisualDescendants().OfType<TextBlock>().Select(t => t.Text ?? ""));
+        Assert.Contains("Select at least one kind", texts);
     }
 }

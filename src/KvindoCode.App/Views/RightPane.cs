@@ -42,6 +42,20 @@ public sealed class RightPane : UserControl
     readonly TextBlock _findStatus = new() { FontSize = 11.5, Classes = { "muted" }, Margin = new Thickness(2, 4, 2, 0) };
     readonly StackPanel _findList = new() { Spacing = 4 };
     readonly ScrollViewer _findScroll = new() { HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Disabled };
+    // Which kinds of message to search. Default: my messages + the assistant's, NOT tool calls — a session is mostly
+    // tool arguments, which drown the conversation (asked 2026-10-16). The assistant toggle also covers its reasoning,
+    // which is where its thinking lives.
+    readonly ToggleButton _findMine = new() { Content = "My messages", FontSize = 11.5, Padding = new Thickness(8, 3), IsChecked = true };
+    readonly ToggleButton _findAssistant = new() { Content = "Assistant", FontSize = 11.5, Padding = new Thickness(8, 3), IsChecked = true };
+    readonly ToggleButton _findTools = new() { Content = "Tool calls", FontSize = 11.5, Padding = new Thickness(8, 3), IsChecked = false };
+    string[] FindRoles()
+    {
+        var list = new List<string>(3);
+        if (_findMine.IsChecked == true) list.Add("user");
+        if (_findAssistant.IsChecked == true) list.Add("assistant");
+        if (_findTools.IsChecked == true) list.Add("tool");
+        return list.ToArray();
+    }
 
     string? _plan; double _fontSize = 14;
     ToolDetail? _detail; string _cwd = "";
@@ -631,7 +645,24 @@ public sealed class RightPane : UserControl
 
     Control BuildSearch()
     {
-        var head = new StackPanel { Spacing = 2, Children = { _findBox, _findStatus } };
+        if (_findMine.Tag is null)
+        {
+            // wire once: a toggle changes the query, so re-run it
+            foreach (var t in new[] { _findMine, _findAssistant, _findTools })
+            {
+                t.Tag = this;
+                t.IsCheckedChanged += (_, _) => RunSearch();
+            }
+            ToolTip.SetTip(_findMine, "Search the messages you sent");
+            ToolTip.SetTip(_findAssistant, "Search the assistant's answers and its reasoning");
+            ToolTip.SetTip(_findTools, "Search tool-call arguments (command lines, the file contents the model asked for)");
+        }
+        var roles = new StackPanel
+        {
+            Orientation = Orientation.Horizontal, Spacing = 6, Margin = new Thickness(0, 6, 0, 0),
+            Children = { _findMine, _findAssistant, _findTools },
+        };
+        var head = new StackPanel { Spacing = 2, Children = { _findBox, roles, _findStatus } };
         _findScroll.Content = _findList;
         var root = new DockPanel { Margin = new Thickness(12, 10, 12, 12) };
         DockPanel.SetDock(head, Dock.Top);
@@ -657,7 +688,14 @@ public sealed class RightPane : UserControl
         if (_session is null) { _findStatus.Text = ""; return; }
         if (pattern.Trim().Length == 0) { _findStatus.Text = "Type to search every message in this session."; return; }
 
-        var found = _session.SearchHistory(pattern, 500);
+        var roles = FindRoles();
+        if (roles.Length == 0)
+        {
+            // All three off: say so rather than silently searching a default the user did not pick.
+            _findStatus.Text = "Select at least one kind of message to search.";
+            return;
+        }
+        var found = _session.SearchHistory(pattern, 500, roles);
         if (found.Count == 0)
         {
             _findStatus.Text = string.IsNullOrEmpty(found.Error) ? "No matches." : found.Error;

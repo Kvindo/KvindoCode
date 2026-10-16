@@ -275,8 +275,11 @@ public sealed class HeaderHealthAndBrandTests(ITestOutputHelper o)
         var health = app.Window.FindControl<TextBlock>("HealthText")!;
 
         // --- the wordmark: its capitals' tops must sit on the mark's top edge
-        var (upPx, inkTop, ascent, face) = InkGap("Inter-SemiBold", brand.FontSize, "K");
-        o.WriteLine($"{face} @{brand.FontSize}: ascent={ascent:0.###}px, cap top={inkTop:0.###}px above the baseline -> the letters start {upPx:0.###}px below the box top");
+        // The reference is the TALLEST ink of the ACTUAL string — for "Kvindo™ Code" that is the ™ and the dot of the
+        // "i" (0.7622 em), not the "K" (0.7275 em). Using the cap height is the classic rule, but here it left the ™
+        // poking 1.4px above the mark, which is precisely what was reported as "a little bit above the top".
+        var (upPx, inkTop, ascent, face) = InkGap("Inter-SemiBold", brand.FontSize, brand.Text ?? "Kvindo™ Code");
+        o.WriteLine($"{face} @{brand.FontSize}: ascent={ascent:0.###}px, tallest ink top={inkTop:0.###}px above the baseline -> the letters start {upPx:0.###}px below the box top");
         // 0.05px tolerance: Skia reports metrics in 1/64px (2.65625), and the XAML carries a rounded -2.65. Anything
         // finer than 0.05px is not a layout difference.
         Assert.True(Math.Abs(brand.Margin.Top + upPx) < 0.05, $"the wordmark is shifted {brand.Margin.Top} instead of {-upPx:0.###} — the capitals do not meet the mark's top edge");
