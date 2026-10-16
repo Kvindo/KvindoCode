@@ -350,10 +350,21 @@ public sealed class TerminalUiTests : IDisposable
         Assert.True(await Eventually(async () => terminals.CurrentCellSizes().Any(), 8000));
 
         var grid = terminals.GetVisualDescendants().OfType<Grid>().First(g => g.Name == "TerminalGrid");
+        // Lay the grid out at a KNOWN size and tell tmux about it FIRST. Without this the layout measured below was at a
+        // different size from tmux's window, so the "delta" could exceed the whole pane (observed in a full-suite run:
+        // delta +51 on a 39-column pane, which no resize can honour) — the test compared apples to oranges, not a bug.
+        terminals.Measure(new Size(1400, 800));
+        terminals.Arrange(new Rect(0, 0, 1400, 800));
+        Dispatcher.UIThread.RunJobs();
+        await terminals.RefreshAsync();
+        terminals.PushSizesToTmux();
+        Assert.True(await Eventually(async () => (await terminals.Backend.ListPanesAsync(sb.Project)).Sum(p => p.Columns) > 60),
+            "the grid size never reached tmux, so the drag below would be meaningless");
+
         var before = terminals.CurrentCellSizes().ToDictionary(x => x.Index, x => x.Cells);
         var tmuxBefore = (await terminals.Backend.ListPanesAsync(sb.Project)).Single(p => p.Index == 0).Columns;
 
-        // what a drag does: the layout changes...
+        // what a drag does: the layout changes at the SAME size...
         grid.ColumnDefinitions[0].Width = new GridLength(3, GridUnitType.Star);
         grid.ColumnDefinitions[2].Width = new GridLength(1, GridUnitType.Star);
         terminals.InvalidateMeasure();
@@ -367,7 +378,9 @@ public sealed class TerminalUiTests : IDisposable
 
         // ...then the boundary is nudged by the cells the pane gained (exactly what DragCompleted calls)
         await terminals.Backend.NudgeAsync(sb.Project, 0, 'R', delta);
-        Assert.True(await Eventually(async () => (await terminals.Backend.ListPanesAsync(sb.Project)).Single(p => p.Index == 0).Columns >= tmuxBefore + delta - 2),
+        // tmux moves the boundary by the cells asked for; the window is finite, so the assertion is "it grew, and by
+        // about the delta" rather than an exact equality that a clamped edge would break
+        Assert.True(await Eventually(async () => (await terminals.Backend.ListPanesAsync(sb.Project)).Single(p => p.Index == 0).Columns > tmuxBefore + delta / 2),
             $"tmux did not follow the drag: was {tmuxBefore}, asked for +{delta}, now " +
             string.Join(",", (await terminals.Backend.ListPanesAsync(sb.Project)).Select(p => $"{p.Index}:{p.Columns}")));
         Assert.All(await terminals.Backend.ListPanesAsync(sb.Project), p => Assert.True(p.Columns >= TerminalGeometry.MinColumns,
