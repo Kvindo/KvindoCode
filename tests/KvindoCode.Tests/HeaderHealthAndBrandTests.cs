@@ -206,10 +206,17 @@ public sealed class HeaderHealthAndBrandTests(ITestOutputHelper o)
         o.WriteLine($"mark {markTop:0.###}..{markBottom:0.###} ({mark.Bounds}); wordmark top {brandTop:0.###} " +
                     $"({brand.Bounds.Height:0.###} tall); figures bottom {healthBottom:0.###} ({health.Bounds.Height:0.###} tall)");
 
-        Assert.True(Math.Abs(brandTop - markTop) <= 2,
-            $"\"{brand.Text}\" starts {brandTop - markTop:0.###}px from the mark's top edge");
-        Assert.True(Math.Abs(markBottom - healthBottom) <= 2,
-            $"\"{health.Text}\" ends {markBottom - healthBottom:0.###}px from the mark's bottom edge");
+        // The BOXES do not sit exactly on the mark, on purpose: the negative margins shift each line by its own font
+        // ink gap, so the VISIBLE letters span the mark while the boxes stick out by that gap (a TextBlock's top is the
+        // ascent line, not the top of the capitals). So the expectation here is the composition of the two: the box is
+        // offset from the mark edge by exactly the measured gap. The ink property itself is asserted by
+        // The_two_header_lines_are_shifted_by_the_real_font_ink_gap.
+        var (capGap, _, _, _) = InkGap("Inter-SemiBold", brand.FontSize, "K");
+        var (descGap, _, _, _) = InkBottom("Inter-Regular", health.FontSize, health.Text ?? "RAM 0M");
+        Assert.True(Math.Abs((brandTop - markTop) + capGap) <= 2,
+            $"the wordmark box starts {brandTop - markTop:0.###}px from the mark's top edge; it should be {capGap:0.##}px ABOVE it so the capitals meet the edge");
+        Assert.True(Math.Abs((healthBottom - markBottom) - descGap) <= 2,
+            $"the figures box ends {healthBottom - markBottom:0.###}px past the mark's bottom edge; it should be {descGap:0.##}px past it so the baseline meets the edge");
         // Spanning means the box holding both lines is as tall as the mark: without this the two edges could agree
         // while the lines sat in a container of some other height.
         Assert.Equal(mark.Bounds.Height, ((Control)brand.Parent!).Bounds.Height, 1);
@@ -244,5 +251,70 @@ public sealed class HeaderHealthAndBrandTests(ITestOutputHelper o)
         Assert.IsNotType<string>(find!.Content);               // no "Find" label
         Assert.NotNull(find.Content);                          // but something drawn
         Assert.Contains("search", ToolTip.GetTip(find)?.ToString() ?? "", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// The two header lines are shifted by the FONT's ink gap, so the visible text spans the mark.
+    /// </summary>
+    /// <remarks>
+    /// Reported 2026-10-16: "Allingn 'Kvindo Code' text to upper part of icon, currently its a little down".
+    /// Aligning the boxes is not enough — a TextBlock's box top is the ASCENT line, and the letters do not reach it.
+    /// The size of that gap is a property of the face, so this test MEASURES it (with the app's own bundled Inter, via
+    /// Skia) instead of trusting a number in the XAML: change a FontSize or swap the face and the margin must be
+    /// recomputed, which this turns into a failure rather than a crooked header nobody notices for two rounds.
+    ///
+    /// The reference is the CAP HEIGHT (the letter "K"), the classic rule: aligning the tallest ink instead would move
+    /// the capitals down by the ~0.5px the dot of the "i" rises above them.
+    /// </remarks>
+    [AvaloniaFact]
+    public void The_two_header_lines_are_shifted_by_the_real_font_ink_gap()
+    {
+        using var sb = new Sandbox();
+        using var app = SecretAuditorRealUiTests.StartUi(sb, new System.Text.Json.Nodes.JsonArray { Script.Text("hi") });
+        var brand = app.Window.FindControl<TextBlock>("BrandText")!;
+        var health = app.Window.FindControl<TextBlock>("HealthText")!;
+
+        // --- the wordmark: its capitals' tops must sit on the mark's top edge
+        var (upPx, inkTop, ascent, face) = InkGap("Inter-SemiBold", brand.FontSize, "K");
+        o.WriteLine($"{face} @{brand.FontSize}: ascent={ascent:0.###}px, cap top={inkTop:0.###}px above the baseline -> the letters start {upPx:0.###}px below the box top");
+        // 0.05px tolerance: Skia reports metrics in 1/64px (2.65625), and the XAML carries a rounded -2.65. Anything
+        // finer than 0.05px is not a layout difference.
+        Assert.True(Math.Abs(brand.Margin.Top + upPx) < 0.05, $"the wordmark is shifted {brand.Margin.Top} instead of {-upPx:0.###} — the capitals do not meet the mark's top edge");
+        Assert.True(upPx > 1, $"the measured gap is {upPx:0.###}px — the font this test measured is not the one on screen");
+
+        // --- the figures: their baseline must sit on the mark's bottom edge
+        var (_, inkBottom, descent, face2) = InkBottom("Inter-Regular", health.FontSize, "RAM 148M · UI 0%");
+        o.WriteLine($"{face2} @{health.FontSize}: descent={descent:0.###}px, lowest ink at {inkBottom:0.###}px below the baseline");
+        // The rule below only holds while the figures have no descender; assert that, so a future "g" explains itself.
+        // A small tolerance: the "%" and "·" overshoot the baseline by ~0.14px at this size, which is rasterisation
+        // rather than a descender (a real "g" would sit ~2px below).
+        Assert.True(Math.Abs(inkBottom) < 0.5, $"the figures now reach {inkBottom:0.###}px below the baseline (a descender appeared) — the bottom shift must be recomputed");
+        Assert.True(Math.Abs(health.Margin.Bottom + descent) < 0.05, $"the figures are shifted {health.Margin.Bottom} instead of {-descent:0.###} — their baseline does not meet the mark's bottom edge");
+    }
+
+    /// <summary>How far below its box top a capital letter starts, and that face's ascent.</summary>
+    static (double Gap, double InkTop, double Ascent, string Face) InkGap(string face, double fontSize, string reference)
+    {
+        using var s = AssetLoader.Open(new Uri($"avares://Avalonia.Fonts.Inter/Assets/{face}.ttf"));
+        var typeface = SkiaSharp.SKTypeface.FromStream(s);
+        // ONE object lays out AND measures: SKPaint.GetTextPath takes its typeface and size from the PAINT, not from a
+        // separate SKFont, so passing only the font measured "K" at Skia's default 12px and reported a 5.96px gap
+        // instead of 3.62 (the test caught exactly that).
+        using var paint = new SkiaSharp.SKPaint { Typeface = typeface, TextSize = (float)fontSize, IsAntialias = true };
+        var ascent = -paint.FontMetrics.Ascent;            // Skia reports ascent as negative
+        using var path = paint.GetTextPath(reference, 0, 0);   // y=0 is the BASELINE
+        var inkTop = -path.Bounds.Top;                     // Skia's Y grows downward
+        return (ascent - inkTop, inkTop, ascent, face);
+    }
+
+    /// <summary>The lowest ink of a string relative to its baseline (0 = the text sits on the baseline).</summary>
+    static (double Gap, double InkBottom, double Descent, string Face) InkBottom(string face, double fontSize, string text)
+    {
+        using var s = AssetLoader.Open(new Uri($"avares://Avalonia.Fonts.Inter/Assets/{face}.ttf"));
+        var typeface = SkiaSharp.SKTypeface.FromStream(s);
+        using var paint = new SkiaSharp.SKPaint { Typeface = typeface, TextSize = (float)fontSize, IsAntialias = true };
+        var descent = paint.FontMetrics.Descent;
+        using var path = paint.GetTextPath(text, 0, 0);
+        return (descent, path.Bounds.Bottom, descent, face);
     }
 }

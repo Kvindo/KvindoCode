@@ -44,9 +44,18 @@
           <Image Grid.Column="0" Source="avares://kvindocode/Assets/kvindo-k.png" Width="34" Height="34" VerticalAlignment="Top"/>
           <!-- The same 34 as the mark (a vertical Margin here would push the lines off by a pixel). -->
           <Grid Grid.Column="1" Height="34" Margin="10,0,0,0">
-            <TextBlock Name="BrandText" Text="Kvindo™ Code" FontWeight="SemiBold" FontSize="15" TextTrimming="CharacterEllipsis" VerticalAlignment="Top"/>
+            <!-- The negative vertical margins correct the FONT's ink gap, which is what made the text look a little
+                 low (reported 2026-10-16: "Allingn 'Kvindo Code' text to upper part of icon, currently its a little
+                 down"). A TextBlock's box top is the ASCENT line, not the top of the letters: Inter's ascender is
+                 1984/2048 em but a capital K only reaches the cap height 1490/2048, so the visible text starts
+                 (1984-1490)/2048 = 0.2412 em lower than its box — 3.62px at 15px and 2.65px at 11px. The mark's ink
+                 fills its 34px box exactly (measured: bbox 0..63 of 64), so shifting the text by that gap puts the
+                 visible wordmark on the mark's top edge and the visible figures' baseline on its bottom edge. These
+                 two numbers are pinned to FontSize by HeaderHealthAndBrandTests, so changing a font size fails loudly
+                 instead of silently going crooked again. -->
+            <TextBlock Name="BrandText" Text="Kvindo™ Code" FontWeight="SemiBold" FontSize="15" TextTrimming="CharacterEllipsis" VerticalAlignment="Top" Margin="0,-3.62,0,0"/>
             <!-- Live process figures: memory held, and how busy/blocked the UI thread is. Filled by UpdateHealth(). -->
-            <TextBlock Name="HealthText" Classes="muted" FontSize="11" TextTrimming="CharacterEllipsis" VerticalAlignment="Bottom"
+            <TextBlock Name="HealthText" Classes="muted" FontSize="11" TextTrimming="CharacterEllipsis" VerticalAlignment="Bottom" Margin="0,0,0,-2.65"
                        ToolTip.Tip="Memory this process holds, and UI-thread load: its UI-thread CPU share plus the last dispatcher round-trip, which measures blocking even when the CPU is idle."/>
           </Grid>
         </Grid>
