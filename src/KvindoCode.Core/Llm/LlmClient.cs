@@ -216,10 +216,10 @@ public sealed class LlmClient : ILlmClient
         for (int attempt = 0; ; attempt++)
         {
             var result = new LlmResult();
-            bool gotOutput = false;
+            bool sawText = false;                 // text the human has already SEEN
             try
             {
-                return await OneAttempt(bodyText, result, cb, ct, () => gotOutput = true);
+                return await OneAttempt(bodyText, result, cb, ct, () => sawText = true);
             }
             catch (LlmException e) when (e.Status == 400 && !effortStripped && !string.IsNullOrEmpty(request.ReasoningEffort)
                                         && System.Text.RegularExpressions.Regex.IsMatch(e.Message, "reasoning|effort", System.Text.RegularExpressions.RegexOptions.IgnoreCase))
@@ -229,7 +229,14 @@ public sealed class LlmClient : ILlmClient
                 cb?.OnNotice?.Invoke("This model does not accept a reasoning effort level; continuing without it.");
                 attempt--;
             }
-            catch (LlmException e) when (e.Retryable && !gotOutput && attempt < delays.Length && !ct.IsCancellationRequested)
+            // The condition is "no TEXT has been streamed", not "the attempt produced nothing". A TOOL-CALL delta used
+            // to count as output, so a stream that died right after announcing a tool call was never retried and the
+            // turn ended with "API error: Поток ответа завершился до окончания генерации. Повторите запрос." (reported
+            // 2026-10-15 and again 2026-10-16). Nothing has run at that point — AgentSession executes tool calls only
+            // after the attempt RETURNS — so a retry can duplicate no work and no visible text. Text is the thing that
+            // must not be shown twice, and `sawText` is exactly that. `Retryable` now means "the error is transient"
+            // (which is all it is consulted for), and this is the one place it is read.
+            catch (LlmException e) when (e.Retryable && !sawText && attempt < delays.Length && !ct.IsCancellationRequested)
             {
                 cb?.OnRetry?.Invoke($"{e.Message} — retrying in {delays[attempt]}s ({attempt + 1}/{delays.Length})");
                 await Task.Delay(TimeSpan.FromSeconds(delays[attempt]), ct);
@@ -237,7 +244,7 @@ public sealed class LlmClient : ILlmClient
         }
     }
 
-    async Task<LlmResult> OneAttempt(string bodyText, LlmResult result, LlmCallbacks? cb, CancellationToken ct, Action markOutput)
+    async Task<LlmResult> OneAttempt(string bodyText, LlmResult result, LlmCallbacks? cb, CancellationToken ct, Action markText)
     {
         using var req = NewRequest(HttpMethod.Post, "/chat/completions");
         req.Content = new StringContent(bodyText, Encoding.UTF8, "application/json");
@@ -278,8 +285,8 @@ public sealed class LlmClient : ILlmClient
                     idle.CancelAfter(IdleTimeout);
                     try { line = await reader.ReadLineAsync(idle.Token); }
                     catch (OperationCanceledException) when (!ct.IsCancellationRequested)
-                    { throw new LlmException("Stream stalled (no data for 180s)", null, !HasOutput(content, calls)); }
-                    catch (IOException e) { throw new LlmException("Connection lost: " + e.Message, null, !HasOutput(content, calls), e); }
+                    { throw new LlmException("Stream stalled (no data for 180s)", null, true); }
+                    catch (IOException e) { throw new LlmException("Connection lost: " + e.Message, null, true, e); }
                 }
                 if (line is null) break;
                 if (line.Length == 0 || line[0] == ':') continue; // blank / keep-alive comment
@@ -292,7 +299,7 @@ public sealed class LlmClient : ILlmClient
                 if (j is null) continue;
 
                 if (j["error"] is JsonNode errNode)
-                    throw new LlmException("API error: " + ((string?)errNode["message"] ?? errNode.ToJsonString()), null, !HasOutput(content, calls));
+                    throw new LlmException("API error: " + ((string?)errNode["message"] ?? errNode.ToJsonString()), null, true);
 
                 if (j["usage"] is JsonNode u && u is JsonObject)
                 {
@@ -313,14 +320,15 @@ public sealed class LlmClient : ILlmClient
 
                 if ((string?)delta["content"] is { Length: > 0 } text)
                 {
-                    markOutput(); content.Append(text); cb?.OnText?.Invoke(text);
+                    markText(); content.Append(text); cb?.OnText?.Invoke(text);
                 }
                 var rs = (string?)delta["reasoning_content"] ?? (string?)delta["reasoning"];
                 if (rs is { Length: > 0 }) { reasoning.Append(rs); cb?.OnReasoning?.Invoke(rs); }
 
                 if (delta["tool_calls"] is JsonArray tcs)
                 {
-                    markOutput();
+                    // NOT markText: an announced tool call is not text the human read, and it has not been executed
+                    // (see the retry gate above) — so it must not be what stops a retry.
                     foreach (var t in tcs)
                     {
                         if (t is null) continue;
