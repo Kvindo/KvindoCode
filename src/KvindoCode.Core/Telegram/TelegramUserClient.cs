@@ -38,23 +38,37 @@ public sealed class TelegramUserClient : IDisposable
     {
         ApiId = apiId;
         _sessionPath = sessionPath;
-        // The config provider is how the library asks for everything interactive: api_id/api_hash at setup, then
-        // verification_code and password (2FA) during login. Returning null for those two when there is no one to ask
-        // makes the login step fail fast instead of hanging on nobody (signatures verified against 4.4.9).
-        Func<string, string?> config = what => what switch
-        {
-            "api_id" => apiId,
-            "api_hash" => apiHash,
-            "verification_code" => _ask?.Invoke("Telegram sent you a login code. Enter it:"),
-            "password" => _ask?.Invoke("Your account has 2FA. Enter your Telegram password:"),
-            "session_pathname" => sessionPath,
-            _ => null,
-        };
-        // NOTE the exact ctor: (configProvider, Stream) or (configProvider, byte[], save) — there is no
-        // (configProvider, string). The stream constructor keeps the session in our 0600 file.
         _session = new FileStream(sessionPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.Read);
-        _client = new WTelegram.Client(config, _session);
+        _client = new WTelegram.Client(BuildConfig(apiId, apiHash, sessionPath, what => _ask?.Invoke(what)), _session);
     }
+
+    /// <summary>
+    /// The config provider the library calls for everything interactive, factored out so its KEY SET can be tested.
+    /// </summary>
+    /// <remarks>
+    /// The set of keys is the whole point. WTelegram asks for a <b>fixed</b> list of values while connecting, and a
+    /// key that is not answered here cannot be supplied any other way: <c>LoginUserIfNeeded</c> throws
+    /// "You must provide a config value for phone_number" and the login never even starts. That is exactly what
+    /// happened — <c>phone_number</c> was missing from this switch, so `kvindocode --telegram-login` could never
+    /// complete, which is why no session was ever established (reported 2026-10-16: "Doesnt work").
+    ///
+    /// The two prompts (<c>verification_code</c>, <c>password</c>) and the phone number are answered only when there is
+    /// someone to ask: returning null otherwise makes the login step FAIL FAST instead of hanging on a terminal nobody
+    /// is watching, which is what the Telegram tool relies on when it reuses a stored session.
+    ///
+    /// Signatures verified against WTelegramClient 4.4.9 rather than assumed. Only the FIRST login needs the phone
+    /// number: afterwards the session file holds the auth key and the library asks for nothing.
+    /// </remarks>
+    internal static Func<string, string?> BuildConfig(string apiId, string apiHash, string sessionPath, Func<string, string?> ask) => what => what switch
+    {
+        "api_id" => apiId,
+        "api_hash" => apiHash,
+        "phone_number" => ask("Enter your phone number in international format (e.g. +79991234567):"),
+        "verification_code" => ask("Telegram sent you a login code. Enter it:"),
+        "password" => ask("Your account has 2FA. Enter your Telegram password:"),
+        "session_pathname" => sessionPath,
+        _ => null,
+    };
 
     /// <summary>Build from the vault, or explain exactly what is missing. Never touches the network.</summary>
     public static TelegramUserClient? Open(AppSettings settings, out string? error, ISessionInteraction? interaction = null)

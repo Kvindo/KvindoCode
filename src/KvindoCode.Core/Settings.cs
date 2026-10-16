@@ -125,6 +125,18 @@ public sealed class AppSettings
     public Dictionary<string, long> ModelTokens { get; set; } = new();
     /// <summary>Sessions that finished and remain in "Needs attention" until the user explicitly dismisses them.</summary>
     public List<string> AttentionSessions { get; set; } = new();
+    /// <summary>
+    /// Sessions whose turn ended while they were the one ON SCREEN. The block is a list of things you cannot see, so
+    /// these are held back and promoted into <see cref="AttentionSessions"/> the moment the session is no longer the
+    /// current one — which is the instant you switch away (or the next start, since this is persisted).
+    /// </summary>
+    /// <remarks>
+    /// Reported 2026-10-15 and again 2026-10-16: "your session is not shown in Needs attention". The cause is that
+    /// <c>TurnEndEvent</c> deliberately skipped the current session; nothing then looked at it again, so a session that
+    /// finished while you watched it never entered the block at all, not even after you moved on. An entry created
+    /// here is exactly the invisible-in-the-list state, hence the deferral.
+    /// </remarks>
+    public List<string> AttentionPending { get; set; } = new();
     /// <summary>Sessions whose blue dot the user has acknowledged: they keep their entry in the Needs-attention block
     /// (removed only by its ✕) but stop showing as "waiting for you" everywhere else.</summary>
     public List<string> AttentionAcknowledged { get; set; } = new();

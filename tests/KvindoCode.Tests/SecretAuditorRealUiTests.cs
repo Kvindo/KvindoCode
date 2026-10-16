@@ -1494,6 +1494,115 @@ public sealed class SecretAuditorRealUiTests
         Assert.Contains(sidebar.GetVisualDescendants().OfType<TextBlock>(), t => t.Text == "PINNEDFIN");
     }
 
+    static bool AttentionBlockShown(StackPanel sidebar) =>
+        sidebar.GetVisualDescendants().OfType<TextBlock>().Any(t => (t.Text ?? "").StartsWith("Needs attention"));
+
+    static string SidebarText(StackPanel sidebar) =>
+        string.Join("\n", sidebar.GetVisualDescendants().OfType<TextBlock>().Select(t => t.Text ?? ""));
+
+    /// <summary>
+    /// "your session is not shown in Needs attention", reported 2026-10-15 (fixed then only for a PINNED session) and
+    /// again 2026-10-16. The cause left over is the session that is ON SCREEN: <c>TurnEndEvent</c> deliberately skips it
+    /// (<c>if (sv != _current)</c>) and nothing ever looked at that session again, so the moment you moved on it was
+    /// still missing from the one list that answers "what is waiting for me?".
+    ///
+    /// The block lists what you cannot see, so the fix must NOT put the session you are watching into it: the entry is
+    /// held deferred and promoted as soon as it is no longer the current one. (1) below is the regression guard against
+    /// the obvious wrong fix.
+    /// </summary>
+    [AvaloniaFact]
+    public async Task A_turn_that_ends_while_you_watch_it_enters_the_block_when_you_switch_away()
+    {
+        using Sandbox sb = new Sandbox();
+        using App app = Start(sb, new JsonArray { Says("one") });
+        AppSettings settings = Field<AppSettings>(app.Window, "_settings");
+        StackPanel sidebar = app.Window.FindControl<StackPanel>("ProjectsPanel");
+        string id = app.Session.Id;
+
+        app.TypeAndSend("hello");
+        await app.WaitForTurnAsync();
+        Dispatcher.UIThread.RunJobs();
+
+        // the session exists on disk only after its first turn, and the sidebar only lists persisted sessions
+        app.Session.Session.Info.Title = "WATCHEDFIN";
+        foreach (var cached in Field<List<SessionInfo>>(app.Window, "_all").Where(x => x.Id == id)) cached.Title = "WATCHEDFIN";
+        settings.ExpandedGroups.Add(sb.Project);                    // groups are collapsed by default: without this no row is rendered
+        Invoke(app.Window, "RebuildSidebar");
+        Dispatcher.UIThread.RunJobs();
+        int TitleRows() => sidebar.GetVisualDescendants().OfType<TextBlock>().Count(t => (t.Text ?? "") == "WATCHEDFIN");
+
+        // (1) you are looking at it: no entry under your nose — it is held instead
+        Assert.DoesNotContain(id, (IEnumerable<string>)settings.AttentionSessions);
+        Assert.Contains(id, (IEnumerable<string>)settings.AttentionPending);
+        Assert.False(AttentionBlockShown(sidebar));
+        Assert.Equal(1, TitleRows());                                                  // its normal row, in the project group
+
+        // (2) switch to another session in this project: the finished one is invisible now, so it must be listed
+        Invoke(app.Window, "NewSession", sb.Project);
+        Dispatcher.UIThread.RunJobs();
+
+        Assert.NotSame(app.Session, Field<SessionView>(app.Window, "_current"));        // the switch really happened
+        Assert.DoesNotContain(id, (IEnumerable<string>)settings.AttentionPending);
+        Assert.Contains(id, (IEnumerable<string>)settings.AttentionSessions);
+        Assert.True(AttentionBlockShown(sidebar));
+        Assert.Equal(2, TitleRows());                                                  // the group row AND the block row
+    }
+
+    /// <summary>
+    /// The deferral is persisted, so a session that finished while you watched it — and that you never switched away
+    /// from, because the app was closed on it — still shows up in the block on the next start.
+    /// </summary>
+    [AvaloniaFact]
+    public async Task A_deferred_entry_is_promoted_on_the_next_start()
+    {
+        using Sandbox sb = new Sandbox();
+        sb.Settings(s => s.AttentionPending.Add("pend-restart-1")).Save();
+        Assert.Contains("pend-restart-1", System.IO.File.ReadAllText(Paths.SettingsFile));   // what the previous run left
+
+        using App app = Start(sb, new JsonArray { Says("one") });
+        AppSettings settings = Field<AppSettings>(app.Window, "_settings");
+        StackPanel sidebar = app.Window.FindControl<StackPanel>("ProjectsPanel");
+        Field<List<SessionInfo>>(app.Window, "_all").Add(new SessionInfo
+        {
+            Id = "pend-restart-1", Title = "DEFERRED1", Cwd = sb.Project, Updated = DateTimeOffset.UtcNow,
+            Created = DateTimeOffset.UtcNow, Path = System.IO.Path.Combine(sb.Root, "d.jsonl")
+        });
+        Invoke(app.Window, "RebuildSidebar");
+        Dispatcher.UIThread.RunJobs();
+
+        Assert.DoesNotContain("pend-restart-1", (IEnumerable<string>)settings.AttentionPending);
+        Assert.Contains("pend-restart-1", (IEnumerable<string>)settings.AttentionSessions);
+        Assert.Contains("DEFERRED1", SidebarText(sidebar));
+        await Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// Removing a deferred entry takes it with it — otherwise ✕ would look broken, because the session comes straight
+    /// back into the block the next time the sidebar is rebuilt (i.e. as soon as you switch away).
+    /// </summary>
+    [AvaloniaFact]
+    public async Task Dismissing_a_deferred_entry_stops_it_coming_back()
+    {
+        using Sandbox sb = new Sandbox();
+        using App app = Start(sb, new JsonArray { Says("one") });
+        AppSettings settings = Field<AppSettings>(app.Window, "_settings");
+        StackPanel sidebar = app.Window.FindControl<StackPanel>("ProjectsPanel");
+        string id = app.Session.Id;
+
+        app.TypeAndSend("hello");
+        await app.WaitForTurnAsync();
+        Assert.Contains(id, (IEnumerable<string>)settings.AttentionPending);
+
+        Invoke(app.Window, "DismissAttention", id);
+        Dispatcher.UIThread.RunJobs();
+        Assert.DoesNotContain(id, (IEnumerable<string>)settings.AttentionPending);
+
+        Invoke(app.Window, "NewSession", sb.Project);            // switch away: nothing may appear
+        Dispatcher.UIThread.RunJobs();
+        Assert.DoesNotContain(id, (IEnumerable<string>)settings.AttentionSessions);
+        Assert.False(AttentionBlockShown(sidebar));
+    }
+
     /// <summary>
     /// "Remove every session from Needs attention" wipes the whole to-do list and nothing brings the entries back until
     /// those sessions finish another turn. It used to be a small ✕ in the block header that fired on one stray click

@@ -93,12 +93,19 @@ cat > "$PREFIX/bin/kvindocode" <<EOF
 # kvindocode DIR        → open DIR
 # kvindocode --last     → reopen the last project
 # kvindocode -p "text"  → headless single turn (add --plan / --approve-plan / --cwd DIR / --model ID)
+# kvindocode --telegram-login   → one-time Telegram user login (asks for the phone code)
+# kvindocode --rotate-vault-key → re-encrypt the vault under a new master key
 # A release build is SELF-CONTAINED (its own runtime, run through the native apphost); a build from a
 # checkout is framework-dependent and runs through 'dotnet'. Detect which one is installed.
 DIR="$APP"
 if [ -x "\$DIR/kvindocode" ]; then RUN=("\$DIR/kvindocode"); else RUN=(dotnet "\$DIR/kvindocode.dll"); fi
+# CONSOLE modes must EXEC, so they inherit this terminal: they print prompts and read what you type.
+# Everything MISSED here is started DETACHED below with its output sent to /dev/null and no stdin, which
+# makes an interactive command look like it did nothing at all — "\$ kvindocode --telegram-login" returned
+# the prompt silently and could never read the phone code (reported 2026-10-16). Every console flag that
+# Program.cs handles belongs in this list; ConsoleLauncherTests fails if one is missing.
 case " \$* " in
-  *" --print "*|*" -p "*) exec "\${RUN[@]}" "\$@";;
+  *" --print "*|*" -p "*|*" --telegram-login "*|*" --rotate-vault-key "*) exec "\${RUN[@]}" "\$@";;
 esac
 if [ \$# -eq 0 ]; then set -- "\$PWD"; fi
 if [ -d "\$1" ]; then d="\$(cd "\$1" && pwd)"; shift; set -- "\$d" "\$@"; fi

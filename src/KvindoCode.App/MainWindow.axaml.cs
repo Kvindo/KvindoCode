@@ -18,6 +18,7 @@ using KvindoCode.Core.Llm;
 using KvindoCode.Core.Notify;
 using KvindoCode.Core.Secrets;
 using KvindoCode.Core.Search;
+using KvindoCode.Core.Terminal;
 using KvindoCode.Core.Tools;
 
 namespace KvindoCode.App;
@@ -968,6 +969,7 @@ public partial class MainWindow : Window
                     TrySaveSettings();
                     RebuildSidebar();
                 }
+                else MarkPendingAttention(sv.Id);       // parked on you while you watch it: the entry waits for you to leave
                 break;
             case TurnEndEvent:
                 // a session you are looking at is on screen already: only other sessions wait for you
@@ -977,6 +979,7 @@ public partial class MainWindow : Window
                     // a new turn makes it "waiting for you" again: it lights up even if the previous dot was acknowledged
                     if (_settings.AttentionAcknowledged.Remove(sv.Id)) TrySaveSettings();
                 }
+                else MarkPendingAttention(sv.Id);
                 sv.WaitingForUser = false;
                 RebuildSidebar(); if (cur) { UpdateSendButton(); UpdateTodos(); Input.Focus(); } break;
             case ModeChangedEvent: if (cur) UpdateMode(); break;
@@ -1969,6 +1972,60 @@ public partial class MainWindow : Window
         UpdateEmpty();
     }
 
+    // ================================================================== terminals
+
+    TerminalsView? _terminals;
+    TmuxBackend? _tmux;
+
+    /// <summary>
+    /// The tmux backend, created once. A separate socket is used when the environment asks for it
+    /// (<c>KVINDOCODE_TMUX_SOCKET</c>), which is how the tests stay off the human's own tmux server — the grid is
+    /// otherwise on the default socket so that <c>tmux attach</c> from a real terminal finds it.
+    /// </summary>
+    TmuxBackend Tmux => _tmux ??= new TmuxBackend(socketName: Environment.GetEnvironmentVariable("KVINDOCODE_TMUX_SOCKET"));
+
+    /// <summary>Open the 2x2 terminal grid for a project, replacing whatever else is in the main area.</summary>
+    void OpenTerminals(string project)
+    {
+        if (_terminals is { } open && open.Project == project) { CloseTerminals(); return; }   // the icon toggles
+        CloseContextMain();
+        if (_terminals is { } other && other.Project != project) CloseTerminals();              // one grid at a time
+        _project = project;
+        foreach (var tv in Host.Children.OfType<TranscriptView>().ToList()) Host.Children.Remove(tv);
+        _terminals = new TerminalsView(Tmux, project, CloseTerminals, ShowInfo)
+        {
+            MaxWidth = 1400,
+            HorizontalAlignment = HorizontalAlignment.Left,
+        };
+        Host.Children.Insert(0, _terminals);
+        BottomColumn.IsVisible = false;      // the composer belongs to a session, and no session is on screen now
+        EmptyState.IsVisible = false;
+        _terminals.FocusActive();
+        // ...and again once it has been laid out: a control that is not yet attached cannot take focus, and without
+        // the keyboard the grid would look alive while the characters went into the (hidden) composer
+        Dispatcher.UIThread.Post(() => _terminals?.FocusActive(), DispatcherPriority.Loaded);
+        RebuildSidebar();
+    }
+
+    void CloseTerminals()
+    {
+        if (_terminals is null) return;
+        // the tmux session is deliberately NOT killed: its panes are the thing the human expects to find again, and
+        // nothing is logged to disk, so leaving it running costs a shell and keeps the history
+        Host.Children.Remove(_terminals);
+        _terminals = null;
+        BottomColumn.IsVisible = true;
+        if (_current != null && !Host.Children.Contains(_current.Transcript))
+        {
+            Host.Children.Insert(0, _current.Transcript);
+            _current.Transcript.ScrollToEnd();
+        }
+        UpdateEmpty();
+    }
+
+    /// <summary>Where keystrokes go when the terminal grid is on screen.</summary>
+    bool TerminalsVisible => _terminals is not null && Host.Children.Contains(_terminals);
+
     /// <summary>
     /// The local scan flagged an image with something that looks like a credential. It is the only judge of pictures (no
     /// pattern can match pixels) and it is often wrong about screenshots, so the human decides — and to decide they must
@@ -2853,6 +2910,7 @@ public partial class MainWindow : Window
     void RebuildSidebarCore()
     {
         RebuildSidebarCount++;      // for the test that a replayed history does not rebuild the panel per event
+        PromotePendingAttention();  // deferred entries whose session is no longer on screen enter the block here
         ProjectsPanel.Children.Clear();
         if (_query.Length > 0) { RebuildSearchResults(); return; }
 
@@ -3023,6 +3081,7 @@ public partial class MainWindow : Window
     void AcknowledgeAttention(string sessionId)
     {
         if (!_settings.AttentionAcknowledged.Contains(sessionId)) _settings.AttentionAcknowledged.Add(sessionId);
+        _settings.AttentionPending.Remove(sessionId);   // acknowledged while on screen: do not hand it to the block later
         TrySaveSettings();
         RebuildSidebar();
     }
@@ -3055,6 +3114,8 @@ public partial class MainWindow : Window
         if (!Workspaces.Forget(s.Cwd, s.Id, out var keepReason) && keepReason.Length > 0)
             ShowInfo($"“{s.Title}” was deleted, but its work tree was kept: {keepReason}. The branch kv/{s.Id} is still there to merge.");
         _storage.Delete(s);
+        _settings.AttentionPending.Remove(s.Id);        // a deleted session must not come back as a deferred entry
+        TrySaveSettings();
         await RefreshSessionsAsync();
         RebuildSidebar();
     }
@@ -3064,8 +3125,41 @@ public partial class MainWindow : Window
     {
         _settings.AttentionSessions.Remove(sessionId);
         _settings.AttentionAcknowledged.Remove(sessionId);
+        _settings.AttentionPending.Remove(sessionId);   // a deferred entry too, or it would reappear when you switch away
         TrySaveSettings();
         RebuildSidebar();
+    }
+
+    /// <summary>
+    /// A turn ended (or parked on a question) in the session that is ON SCREEN. The Needs-attention block lists things
+    /// you cannot see, so the entry is deferred here instead of being added to the block under your nose — see
+    /// <see cref="AppSettings.AttentionPending"/>.
+    /// </summary>
+    void MarkPendingAttention(string sessionId)
+    {
+        if (_settings.AttentionSessions.Contains(sessionId)) return;   // it is already in the block (you opened it from there)
+        if (!_settings.AttentionPending.Contains(sessionId)) { _settings.AttentionPending.Add(sessionId); TrySaveSettings(); }
+    }
+
+    /// <summary>
+    /// Move every deferred entry whose session is no longer on screen into the block. Called from
+    /// <see cref="RebuildSidebarCore"/> — i.e. both the moment you switch away (the block is rebuilt then) and after a
+    /// restart, so a session that finished while you watched it and that you never opened again still shows up.
+    /// </summary>
+    /// <remarks>It must NOT rebuild the sidebar itself: it runs at the top of the rebuild, and re-entering there is how
+    /// a recursive rebuild would start.</remarks>
+    void PromotePendingAttention()
+    {
+        if (_settings.AttentionPending.Count == 0) return;
+        bool moved = false;
+        foreach (var id in _settings.AttentionPending.ToList())
+        {
+            if (_current != null && id == _current.Id) continue;       // still on screen: it stays deferred
+            _settings.AttentionPending.Remove(id);
+            if (!_settings.AttentionSessions.Contains(id)) _settings.AttentionSessions.Add(id);
+            moved = true;
+        }
+        if (moved) TrySaveSettings();
     }
 
     Control? ActivityDot(IEnumerable<SessionInfo> sessions)
@@ -3107,6 +3201,11 @@ public partial class MainWindow : Window
         ToolTip.SetTip(add, "New session in this project");
         add.Click += (_, _) => NewSession(path);
 
+        var terminals = new Button { Name = "TerminalBtn", Classes = { "ghost" }, Content = Ui.Icon("IconTerminal", "KvMuted", 14), Padding = new Thickness(6), VerticalAlignment = VerticalAlignment.Center };
+        terminals.Tag = path;      // tests address the button by its project: several project rows carry the same name
+        ToolTip.SetTip(terminals, $"Open the terminal grid for {Path.GetFileName(path.TrimEnd('/'))} (four terminals in a tmux session that outlives the app)");
+        terminals.Click += (_, _) => OpenTerminals(path);
+
         var menu = new ContextMenu();
         var open = new MenuItem { Header = "Reveal in file manager" };
         open.Click += (_, _) => Shell.Open(path);
@@ -3120,8 +3219,11 @@ public partial class MainWindow : Window
         menu.Items.Add(open); menu.Items.Add(remove);
         btn.ContextMenu = menu;
 
+        var actions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 2, VerticalAlignment = VerticalAlignment.Center };
+        actions.Children.Add(add);
+        actions.Children.Add(terminals);
         var g = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto"), Margin = new Thickness(0, 6, 0, 0) };
-        g.Children.Add(btn); Grid.SetColumn(add, 1); g.Children.Add(add);
+        g.Children.Add(btn); Grid.SetColumn(actions, 1); g.Children.Add(actions);
         return g;
     }
 
