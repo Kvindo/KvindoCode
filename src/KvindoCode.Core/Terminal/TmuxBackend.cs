@@ -5,7 +5,9 @@ using System.Text;
 namespace KvindoCode.Core.Terminal;
 
 /// <summary>One tmux pane, as tmux reports it.</summary>
-public sealed record TerminalPaneInfo(int Index, int Columns, int Rows, string Title, string Command, bool Active, int CursorX = 0, int CursorY = 0, string Path = "");
+public sealed record TerminalPaneInfo(int Index, int Columns, int Rows, string Title, string Command, bool Active, int CursorX = 0, int CursorY = 0, string Path = "",
+    /// <summary>True while a full-screen program (vim, less, htop) owns the pane.</summary>
+    bool AlternateOn = false);
 
 /// <summary>
 /// The terminal grid's backend: tmux, driven with one tmux SESSION per project.
@@ -112,7 +114,7 @@ public sealed class TmuxBackend
         if (!IsAvailable) return panes;
         // The title is OUR pane option rather than pane_title: tmux 3.4 sets pane_title to the login user for a fresh
         // pane ("qtu100"), so pane_title cannot tell "the human named this tab" from "nobody has".
-        const string format = "#{pane_index}\t#{pane_width}\t#{pane_height}\t#{@kv-title}\t#{pane_current_command}\t#{pane_active}\t#{cursor_x}\t#{cursor_y}\t#{pane_current_path}";
+        const string format = "#{pane_index}\t#{pane_width}\t#{pane_height}\t#{@kv-title}\t#{pane_current_command}\t#{pane_active}\t#{cursor_x}\t#{cursor_y}\t#{pane_current_path}\t#{alternate_on}";
         var (code, output, _) = await RunAsync(new[] { "list-panes", "-t", SessionName(projectPath), "-F", format }, ct);
         if (code != 0) return panes;
         foreach (var line in output.Split('\n', StringSplitOptions.RemoveEmptyEntries))
@@ -122,7 +124,7 @@ public sealed class TmuxBackend
             if (!int.TryParse(f[0], out var index) || !int.TryParse(f[1], out var cols) || !int.TryParse(f[2], out var rows)) continue;
             _ = int.TryParse(f.Length > 6 ? f[6] : "0", out var cursorX);
             _ = int.TryParse(f.Length > 7 ? f[7] : "0", out var cursorY);
-            panes.Add(new TerminalPaneInfo(index, cols, rows, f[3], f[4], f[5] == "1", cursorX, cursorY, f.Length > 8 ? f[8] : ""));
+            panes.Add(new TerminalPaneInfo(index, cols, rows, f[3], f[4], f[5] == "1", cursorX, cursorY, f.Length > 8 ? f[8] : "", f.Length > 9 && f[9] == "1"));
         }
         return panes;
     }

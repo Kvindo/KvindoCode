@@ -149,9 +149,11 @@ public sealed class TerminalPaneView : UserControl
 
         var screen = TerminalScreenParser.Parse(captured);
         // The capture may include scrollback, so tmux's cursor_y (which counts from the top of the VISIBLE screen) has
-        // to be translated: the visible screen occupies the LAST rows of the capture.
-        var cursorRow = screen.Lines.Count - 1 - Math.Max(0, info.Rows - 1 - info.CursorY);
-        TerminalScreenParser.MarkCursor(screen, cursorRow, info.CursorX);
+        // to be translated: the visible screen occupies the LAST `rows` lines of the capture. This used to be written
+        // as "count - 1 - (rows - 1 - cursorY)", which is the same arithmetic but silently depended on the parse
+        // producing exactly one line per row — and it did not (a phantom trailing line), so the cursor landed one row
+        // low in every full-screen program.
+        TerminalScreenParser.MarkCursor(screen, TerminalScreenParser.CursorRow(screen.Lines.Count, info.Rows, info.CursorY), info.CursorX);
 
         _screen.Inlines?.Clear();
         foreach (var line in screen.Lines)

@@ -89,7 +89,13 @@ public static class TerminalScreenParser
             i = Math.Min(i + (i + 1 < captured.Length && "()*+-./".Contains(captured[i + 1]) ? 2 : 1), captured.Length - 1);
         }
         Flush();
-        screen.Lines.Add(new TerminalLine(runs, -1, false));
+        // A capture is a series of line TERMINATORS, so "a\nb\n" is two rows, not three. Adding the final line
+        // unconditionally gave every pane one invented row at the bottom — with an 11-row pane the parse produced 12
+        // lines — and since the cursor row is derived from the line count, the highlight landed one row BELOW the real
+        // cursor. In vim that is exactly "the cursor is on the wrong line" (found by rendering a real vim capture:
+        // cursor_y=3 reported, the highlight was drawn on row 4).
+        if (captured.Length > 0 && (text.Length > 0 || runs.Count > 0 || !captured.EndsWith('\n')))
+            screen.Lines.Add(new TerminalLine(runs, -1, false));
         MarkCursor(screen, cursorLine, cursorColumn);
         return screen;
     }
@@ -109,6 +115,24 @@ public static class TerminalScreenParser
         screen.CursorColumn = cursorColumn;
         if (cursorLine < 0 || cursorLine >= screen.Lines.Count) return;
         screen.Lines[cursorLine] = screen.Lines[cursorLine] with { IsCursorLine = true, CursorColumn = cursorColumn };
+    }
+
+    /// <summary>
+    /// Which line of a CAPTURE the terminal's cursor is on.
+    /// </summary>
+    /// <remarks>
+    /// tmux reports <c>cursor_y</c> from the top of the VISIBLE screen, while a capture can include scrollback above it,
+    /// so the visible screen is the last <paramref name="rows"/> lines. Clamped, because a capture taken between a
+    /// resize and a repaint can be shorter than the pane claims — a cursor row of -1 or past the end would be silently
+    /// dropped anyway, and clamping is the honest way to say "no better information".
+    /// </remarks>
+    public static int CursorRow(int capturedLines, int rows, int cursorY)
+    {
+        if (capturedLines <= 0 || cursorY < 0) return -1;
+        // A capture SHORTER than the pane can only be a torn read around a resize: then the capture is the screen and
+        // cursor_y is already the row. Otherwise the visible screen is the last `rows` lines.
+        var row = capturedLines <= Math.Max(1, rows) ? cursorY : capturedLines - rows + cursorY;
+        return Math.Clamp(row, 0, capturedLines - 1);
     }
 
     /// <summary>Apply one SGR parameter list to the running style.</summary>

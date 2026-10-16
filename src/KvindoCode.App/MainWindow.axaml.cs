@@ -1992,11 +1992,10 @@ public partial class MainWindow : Window
         if (_terminals is { } other && other.Project != project) CloseTerminals();              // one grid at a time
         _project = project;
         foreach (var tv in Host.Children.OfType<TranscriptView>().ToList()) Host.Children.Remove(tv);
-        _terminals = new TerminalsView(Tmux, project, CloseTerminals, ShowInfo)
-        {
-            MaxWidth = 1400,
-            HorizontalAlignment = HorizontalAlignment.Left,
-        };
+        // NO MaxWidth and no Left alignment: the terminal grid is a grid of real terminals, so it takes the whole
+        // main area (the transcript is capped at 1000 px for readability, but a terminal that stops half way across the
+        // window is just wasted space — reported 2026-10-16).
+        _terminals = new TerminalsView(Tmux, project, CloseTerminals, ShowInfo);
         Host.Children.Insert(0, _terminals);
         BottomColumn.IsVisible = false;      // the composer belongs to a session, and no session is on screen now
         EmptyState.IsVisible = false;
