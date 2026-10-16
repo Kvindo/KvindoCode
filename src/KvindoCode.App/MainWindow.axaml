@@ -39,7 +39,7 @@
           <StackPanel Grid.Column="1" Margin="10,1,0,0" Spacing="1" VerticalAlignment="Top">
             <TextBlock Name="BrandText" Text="Kvindo™ Code" FontWeight="SemiBold" FontSize="15" TextTrimming="CharacterEllipsis"/>
             <!-- Live process figures: memory held, and how busy/blocked the UI thread is. Filled by UpdateHealth(). -->
-            <TextBlock Name="HealthText" FontSize="11" TextTrimming="CharacterEllipsis"
+            <TextBlock Name="HealthText" Classes="muted" FontSize="11" TextTrimming="CharacterEllipsis"
                        ToolTip.Tip="Memory this process holds, and UI-thread load: its UI-thread CPU share plus the last dispatcher round-trip, which measures blocking even when the CPU is idle."/>
           </StackPanel>
         </Grid>

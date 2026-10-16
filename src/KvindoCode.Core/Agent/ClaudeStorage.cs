@@ -193,6 +193,7 @@ public sealed class ClaudeStorage : ISessionStorage
             AuditSecrets = BoolOld("kvAuditSecrets", "pvAuditSecrets"),
             WasRunning = FlagOld("kvWasRunning", "pvWasRunning"),
             Subagent = FlagOld("kvSubagent", "pvSubagent"),
+            ParentSessionId = S("kvParentSessionId"),
             WorkMode = Enum.TryParse<SessionMode>(SOld("kvWorkMode", "pvWorkMode"), out var wmode) ? wmode : SessionMode.Normal,
             Created = created, Updated = DateTimeOffset.FromUnixTimeMilliseconds(L("lastActivityAt") ?? L("createdAt") ?? 0),
             Archived = B("isArchived"), Starred = B("isStarred"), CompletedTurns = (int)(L("completedTurns") ?? 0),
@@ -249,6 +250,8 @@ public sealed class ClaudeStorage : ISessionStorage
             if (info.WorkMode != SessionMode.Normal) o["kvWorkMode"] = info.WorkMode.ToString(); else o.Remove("kvWorkMode");
             o["kvWasRunning"] = info.WasRunning;
             if (info.Subagent) o["kvSubagent"] = true;                                  // a subagent transcript, not a conversation
+            // whose subagent it is — the link that lets the agents be re-listed after a restart
+            if (!string.IsNullOrEmpty(info.ParentSessionId)) o["kvParentSessionId"] = info.ParentSessionId; else o.Remove("kvParentSessionId");
             if (!string.IsNullOrEmpty(info.ForkedFrom)) o["forkedFromSessionId"] = info.ForkedFrom;
             if (info.Effort != null) o["effort"] = info.Effort; else if (isNew) o.Remove("effort");
             var wantPlan = info.PermissionMode == "plan";
