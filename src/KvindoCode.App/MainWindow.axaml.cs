@@ -211,6 +211,7 @@ public partial class MainWindow : Window
         SearchBox.TextChanged += (_, _) => { SearchClear.IsVisible = !string.IsNullOrEmpty(SearchBox.Text); _debounce.Stop(); _debounce.Start(); };
 
         // find inside the current session: the same regexp engine, applied to the transcript
+        FindBtn.Content = Ui.Icon("IconSearch", "KvMuted", 15);
         FindBtn.Click += (_, _) => OpenFindInPane();
 
         SearchClear.Click += (_, _) => SearchBox.Text = "";
@@ -2414,10 +2415,15 @@ public partial class MainWindow : Window
             if (lag >= 60) text += $" · lag {lag:0}ms";                     // only when it is actually felt
             if (HealthText.Text != text) HealthText.Text = text;
 
-            // normal / getting heavy / this is what is slowing you down
-            HealthText.Foreground = lag >= 400 || ui >= 85 ? new SolidColorBrush(Color.Parse("#EF4444"))
-                                  : lag >= 120 || ui >= 50 ? new SolidColorBrush(Color.Parse("#F59E0B"))
-                                  : null;
+            // normal / getting heavy / this is what is slowing you down.
+            //
+            // The normal branch used to assign NULL, which is a LOCAL value and therefore overrides the inherited
+            // theme brush: the label kept its text and its layout box but painted NOTHING, so the figures were
+            // invisible until the thread got busy (reported 2026-10-16: "i dont see that numbers"). The normal state
+            // now re-binds the muted theme brush instead of clearing the colour.
+            if (lag >= 400 || ui >= 85) HealthText.Foreground = new SolidColorBrush(Color.Parse("#EF4444"));
+            else if (lag >= 120 || ui >= 50) HealthText.Foreground = new SolidColorBrush(Color.Parse("#F59E0B"));
+            else Ui.BindBrush(HealthText, TextBlock.ForegroundProperty, "KvMuted");
             ToolTip.SetTip(HealthText,
                 $"{FormatBytes(mem)} resident memory.\n" +
                 (ui is { } u ? $"UI thread: {u:0.0}% of one core, over the last {HealthSeconds:0}s.\n" : "UI thread CPU: unavailable.\n") +
