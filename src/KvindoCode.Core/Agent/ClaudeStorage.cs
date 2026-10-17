@@ -192,6 +192,7 @@ public sealed class ClaudeStorage : ISessionStorage
             Model = S("model"), KvModel = SOld("kvModel", "pvModel"), ModelTag = SOld("kvModelTag", "pvModelTag"), Effort = S("effort"), PermissionMode = S("permissionMode"),
             AuditSecrets = BoolOld("kvAuditSecrets", "pvAuditSecrets"),
             WasRunning = FlagOld("kvWasRunning", "pvWasRunning"),
+            LastTaskActivity = S("kvLastTaskActivity") is { Length: > 0 } ltas && DateTimeOffset.TryParse(ltas, out var lta) ? lta : default,
             Subagent = FlagOld("kvSubagent", "pvSubagent"),
             ParentSessionId = S("kvParentSessionId"),
             WorkMode = Enum.TryParse<SessionMode>(SOld("kvWorkMode", "pvWorkMode"), out var wmode) ? wmode : SessionMode.Normal,
@@ -249,6 +250,7 @@ public sealed class ClaudeStorage : ISessionStorage
             if (info.AuditSecrets is not null) o["kvAuditSecrets"] = info.AuditSecrets.Value; else o.Remove("kvAuditSecrets");
             if (info.WorkMode != SessionMode.Normal) o["kvWorkMode"] = info.WorkMode.ToString(); else o.Remove("kvWorkMode");
             o["kvWasRunning"] = info.WasRunning;
+            if (info.LastTaskActivity != default) o["kvLastTaskActivity"] = info.LastTaskActivity;
             if (info.Subagent) o["kvSubagent"] = true;                                  // a subagent transcript, not a conversation
             // whose subagent it is — the link that lets the agents be re-listed after a restart
             if (!string.IsNullOrEmpty(info.ParentSessionId)) o["kvParentSessionId"] = info.ParentSessionId; else o.Remove("kvParentSessionId");
