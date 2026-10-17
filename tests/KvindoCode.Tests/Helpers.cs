@@ -50,9 +50,22 @@ public sealed class Sandbox : IDisposable
         return s;
     }
 
+    /// <summary>
+    /// Restore the process-wide pin, NOT the value that happened to be set when this sandbox was built.
+    /// </summary>
+    /// <remarks>
+    /// A sandbox restores the previous value on dispose, which is only correct when sandboxes nest — they never do. The
+    /// real failure: a helper that creates a Sandbox and never disposes it leaves KVINDOCODE_HOME pointing at THAT
+    /// sandbox for the rest of the run, and every later Sandbox then captures the stale value as "previous", so one
+    /// leak propagates. TestIsolationTests exists to prove the process never leaves the pinned scratch dir and caught it
+    /// ("Expected /tmp/kvindocode-testrun, Actual /tmp/kvindocode-test-<id>/home"). Always restoring the pin is
+    /// idempotent and cannot leak.
+    /// </remarks>
     public void Dispose()
     {
-        Environment.SetEnvironmentVariable("KVINDOCODE_HOME", _oldHome);
+        Environment.SetEnvironmentVariable("KVINDOCODE_HOME", TestRunHome.Dir);
+        if (_oldHome is { Length: > 0 } prev && prev != TestRunHome.Dir && !prev.StartsWith(Path.Combine(Path.GetTempPath(), "kvindocode-test-"), StringComparison.Ordinal))
+            Environment.SetEnvironmentVariable("KVINDOCODE_HOME", prev);      // an explicitly different home: honour it
         try { Directory.Delete(Root, true); } catch { }
     }
 }

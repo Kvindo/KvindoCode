@@ -14,7 +14,7 @@ public sealed class SecretPlaceholderTests
 
     static (SecretVault vault, AgentSession session, ToolContext ctx, Sandbox sb) Setup()
     {
-        var sb = new Sandbox();
+        using var sb = new Sandbox();          // disposed: an undisposed sandbox leaves KVINDOCODE_HOME pinned at it
         var dir = Path.Combine(sb.Root, "vault"); Directory.CreateDirectory(dir);
         var vault = new SecretVault(Path.Combine(dir, "vault.json"), Path.Combine(dir, "key"));
         vault.Unlock(); vault.Create("TEST_PASSWORD", Value); SecretVault.Default = vault;

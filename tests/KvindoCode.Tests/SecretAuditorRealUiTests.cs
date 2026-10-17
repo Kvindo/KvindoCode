@@ -1538,9 +1538,18 @@ public sealed class SecretAuditorRealUiTests
         // it depends on whether this session was the current one at the instant its turn ended: deferred when you were
         // watching it (the branch this test is about), or already queued if the window was elsewhere then — a test-order
         // artefact of a full-suite run, not a defect, because the user-visible rule below has to hold either way.
+        // The turn's END is dispatched asynchronously (WaitForTurnAsync returns when Running goes false, which can be a
+        // moment before the window has handled TurnEndEvent), so wait for it rather than sampling once.
+        var wait = System.Diagnostics.Stopwatch.StartNew();
+        while (wait.ElapsedMilliseconds < 5000 && !settings.AttentionPending.Contains(id) && !settings.AttentionSessions.Contains(id))
+        {
+            Dispatcher.UIThread.RunJobs();
+            await Task.Delay(25);
+        }
         var deferred = settings.AttentionPending.Contains(id);
         var queued = settings.AttentionSessions.Contains(id);
-        System.Console.WriteLine($"after the turn: deferred={deferred} queued={queued}");
+        System.Console.WriteLine($"after the turn: deferred={deferred} queued={queued} running={app.Session.Running} " +
+            $"msgs={app.Session.Session.HistoryCount} title='{app.Session.Session.Info.Title}'");
         Assert.True(deferred || queued, "the finished turn was recorded nowhere");
         if (deferred) Assert.False(AttentionBlockShown(sidebar));                      // held, not shown
         Assert.Equal(1, TitleRows());                                                  // its normal row, in the project group

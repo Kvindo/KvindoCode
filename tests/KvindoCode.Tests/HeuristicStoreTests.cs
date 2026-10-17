@@ -39,7 +39,7 @@ public sealed class HeuristicStoreTests(ITestOutputHelper o)
     /// </remarks>
     static async Task<(List<SecretCandidate> Asked, SecretVault Vault)> Store(string toolOutput, SecretConfirmation answer)
     {
-        var sb = new Sandbox();
+        using var sb = new Sandbox();          // disposed: an undisposed sandbox leaves KVINDOCODE_HOME pinned at it
         var vault = NewVault(sb);
         var inter = new FakeInteraction();
         for (var i = 0; i < 4; i++) inter.SecretConfirmationDecisions.Enqueue(answer);
