@@ -557,6 +557,64 @@ public sealed class RightPane : UserControl
 
     void EditTextFile(string path) => EditTextFile(Path.GetFileName(path), path, null);
 
+    /// <summary>
+    /// The project's notes file, with AUTOSAVE (asked 2026-10-17: "notes icon that will open this project persistent
+    /// notes file with autosave on right panel").
+    /// </summary>
+    /// <remarks>
+    /// A debounced write rather than a Save button: notes are jotted while thinking, and a button turns that into a way
+    /// to lose text. 700 ms after the last keystroke the file is written; the footer says when it last saved, and a
+    /// write that fails says so instead of pretending. Vault markers are expanded exactly like the Save path does, so a
+    /// note can hold «secret» placeholders without ever holding the value.
+    /// </remarks>
+    public void EditNotes(string title, string path)
+    {
+        _title.Text = title;
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        if (!File.Exists(path))
+            File.WriteAllText(path, "# Notes\n\n");
+        var text = new TextBox
+        {
+            Text = File.ReadAllText(path), AcceptsReturn = true, TextWrapping = TextWrapping.Wrap,
+            Classes = { "plain" }, FontFamily = (FontFamily)Application.Current!.FindResource("KvMono")!,
+            FontSize = 12.5, VerticalAlignment = VerticalAlignment.Stretch,
+        };
+        var status = Ui.Muted("saved");
+        var pending = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(700) };
+        var lastWritten = text.Text ?? "";
+        void Write()
+        {
+            pending.Stop();
+            var body = text.Text ?? "";
+            if (body == lastWritten) return;
+            try
+            {
+                var toWrite = KvindoCode.Core.Secrets.SecretPlaceholders.TryExpand(body, out var expanded, out _) ? expanded : body;
+                File.WriteAllText(path, toWrite);
+                lastWritten = body;
+                status.Text = "saved " + DateTime.Now.ToString("HH:mm:ss");
+                ContextChanged?.Invoke();
+            }
+            catch (Exception e) { status.Text = "could not save: " + e.Message; }
+        }
+        text.TextChanged += (_, _) =>
+        {
+            status.Text = "saving…";
+            pending.Stop();
+            pending.Start();
+        };
+        pending.Tick += (_, _) => Write();
+        // a note must not be lost when the panel closes or the window goes away mid-typing
+        DetachedFromVisualTree += (_, _) => Write();
+        var hint = Ui.Muted("Autosaves as you type · " + path, 11);
+        var footer = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 10, Children = { hint, status } };
+        var panel = new DockPanel { Margin = new Thickness(14) };
+        DockPanel.SetDock(footer, Dock.Bottom); panel.Children.Add(footer); panel.Children.Add(text);
+        _body.Content = panel;
+        _active = "context-edit";
+        text.Focus();
+    }
+
     Action? _agentUnsub;
 
     /// <summary>Shows a subagent with the very same transcript view a main session uses, live while it runs.</summary>

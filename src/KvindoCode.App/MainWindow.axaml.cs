@@ -228,6 +228,8 @@ public partial class MainWindow : Window
         // side panel
         PaneHost.Child = _pane;
         PaneBtn.Content = Ui.Icon("IconPanel", "KvMuted", 16);
+        NotesBtn.Content = Ui.Icon("IconPencil", "KvMuted", 16);
+        NotesBtn.Click += (_, _) => OpenNotes();
         PaneBtn.Click += (_, _) => { if (PaneHost.IsVisible) HidePane(); else { OpenPane(); if (!_pane.HasContent) ShowPaneHint(); } };
         _pane.CloseRequested += HidePane;
         _pane.ContextChanged += () => { if (_current is not null) _current.Session.Project.Reload(_settings); };
@@ -1164,6 +1166,25 @@ public partial class MainWindow : Window
         if (PaneHost.IsVisible && PaneHost.Bounds.Width > 100) _paneWidth = PaneHost.Bounds.Width;
         PaneHost.IsVisible = PaneSplitter.IsVisible = false;
         MainArea.ColumnDefinitions[2].Width = new GridLength(0);
+    }
+
+    /// <summary>
+    /// Open the project's notes in the side panel — one persistent markdown file per project, autosaved.
+    /// </summary>
+    /// <remarks>Asked 2026-10-17: "notes icon that will open this project persistent notes file with autosave on right
+    /// panel". The file lives in the project's own .kvindocode folder so it belongs to the project rather than to a
+    /// session, and every session of that project sees the same notes.</remarks>
+    void OpenNotes()
+    {
+        var project = _project ?? _current?.Session.Project.Cwd;
+        if (string.IsNullOrEmpty(project))
+        {
+            ShowError("Open a project first: notes belong to a project, not to the app.");
+            return;
+        }
+        OpenPane();
+        var path = Paths.ProjectNotes(project);
+        _pane.EditNotes("Notes — " + (Path.GetFileName(project.TrimEnd('/')) is { Length: > 0 } n ? n : project), path);
     }
 
     void ShowPaneHint()

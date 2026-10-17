@@ -92,6 +92,17 @@ public static class Paths
         return Path.Combine(WorktreesDir, key, sessionId);
     }
 
+    /// <summary>
+    /// The human's own notes for a project: a markdown file that belongs to the project, not to a session.
+    /// </summary>
+    /// <remarks>
+    /// Inside the project (so it travels with the repository and can be committed) but in the app's own folder, which is
+    /// already the place for project-local skills and hooks. One file per project, shared by every session — the point is
+    /// to jot something down and find it again, not to have it per conversation (asked 2026-10-17).
+    /// </remarks>
+    public static string ProjectNotes(string projectRoot) =>
+        Path.Combine(Path.GetFullPath(projectRoot), ".kvindocode", "NOTES.md");
+
     /// <summary>Stable 8-hex-digit digest of a path, for disambiguating encoded project keys.</summary>
     public static string ShortHash(string s)
     {
