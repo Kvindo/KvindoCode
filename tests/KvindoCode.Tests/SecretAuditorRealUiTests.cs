@@ -338,8 +338,12 @@ public sealed class SecretAuditorRealUiTests
         var win = new SecretsWindow();
         win.Show();
         Dispatcher.UIThread.RunJobs();
-        win.Measure(new Size(900, 800));
-        win.Arrange(new Rect(0, 0, 900, 800));
+        // Tall on purpose: Avalonia 12's row metrics put the first secret's controls at y≈828, i.e. BELOW an 800 px
+        // arrange, and a point outside the window cannot be clicked (measured: the eye button was "visible" and
+        // hit-test-visible yet the hit test at its own centre returned nothing). The window is laid out big enough for
+        // the rows the tests drive; it is a harness size, not a product one.
+        win.Measure(new Size(900, 1400));
+        win.Arrange(new Rect(0, 0, 900, 1400));
         Dispatcher.UIThread.RunJobs();
         _lastSecretsWindow = win;
         return win;
