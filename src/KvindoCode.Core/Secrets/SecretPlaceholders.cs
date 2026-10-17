@@ -65,7 +65,16 @@ public static partial class SecretPlaceholders
         for (var i = 0; i < targets.Count; i++)
         {
             var (name, value) = targets[i];
-            if (value.Length > 0 && result.Contains(value, StringComparison.Ordinal))
+            if (value.Length == 0) continue;
+            // BOTH spellings. A value with a quote, a backslash or a newline sits in JSON (tool-call arguments, a curl
+            // body echoed into the transcript) in its ESCAPED form, and replacing only the raw spelling left the
+            // credential readable there — measured: `pa"ss\word-123456` stayed in `{"password":"pa\"ss\\word-123456"}`
+            // while the raw form was masked. The escaped pass runs FIRST (it is longer, so it cannot be created by the
+            // raw replacement), and then the raw pass covers prose.
+            var escaped = SecretRedactor.JsonEscape(value);
+            if (escaped != value && result.Contains(escaped, StringComparison.Ordinal))
+                result = result.Replace(escaped, Marker(name), StringComparison.Ordinal);
+            if (result.Contains(value, StringComparison.Ordinal))
                 result = result.Replace(value, Marker(name), StringComparison.Ordinal);
         }
         return result;

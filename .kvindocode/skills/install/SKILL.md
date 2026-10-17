@@ -5,7 +5,7 @@ description: Build KvindoCode for Linux/macOS/Windows, publish the binaries as a
 
 # Building, publishing and installing KvindoCode
 
-KvindoCode is a .NET 9 / Avalonia desktop app. One script builds all three platforms, one script installs the result.
+KvindoCode is a .NET 10 / Avalonia 12 desktop app. One script builds all three platforms, one script installs the result.
 
 | Script | What it does |
 |---|---|
@@ -21,7 +21,7 @@ bash tools/release.sh 2026.10.10                     # build all platforms + cre
 bash tools/release.sh 2026.10.10 --draft             # create it as a draft to check first
 bash tools/release.sh 2026.10.10 --notes "Changelog"  # override the generated release notes
 bash tools/release.sh 2026.10.10 --no-push           # build the files only, into ./release/<version>/
-bash tools/release.sh 2026.10.10 --framework-dependent  # small archives, needs .NET 9 on the user's machine
+bash tools/release.sh 2026.10.10 --framework-dependent  # small archives, needs the .NET 10 runtime on the user's machine
 ```
 
 Self-contained is the default, so a user needs **no .NET installed**: download, unpack, run.
@@ -49,6 +49,18 @@ dotnet test tests/KvindoCode.Tests          # must be green
 git status --short                          # must be empty
 bash tools/release.sh <version>
 ```
+
+**When to cut one.** After any change a user would notice reaches `master` (a fix, a feature, a runtime/SDK
+requirement) — the release is how a user installs it, so a merged fix that is not released is a fix that is not
+delivered. The version is the date (`2026.10.17`). Sanity-check what the release will claim before publishing:
+
+```bash
+git -C <repo> log --oneline <last-tag>..HEAD          # everything the notes will summarise
+grep -n "TargetFramework\|Avalonia" Directory.Build.props src/*/*.csproj   # runtime/dependency requirements
+```
+
+`_build.sh` needs the **.NET 10 SDK**; it picks `~/.dotnet/dotnet` when the system `dotnet` is older, so no
+root install is needed.
 
 ## 2. Install on this PC from the GitHub release
 
