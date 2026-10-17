@@ -63,6 +63,12 @@ public sealed class TerminalUiTests
         Environment.SetEnvironmentVariable("KVINDOCODE_TMUX_SOCKET", Socket);
 
         var sb = new Sandbox();
+        // The shared sandbox is never disposed (it must outlive every test in the class), so it would leave
+        // KVINDOCODE_HOME pointing at ITS home for the rest of the run — which broke TestIsolationTests, the test that
+        // exists to prove the process never leaves the pinned scratch dir (observed: ConfigDir became
+        // /tmp/kvindocode-test-<id>/home). Everything this class needs from the sandbox is addressed explicitly (the
+        // vault paths and sb.Project), so the process-wide pin is put straight back.
+        Environment.SetEnvironmentVariable("KVINDOCODE_HOME", TestRunHome.Dir);
         var vaultDir = Path.Combine(sb.Root, "vault");
         Directory.CreateDirectory(vaultDir);
         var vault = new KvindoCode.Core.Secrets.SecretVault(Path.Combine(vaultDir, "secrets.vault.json"), Path.Combine(vaultDir, "secrets.key"));

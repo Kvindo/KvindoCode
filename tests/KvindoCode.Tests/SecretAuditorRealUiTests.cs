@@ -2333,10 +2333,14 @@ public sealed class SecretAuditorRealUiTests
     {
         // Reported: "Show value" in the secrets window disappeared after a second or two. The vault raises Changed
         // while the agent works, and the window rebuilt the list, recreating the reveal box hidden.
-        using (new Sandbox())
+        // Its OWN vault: SecretVault.Default is whatever the previous test left in a full run.
+        using var sb = new Sandbox();
         {
-            SecretVault vault = SecretVault.Default;
-            vault.Unlock();
+            var vaultDir = System.IO.Path.Combine(sb.Root, "rv");
+            System.IO.Directory.CreateDirectory(vaultDir);
+            var vault = new SecretVault(System.IO.Path.Combine(vaultDir, "s.json"), System.IO.Path.Combine(vaultDir, "k"));
+            Assert.True(vault.Unlock(out var vErr), vErr);
+            SecretVault.Default = vault;
             vault.Set("db-password", "Hq72-Lm9x-Pw40-Zr31", "prod Postgres");
             SecretsWindow win = ShowSecretsWindow();
 
@@ -3027,19 +3031,26 @@ public sealed class SecretAuditorRealUiTests
     public async Task Startup_warns_when_the_vault_key_was_regenerated()
     {
         using Sandbox sb = new Sandbox();
-        string text = System.IO.Path.Combine(sb.Root, "vault");
+        // A DIFFERENT directory from the one App.Start uses for its own vault (sb.Root/vault): otherwise Start's vault
+        // unlocks over the very same key file, RECREATES the key the test just deleted, and the flag this test exists to
+        // check can never be set. That is why it passed alone and failed in a suite (measured: regenerated=False,
+        // unmasked=False, keyExists=True).
+        string text = System.IO.Path.Combine(sb.Root, "rotated");
         Directory.CreateDirectory(text);
         SecretVault secretVault = new SecretVault(System.IO.Path.Combine(text, "secrets.vault.json"), System.IO.Path.Combine(text, "secrets.key"));
         secretVault.Unlock();
         secretVault.Create("db-password", "sup3r-s3cret-value-1234");
-        File.Delete(secretVault.KeyPath);
         SecretVault.Default = secretVault;
         App app = Start(sb, new JsonArray { Says("hi") });
+        File.Delete(secretVault.KeyPath);          // the key is gone at the moment WarnAboutVaultProblems looks for it
         try
         {
             SecretVault.Default = secretVault;
             Assert.True(secretVault.Unlock(out string _));
-            Assert.True(secretVault.KeyWasRegenerated || secretVault.HasUnmaskedValues);
+            Assert.True(secretVault.KeyWasRegenerated || secretVault.HasUnmaskedValues,
+                $"neither flag: regenerated={secretVault.KeyWasRegenerated} unmasked={secretVault.HasUnmaskedValues} " +
+                $"secrets={secretVault.List().Count} keyExists={System.IO.File.Exists(secretVault.KeyPath)} " +
+                $"loadError={secretVault.LoadError ?? "<none>"} env={(Environment.GetEnvironmentVariable("KVINDOCODE_MASTER_KEY") is null ? "none" : "set")}");
             Dispatcher.UIThread.Post(delegate
             {
                 TryGetMethod(app.Window, "WarnAboutVaultProblemsAsync").Invoke(app.Window, null);
