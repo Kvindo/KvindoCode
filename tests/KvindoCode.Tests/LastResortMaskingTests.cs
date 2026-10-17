@@ -121,3 +121,4 @@ public sealed class LastResortMaskingTests(ITestOutputHelper o)
         o.WriteLine("notice: " + (notice ?? "<none, normal masking was enough>"));
     }
 }
+

@@ -286,6 +286,7 @@ public sealed class AuditingLlmClient : ILlmClient
         // check about values only, so a correctly masked request can never be refused.
         if (redactor.Contains(string.Join("\n", EveryOutboundString(protectedRequest).Select(SecretPlaceholders.StripMarkers))))
         {
+            TraceRescue(protectedRequest, targets, redactor);
             // LAST RESORT before refusing. The check above recognises every spelling the redactor knows (including the
             // JSON-escaped one), while the masking that produced this request replaces by (name, value) pairs. When the
             // two disagree the request can never be sent — and because the offending text lives in the HISTORY, the
@@ -293,21 +294,52 @@ public sealed class AuditingLlmClient : ILlmClient
             // sessions on 2026-10-17, one permanently stuck). So: mask every registered spelling, verify again, and only
             // refuse if something is still visible.
             var rescue = RedactEverySpelling(protectedRequest, redactor);
+            // A field that could not be proved clean is WITHHELD, so this should never fire again. If it does, the check
+            // is looking at something outside the per-field text (a tool definition, say) — refuse rather than send it,
+            // and name the entry (never the value) so the case is diagnosable instead of a dead end.
             if (redactor.Contains(string.Join("\n", EveryOutboundString(rescue).Select(SecretPlaceholders.StripMarkers))))
             {
-                // Name the entry (never the value): without this the message was undiagnosable and the session simply
-                // dead-ended (reported 2026-10-17).
                 var visible = targets.Where(t => t.Value.Length > 0 &&
                     EveryOutboundString(rescue).Any(piece => piece.Contains(t.Value, StringComparison.Ordinal)))
                     .Select(t => t.Name).Distinct().Take(5).ToList();
                 return AuditUnavailable("A secret value could not be reliably masked, so the request was not sent." +
                     (visible.Count > 0 ? " Still visible: " + string.Join(", ", visible) + "." : ""));
             }
-            _onNotice?.Invoke("A stored secret was still visible after the normal masking; it was masked with its " +
-                              "placeholder in every spelling the vault knows, and the request was sent. Nothing left the machine in plaintext.");
+            _onNotice?.Invoke("A stored secret was still visible after the normal masking; the part of the request that " +
+                              "could not be cleaned was replaced by a notice and the turn continued. (details in audit-trace.log)");
             return await _inner.StreamAsync(rescue, callbacks, ct);
         }
         return await _inner.StreamAsync(protectedRequest, callbacks, ct);
+    }
+
+    /// <summary>
+    /// Record WHY the normal masking left something visible: which piece, which stored entry, and a redacted window
+    /// around it.
+    /// </summary>
+    /// <remarks>
+    /// The message to the human cannot carry this (it would be a transcript of their own secrets), so it goes to
+    /// <c>~/.kvindocode/audit-trace.log</c> with the VALUE replaced by its entry name. Without it, "a stored secret was
+    /// still visible" is a warning nobody can act on — which is exactly what happened when it started appearing in every
+    /// session (reported 2026-10-17).
+    /// </remarks>
+    void TraceRescue(LlmRequest protectedRequest, IReadOnlyList<(string Name, string Value)> targets, SecretRedactor redactor)
+    {
+        try
+        {
+            var pieces = EveryOutboundString(protectedRequest).Select(SecretPlaceholders.StripMarkers).ToList();
+            var lines = new List<string> { DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + "  rescue: normal masking left a value visible" };
+            for (var i = 0; i < pieces.Count && lines.Count < 12; i++)
+            {
+                var piece = pieces[i];
+                if (!redactor.Contains(piece)) continue;
+                var hit = targets.FirstOrDefault(t => t.Value.Length > 0 && piece.Contains(t.Value, StringComparison.Ordinal));
+                var window = piece.Length <= 240 ? piece : piece[..240];
+                if (hit.Value is { Length: > 0 }) window = window.Replace(hit.Value, "«" + hit.Name + "»");
+                lines.Add($"  piece #{i} ({piece.Length} chars) entry=«{(hit.Value is { Length: > 0 } ? hit.Name : "?")}» text=«{window.Replace('\n', ' ')}»");
+            }
+            File.AppendAllLines(Path.Combine(Paths.ConfigDir, "audit-trace.log"), lines);
+        }
+        catch { /* a trace must never break a send */ }
     }
 
     /// <summary>Replace a value that could not be turned into a marker with the irreversible redaction text.</summary>
@@ -449,21 +481,47 @@ public sealed class AuditingLlmClient : ILlmClient
     /// 552 locked vault reads per request (one per message, each re-decrypting the whole vault) — measured 119 ms,
     /// against ~10 ms when hoisted (2026-10-11).</param>
     /// <param name="redactor">The request's masker, reused for every tool call instead of rebuilt for each one.</param>
-    /// <summary>Mask every spelling of every registered value, in every outbound string of a request.</summary>
+    /// <summary>What replaces a field that cannot be shown to be free of a stored secret.</summary>
+    internal const string Withheld = "[withheld by KvindoCode: a stored secret could not be masked out of this text]";
+
+    /// <summary>
+    /// Mask every spelling of every registered value, and WITHHOLD any field where that still leaves something visible.
+    /// </summary>
+    /// <remarks>
+    /// The refusal this replaces was all-or-nothing, which is how a session became permanently unusable: one field in one
+    /// old message could not be cleaned, so no request ever went out again ("could not verify this request", 17 turns in
+    /// a row in session c0909d46). Bounded loss is strictly better than a dead session and is still fail-CLOSED for the
+    /// text that matters: a field that cannot be proved clean is not sent at all, it is replaced by a notice. Everything
+    /// else in the request goes out intact.
+    ///
+    /// Why a field can resist masking at all: replacing one value inserts a marker whose NAME can contain another stored
+    /// value (the vault holds fragments like "audited-token-…"), so a later pass can rewrite the marker into text that is
+    /// no longer a marker — and the check, which is by definition looking for that value, keeps finding it.
+    /// </remarks>
     static LlmRequest RedactEverySpelling(LlmRequest r, SecretRedactor redactor)
     {
+        // One field at a time: mask it, then ASK whether anything is still visible. Only a field that survives BOTH the
+        // masking and the check is withheld — so a clean request loses nothing, and a dirty one loses exactly the field
+        // that could not be cleaned.
+        string Clean(string? text)
+        {
+            if (string.IsNullOrEmpty(text)) return text ?? "";
+            var masked = redactor.RedactAll(text);
+            return redactor.Contains(SecretPlaceholders.StripMarkers(masked)) ? Withheld : masked;
+        }
+
         var msgs = r.Messages.Select(m => new ChatMessage
         {
             Role = m.Role,
-            Content = redactor.RedactAll(m.Content),
-            Reasoning = redactor.RedactAll(m.Reasoning),
-            ToolCalls = m.ToolCalls?.Select(c => new ToolCall { Id = c.Id, Name = c.Name, Arguments = redactor.RedactAll(c.Arguments) }).ToList(),
+            Content = Clean(m.Content),
+            Reasoning = Clean(m.Reasoning),
+            ToolCalls = m.ToolCalls?.Select(c => new ToolCall { Id = c.Id, Name = c.Name, Arguments = Clean(c.Arguments) }).ToList(),
             ToolCallId = m.ToolCallId, IsError = m.IsError, IsSummary = m.IsSummary, IsNotification = m.IsNotification, IsInternal = m.IsInternal,
             Model = m.Model, Ts = m.Ts, DurationMs = m.DurationMs, Images = m.Images?.ToList(),
         }).ToList();
         return new LlmRequest
         {
-            SessionId = r.SessionId, AuditSecrets = r.AuditSecrets, Model = r.Model, System = redactor.RedactAll(r.System),
+            SessionId = r.SessionId, AuditSecrets = r.AuditSecrets, Model = r.Model, System = Clean(r.System),
             Messages = msgs, Tools = r.Tools, MaxTokens = r.MaxTokens, ReasoningEffort = r.ReasoningEffort,
         };
     }
