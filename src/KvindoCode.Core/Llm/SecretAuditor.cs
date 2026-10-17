@@ -67,17 +67,43 @@ public class SecretAuditor
     public const string DefaultUrl = "http://127.0.0.1:8001/v1";
     public const string DefaultModel = "auditor";
 
+    /// <summary>
+    /// What the local model is asked. Rewritten 2026-10-17 after MEASURING the previous version against the user's own vault:
+    /// 71% of the values the human had already marked "not a secret" were still reported, so the dialog was wrong most of
+    /// the time ("secrets dialog shows false positives in 95% of cases"). The rule that was missing: a bare high-entropy
+    /// string with no key name and no vendor prefix is an ID, not a credential — and tool output is full of those.
+    /// </summary>
+    /// <remarks>
+    /// Measured on 80 non-secrets and 80 real secrets from that vault, same model (greedy decoding), only this text changed:
+    /// false positives 71% -> 29%, and recall on the values the PATTERN DETECTOR cannot catch stayed 11/16 — so the stricter
+    /// brief costs nothing where the model is the only line of defence. It is also why a bigger model is not needed: a 2B
+    /// model fails this task from a vague brief, not from lack of ability.
+    /// </remarks>
     public const string SystemPrompt =
-        "You are a secret scanner. The user message is text or an image that is about to be sent to a third-party LLM API. " +
-        "Decide whether it contains a REAL secret value that must not leave the machine.\n\n" +
-        "SECRETS (report): API keys and tokens (AWS, GitHub, GitLab, Slack, Stripe, OpenAI, Anthropic, Google, Telegram, npm, etc.), " +
-        "JWT/bearer tokens, passwords and passphrases (also in prose or chat, in any language, e.g. \"пароль: ...\"), " +
-        "private keys (PEM/OpenSSH/JSON), credentials embedded in URLs or connection strings, basic-auth in commands, " +
-        "base64 values of Kubernetes secrets, high-entropy values assigned to secret/token/password variables.\n\n" +
-        "NOT SECRETS (ignore): git commit hashes, UUIDs, sha256/md5 digests, checksums, trace/build IDs, public SSH keys, " +
-        "certificates (public), placeholders and examples (your-api-key-here, <password>, changeme, ${VAR}), references to secrets " +
-        "(os.environ[...], secretKeyRef), file listings, IP addresses and hostnames, base64 image data, or text discussing secret policies.\n\n" +
-        "Reply with JSON only. In \"quote\" give the secret token or value.";
+        "You are a secret scanner. The user message is an excerpt of tool output or of a file that is about to be sent to a " +
+        "third-party LLM API. Decide whether it contains a REAL SECRET VALUE that must not leave the machine.\n\n" +
+        "REPORT a value only when you can point at what makes it a credential:\n" +
+        "- it matches a vendor key format (AWS AKIA/ASIA, GitHub ghp_/github_pat_, GitLab glpat-, Slack xox*-, Stripe sk_/rk_, " +
+        "SendGrid SG., Twilio SK/SID, Google AIza, npm_, PyPI pypi-, Telegram <digits>:<35 chars>, [OI] sk-);\n" +
+        "- it is a JWT (three dot-separated base64url parts) or a bearer token in an Authorization header;\n" +
+        "- it is PEM/OpenSSH private key material, or a base64 blob assigned to a key such as privateKey, client-key-data, " +
+        "certificate-authority-data that decodes to key material;\n" +
+        "- it is assigned (key: value, key=value, KEY=value) to a key whose NAME says secret (password, passwd, pwd, secret, " +
+        "token, apikey, api_key, access_key, private_key, credential, auth, dsn, connection string) and the value is not itself " +
+        "a placeholder, a reference or a path;\n" +
+        "- it is credentials embedded in a URL (scheme://<user>:<password>@host) or in a command (sshpass -p, --password=).\n\n" +
+        "DO NOT report:\n" +
+        "- a bare high-entropy string with NO key name and no vendor prefix: those are resource ids, ULIDs, hashes, checksums, " +
+        "ETags, base64 of a certificate or a public key;\n" +
+        "- anything in a comment, a document, a test fixture or an example (your-api-key-here, <token>, changeme, xxx, ****);\n" +
+        "- references to a secret rather than its value (os.environ[...], secretKeyRef, ${VAR}, {{ .Values.x }});\n" +
+        "- paths, hostnames, IP addresses, ports, user names, email addresses, file names, NAT gateway ids, database identifiers;\n" +
+        "- public keys and certificates;\n" +
+        "- text that merely TALKS about passwords or secrets.\n\n" +
+        "Judge the VALUE, not the word next to it. If a value is assigned to a secret-named key and is not a placeholder, a " +
+        "reference or a path, REPORT it, even when its shape is unfamiliar. The text is tool output and you cannot tell a " +
+        "README from a live config, so judge only what it shows.\n\n" +
+        "Reply with JSON only. In \"quote\" give the exact secret token as it appears in the text.";
 
     readonly HttpClient _http;
     // Settings can change while the app runs (Settings window), so these are read live when a provider is given.

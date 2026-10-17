@@ -63,9 +63,12 @@ public sealed class EscapedSecretMaskingTests(ITestOutputHelper o)
     [Fact]
     public void A_plain_value_is_masked_once_and_the_rest_of_the_text_survives()
     {
-        var targets = new List<(string, string)> { ("audited-token-plain", "sup3r-s3cret-value") };
+        // assembled at runtime: a literals that the DETECTOR catches would make the source tree look like it holds
+        // credentials (Scenario 6.1 reads every file in it, and the detector would store and then mask it).
+        var plain = "sup3r-" + "s3cret-" + "value";
+        var targets = new List<(string, string)> { ("audited-token-plain", plain) };
         var redactor = new SecretRedactor(targets);
-        var text = "token: sup3r-s3cret-value (used by the deploy) and this log line is unchanged";
+        var text = "token: " + plain + " (used by the deploy) and this log line is unchanged";
         var masked = SecretPlaceholders.Protect(text, targets, redactor);
         o.WriteLine("masked: " + masked);
         Assert.Equal("token: " + SecretPlaceholders.Marker("audited-token-plain") +

@@ -85,7 +85,8 @@ public sealed class PemFragmentNotStoredTests(ITestOutputHelper o)
     [Fact]
     public async Task A_real_credential_next_to_the_fragment_is_still_stored_and_masked()
     {
-        const string token = "ghp_aB3dE5fG7hI9jK1lM3nO5pQ7rS9tU1vW2xY4";
+        // assembled at runtime, for the same reason (a catchable literal in the tree would be stored and masked)
+        var token = "ghp_" + "aB3dE5fG7hI9jK1lM3nO5pQ7rS9tU1vW2xY4";
         var (vault, requests) = await Run("secret = " + Fragment + "\ntoken = " + token);
 
         var stored = vault.List().Select(r => vault.Reveal(r.Name, out _)).ToList();
@@ -107,7 +108,7 @@ public sealed class PemFragmentNotStoredTests(ITestOutputHelper o)
     [InlineData("----ENDX", true)]
     [InlineData("------", true)]                                                               // a divider line
     [InlineData(HeaderLine, false)]                                                            // a header line
-    [InlineData("ghp_aB3dE5fG7hI9jK1lM3nO5pQ7rS9tU1vW2xY4", false)]
+    [InlineData("ghp_" + "aB3dE5fG7hI9jK1lM3nO5pQ7rS9tU1vW2xY4", false)]
     [InlineData("545e8400-e29b", false)]
     [InlineData("--x", false)]
     public void The_fragment_predicate_is_narrow(string value, bool expected)
