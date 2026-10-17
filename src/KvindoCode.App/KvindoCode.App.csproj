@@ -8,11 +8,13 @@
     <BuiltInComInteropSupport>false</BuiltInComInteropSupport>
   </PropertyGroup>
   <ItemGroup>
-    <PackageReference Include="Avalonia" Version="11.3.22" />
-    <PackageReference Include="Avalonia.Desktop" Version="11.3.22" />
-    <PackageReference Include="Avalonia.Themes.Fluent" Version="11.3.22" />
-    <PackageReference Include="Avalonia.Fonts.Inter" Version="11.3.22" />
-    <PackageReference Include="Avalonia.Controls.DataGrid" Version="11.3.13" />
+    <PackageReference Include="Avalonia" Version="12.1.2" />
+    <PackageReference Include="Avalonia.Desktop" Version="12.1.2" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="12.1.2" />
+    <PackageReference Include="Avalonia.Fonts.Inter" Version="12.1.2" />
+    <PackageReference Include="Avalonia.Controls.DataGrid" Version="12.1.2" />
+    <!-- A REAL terminal: XTerm.NET emulation + Porta.Pty, instead of hand-rendering tmux captures -->
+    <PackageReference Include="Iciclecreek.Avalonia.Terminal" Version="4.1.0" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\KvindoCode.Core\KvindoCode.Core.csproj" />

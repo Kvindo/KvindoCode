@@ -2,7 +2,6 @@ using System.Diagnostics;
 using Avalonia.Headless.XUnit;
 using KvindoCode.Core.Agent;
 using Xunit;
-using Xunit.Abstractions;
 
 namespace KvindoCode.Tests;
 

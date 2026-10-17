@@ -51,6 +51,25 @@ kvindocode_nice() {
   if [ ${#wrap[@]} -gt 0 ]; then "${wrap[@]}" "$@"; else "$@"; fi
 }
 
+# The dotnet to build with. Avalonia 12 needs the .NET 10 SDK, and a user-local SDK
+# (~/.dotnet/dotnet, installed with dotnet-install.sh) is the common case on a machine whose
+# system dotnet is older. PATH wins when it is new enough; otherwise the user-local one is used
+# so an install does not fail with "the SDK 10.0 is not installed".
+KVINDOCODE_DOTNET=""
+kvindocode_dotnet() {
+  if [ -n "$KVINDOCODE_DOTNET" ]; then printf '%s' "$KVINDOCODE_DOTNET"; return; fi
+  local candidate major
+  for candidate in "$(command -v dotnet 2>/dev/null)" "$HOME/.dotnet/dotnet"; do
+    [ -x "$candidate" ] || continue
+    major=$("$candidate" --version 2>/dev/null | cut -d. -f1)
+    case "$major" in ''|*[!0-9]*) continue;; esac
+    if [ "$major" -ge 10 ]; then KVINDOCODE_DOTNET="$candidate"; printf '%s' "$candidate"; return; fi
+  done
+  # nothing new enough: hand back whatever exists so the failure names the real problem (the SDK version)
+  KVINDOCODE_DOTNET="$(command -v dotnet 2>/dev/null || printf '%s' "$HOME/.dotnet/dotnet")"
+  printf '%s' "$KVINDOCODE_DOTNET"
+}
+
 # dotnet publish, serialised and low-priority. Caller must hold the lock.
 kvindocode_publish() {
   local project="$1" rid="$2" self="$3" out="$4"
@@ -64,7 +83,7 @@ kvindocode_publish() {
     local -a jobs=()
     [ "$KVINDOCODE_BUILD_JOBS" -gt 0 ] && jobs=(-maxcpucount:"$KVINDOCODE_BUILD_JOBS")
     kvindocode_nice env DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1 DOTNET_gcServer=0 \
-      dotnet publish "$project" -c Release -r "$rid" --self-contained "$self" \
+      "$(kvindocode_dotnet)" publish "$project" -c Release -r "$rid" --self-contained "$self" \
         "${jobs[@]}" -nodeReuse:false -p:UseSharedCompilation=false \
         --nologo -v q -o "$out"
   )

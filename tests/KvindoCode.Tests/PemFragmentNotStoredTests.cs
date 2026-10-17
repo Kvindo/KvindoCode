@@ -6,7 +6,6 @@ using KvindoCode.Core.Agent;
 using KvindoCode.Core.Llm;
 using KvindoCode.Core.Secrets;
 using Xunit;
-using Xunit.Abstractions;
 
 namespace KvindoCode.Tests;
 
@@ -46,7 +45,7 @@ public sealed class PemFragmentNotStoredTests(ITestOutputHelper o)
     /// <summary>Run <paramref name="toolOutput"/> through a real turn, so the audit runs where it really runs.</summary>
     static async Task<(SecretVault Vault, List<LlmRequest> Requests)> Run(string toolOutput)
     {
-        var sb = new Sandbox();
+        using var sb = new Sandbox();          // disposed: an undisposed sandbox leaves KVINDOCODE_HOME pinned at it
         var vault = NewVault(sb);
         var inter = new FakeInteraction();
         for (var i = 0; i < 4; i++) inter.SecretConfirmationDecisions.Enqueue(SecretConfirmation.Secret);

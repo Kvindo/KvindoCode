@@ -30,7 +30,6 @@ using KvindoCode.Core.Agent;
 using KvindoCode.Core.Llm;
 using KvindoCode.Core.Secrets;
 using Xunit;
-using Xunit.Abstractions;
 
 namespace KvindoCode.Tests;
 
@@ -70,14 +69,14 @@ public sealed class SecretAuditorRealUiTests
             Window.KeyTextInput(text);
             Dispatcher.UIThread.RunJobs();
             Assert.Equal(text, Input.Text);
-            Window.KeyPress(Key.Return, RawInputModifiers.None);
-            Window.KeyRelease(Key.Return, RawInputModifiers.None);
+            Window.KeyPress(Key.Return, RawInputModifiers.None, PhysicalKey.Enter, null);
+            Window.KeyRelease(Key.Return, RawInputModifiers.None, PhysicalKey.Enter, null);
             Dispatcher.UIThread.RunJobs();
         }
 
         public void Click(Control c)
         {
-            TopLevel topLevel = (TopLevel)c.GetVisualRoot();
+            TopLevel topLevel = TopLevel.GetTopLevel(c)!;
             Point point = c.TranslatePoint(new Point(c.Bounds.Width / 2.0, c.Bounds.Height / 2.0), topLevel) ?? throw new InvalidOperationException("control is not laid out");
             topLevel.MouseMove(point);
             topLevel.MouseDown(point, MouseButton.Left);
@@ -339,8 +338,12 @@ public sealed class SecretAuditorRealUiTests
         var win = new SecretsWindow();
         win.Show();
         Dispatcher.UIThread.RunJobs();
-        win.Measure(new Size(900, 800));
-        win.Arrange(new Rect(0, 0, 900, 800));
+        // Tall on purpose: Avalonia 12's row metrics put the first secret's controls at y≈828, i.e. BELOW an 800 px
+        // arrange, and a point outside the window cannot be clicked (measured: the eye button was "visible" and
+        // hit-test-visible yet the hit test at its own centre returned nothing). The window is laid out big enough for
+        // the rows the tests drive; it is a harness size, not a product one.
+        win.Measure(new Size(900, 1400));
+        win.Arrange(new Rect(0, 0, 900, 1400));
         Dispatcher.UIThread.RunJobs();
         _lastSecretsWindow = win;
         return win;
@@ -1535,9 +1538,18 @@ public sealed class SecretAuditorRealUiTests
         // it depends on whether this session was the current one at the instant its turn ended: deferred when you were
         // watching it (the branch this test is about), or already queued if the window was elsewhere then — a test-order
         // artefact of a full-suite run, not a defect, because the user-visible rule below has to hold either way.
+        // The turn's END is dispatched asynchronously (WaitForTurnAsync returns when Running goes false, which can be a
+        // moment before the window has handled TurnEndEvent), so wait for it rather than sampling once.
+        var wait = System.Diagnostics.Stopwatch.StartNew();
+        while (wait.ElapsedMilliseconds < 5000 && !settings.AttentionPending.Contains(id) && !settings.AttentionSessions.Contains(id))
+        {
+            Dispatcher.UIThread.RunJobs();
+            await Task.Delay(25);
+        }
         var deferred = settings.AttentionPending.Contains(id);
         var queued = settings.AttentionSessions.Contains(id);
-        System.Console.WriteLine($"after the turn: deferred={deferred} queued={queued}");
+        System.Console.WriteLine($"after the turn: deferred={deferred} queued={queued} running={app.Session.Running} " +
+            $"msgs={app.Session.Session.HistoryCount} title='{app.Session.Session.Info.Title}'");
         Assert.True(deferred || queued, "the finished turn was recorded nowhere");
         if (deferred) Assert.False(AttentionBlockShown(sidebar));                      // held, not shown
         Assert.Equal(1, TitleRows());                                                  // its normal row, in the project group
@@ -1725,7 +1737,7 @@ public sealed class SecretAuditorRealUiTests
         Dispatcher.UIThread.RunJobs();
 
         Button dismiss = sidebar.GetVisualDescendants().OfType<Button>().First(b => b.Name == "AttentionRemove");
-        TopLevel top = (TopLevel)dismiss.GetVisualRoot();
+        TopLevel top = TopLevel.GetTopLevel(dismiss)!;
         // the ✕ sits at the row's right edge: its centre must be inside the window, otherwise the click lands on the frame
         Point centre = dismiss.TranslatePoint(new Point(dismiss.Bounds.Width / 2, dismiss.Bounds.Height / 2), top).Value;
         Assert.InRange(centre.X, 1, top.Bounds.Width - 2);
@@ -2330,10 +2342,14 @@ public sealed class SecretAuditorRealUiTests
     {
         // Reported: "Show value" in the secrets window disappeared after a second or two. The vault raises Changed
         // while the agent works, and the window rebuilt the list, recreating the reveal box hidden.
-        using (new Sandbox())
+        // Its OWN vault: SecretVault.Default is whatever the previous test left in a full run.
+        using var sb = new Sandbox();
         {
-            SecretVault vault = SecretVault.Default;
-            vault.Unlock();
+            var vaultDir = System.IO.Path.Combine(sb.Root, "rv");
+            System.IO.Directory.CreateDirectory(vaultDir);
+            var vault = new SecretVault(System.IO.Path.Combine(vaultDir, "s.json"), System.IO.Path.Combine(vaultDir, "k"));
+            Assert.True(vault.Unlock(out var vErr), vErr);
+            SecretVault.Default = vault;
             vault.Set("db-password", "Hq72-Lm9x-Pw40-Zr31", "prod Postgres");
             SecretsWindow win = ShowSecretsWindow();
 
@@ -3024,19 +3040,26 @@ public sealed class SecretAuditorRealUiTests
     public async Task Startup_warns_when_the_vault_key_was_regenerated()
     {
         using Sandbox sb = new Sandbox();
-        string text = System.IO.Path.Combine(sb.Root, "vault");
+        // A DIFFERENT directory from the one App.Start uses for its own vault (sb.Root/vault): otherwise Start's vault
+        // unlocks over the very same key file, RECREATES the key the test just deleted, and the flag this test exists to
+        // check can never be set. That is why it passed alone and failed in a suite (measured: regenerated=False,
+        // unmasked=False, keyExists=True).
+        string text = System.IO.Path.Combine(sb.Root, "rotated");
         Directory.CreateDirectory(text);
         SecretVault secretVault = new SecretVault(System.IO.Path.Combine(text, "secrets.vault.json"), System.IO.Path.Combine(text, "secrets.key"));
         secretVault.Unlock();
         secretVault.Create("db-password", "sup3r-s3cret-value-1234");
-        File.Delete(secretVault.KeyPath);
         SecretVault.Default = secretVault;
         App app = Start(sb, new JsonArray { Says("hi") });
+        File.Delete(secretVault.KeyPath);          // the key is gone at the moment WarnAboutVaultProblems looks for it
         try
         {
             SecretVault.Default = secretVault;
             Assert.True(secretVault.Unlock(out string _));
-            Assert.True(secretVault.KeyWasRegenerated || secretVault.HasUnmaskedValues);
+            Assert.True(secretVault.KeyWasRegenerated || secretVault.HasUnmaskedValues,
+                $"neither flag: regenerated={secretVault.KeyWasRegenerated} unmasked={secretVault.HasUnmaskedValues} " +
+                $"secrets={secretVault.List().Count} keyExists={System.IO.File.Exists(secretVault.KeyPath)} " +
+                $"loadError={secretVault.LoadError ?? "<none>"} env={(Environment.GetEnvironmentVariable("KVINDOCODE_MASTER_KEY") is null ? "none" : "set")}");
             Dispatcher.UIThread.Post(delegate
             {
                 TryGetMethod(app.Window, "WarnAboutVaultProblemsAsync").Invoke(app.Window, null);

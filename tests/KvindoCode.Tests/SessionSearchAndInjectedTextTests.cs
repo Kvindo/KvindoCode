@@ -9,7 +9,6 @@ using KvindoCode.Core;
 using KvindoCode.Core.Agent;
 using KvindoCode.Core.Llm;
 using Xunit;
-using Xunit.Abstractions;
 
 namespace KvindoCode.Tests;
 

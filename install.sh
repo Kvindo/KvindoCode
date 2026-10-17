@@ -3,7 +3,10 @@
 #   ~/.local/share/kvindocode      app files
 #   ~/.local/bin/kvindocode        launcher (kvindocode [dir] | kvindocode --print "prompt")
 #   ~/.local/share/applications/kvindocode.desktop + icon
-# Requires the .NET 9 SDK. Settings live in ~/.kvindocode/settings.json (created on first run).
+# Requires the .NET 10 SDK (Avalonia 12 is built against it). If `dotnet` on PATH is older than 10, the build
+# script uses ~/.dotnet/dotnet when it exists, so a user-local SDK is enough:
+#   curl -sSL https://dot.net/v1/dotnet-install.sh | bash -s -- --channel 10.0 --install-dir ~/.dotnet
+# Settings live in ~/.kvindocode/settings.json (created on first run).
 #
 #   bash install.sh                      build from this checkout and install
 #   bash install.sh --from-release [tag] download a GitHub release instead of building

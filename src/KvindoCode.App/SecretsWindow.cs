@@ -1,6 +1,7 @@
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Input;
+using Avalonia.Input.Platform;
 using Avalonia.Layout;
 using Avalonia.Media;
 using KvindoCode.App.Views;
@@ -425,7 +426,7 @@ public sealed class SecretsWindow : Window
         {
             try
             {
-                var text = await TopLevel.GetTopLevel(this)!.Clipboard!.GetTextAsync();
+                var text = await TopLevel.GetTopLevel(this)!.Clipboard!.TryGetTextAsync();
                 if (string.IsNullOrEmpty(text)) { Warn("The clipboard has no text."); return; }
                 _value.Text = text;
                 Info($"{text.Length} characters read from the clipboard.");

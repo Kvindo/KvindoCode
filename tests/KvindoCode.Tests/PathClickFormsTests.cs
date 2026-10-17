@@ -57,15 +57,7 @@ public sealed class PathClickFormsTests : IDisposable
         }))
         : b.Text ?? "";
 
-    static void ClickAt(SelectableTextBlock host, int charIndex)
-    {
-        var layout = host.TextLayout!;
-        var rect = layout.HitTestTextPosition(charIndex);
-        var p = new Point(rect.X + Math.Max(1, rect.Width / 2), rect.Y + rect.Height / 2);
-        host.RaiseEvent(new PointerPressedEventArgs(host, new Pointer(0, PointerType.Mouse, true), host, p, 0,
-            PointerPointProperties.None, KeyModifiers.None));
-        Dispatcher.UIThread.RunJobs();
-    }
+    static void ClickAt(SelectableTextBlock host, int charIndex) => TestClicks.At(host, charIndex);
 
     [AvaloniaTheory]
     [InlineData("Собрал: `docs/report.xlsx` — резюме")]                       // backticks
