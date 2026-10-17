@@ -8,6 +8,8 @@ using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Layout;
 using Avalonia.Media;
+using Avalonia.Threading;
+using Avalonia.VisualTree;
 using Iciclecreek.Terminal;
 using KvindoCode.Core.Terminal;
 
@@ -79,7 +81,7 @@ public sealed class TerminalPaneView : UserControl
             MinWidth = 40,
             VerticalAlignment = VerticalAlignment.Center,
         };
-        ToolTip.SetTip(_name, "Name this terminal (Enter to apply). The name is kept in tmux, so it survives a restart.");
+        ToolTip.SetTip(_name, "Click to name this terminal (Enter applies it; see the tmux session name, which survives a restart).");
         _name.KeyDown += (_, e) =>
         {
             if (e.Key != Key.Enter) return;
@@ -119,9 +121,14 @@ public sealed class TerminalPaneView : UserControl
         Ui.BindBrush(_frame, Border.BackgroundProperty, "KvBg");
         Content = _frame;
 
-        // A click anywhere in the pane gives it the keyboard — that is how the human picks a terminal, and it is also
-        // what stops the grid from swallowing the click without doing anything.
-        AddHandler(PointerPressedEvent, (_, _) => FocusRequested?.Invoke(this), RoutingStrategies.Tunnel);
+        // A click in the pane gives the TERMINAL the keyboard — that is how the human picks one. Except on the name
+        // field: that focus request ran on the tunnel route and moved the keyboard back to the shell, so the field
+        // could be clicked but never typed into ("terminal names are not editable", reported 2026-10-17).
+        AddHandler(PointerPressedEvent, (_, e) =>
+        {
+            if (e.Source is Visual v && (v == _name || v.GetVisualAncestors().Contains(_name))) return;
+            FocusRequested?.Invoke(this);
+        }, RoutingStrategies.Tunnel);
     }
 
     /// <summary>
@@ -206,6 +213,17 @@ public sealed class TerminalPaneView : UserControl
     {
         _started = false;
         try { Terminal.Kill(); } catch { /* already gone */ }
+    }
+
+    /// <summary>
+    /// Start this pane over with a FRESH session, after its tmux session was killed.
+    /// </summary>
+    /// <remarks>The terminal control can launch again once its process has exited, so "restart the terminals" is a stop
+    /// plus a launch — no new control, no lost layout.</remarks>
+    public void Restart()
+    {
+        Stop();
+        Dispatcher.UIThread.Post(() => { if (VisualRoot is not null) Start(); }, DispatcherPriority.Loaded);
     }
 
     /// <summary>End this pane's tmux session; its process exits and the control reports it.</summary>

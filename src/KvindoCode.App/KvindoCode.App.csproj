@@ -5,6 +5,12 @@
     <AssemblyName>kvindocode</AssemblyName>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <AvaloniaUseCompiledBindingsByDefault>false</AvaloniaUseCompiledBindingsByDefault>
+    <!-- Repo metadata, for anyone who lands on the package or the project file while searching:
+         https://github.com/Kvindo/KvindoCode -->
+    <Description>Desktop AI coding agent: Avalonia/.NET app with git-worktree isolation per session, plan review, subagents, a real XTerm grid and an encrypted secret vault that masks credentials before they reach a model.</Description>
+    <PackageTags>ai coding agent;ai-agent;coding-assistant;desktop;avalonia;dotnet;csharp;llm;agent;terminal;xterm;git-worktree;secret-scanning;openai-compatible</PackageTags>
+    <RepositoryUrl>https://github.com/Kvindo/KvindoCode</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
     <BuiltInComInteropSupport>false</BuiltInComInteropSupport>
   </PropertyGroup>
   <ItemGroup>
