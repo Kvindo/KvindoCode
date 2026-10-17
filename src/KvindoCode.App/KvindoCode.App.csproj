@@ -21,6 +21,9 @@
     <PackageReference Include="Avalonia.Controls.DataGrid" Version="12.1.2" />
     <!-- A REAL terminal: XTerm.NET emulation + Porta.Pty, instead of hand-rendering tmux captures -->
     <PackageReference Include="Iciclecreek.Avalonia.Terminal" Version="4.1.0" />
+    <!-- The code editor: AvalonEdit's Avalonia 12 port, plus TextMate for real syntax highlighting -->
+    <PackageReference Include="Avalonia.AvaloniaEdit" Version="12.0.0" />
+    <PackageReference Include="AvaloniaEdit.TextMate" Version="12.0.0" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\KvindoCode.Core\KvindoCode.Core.csproj" />

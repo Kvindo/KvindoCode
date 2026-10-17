@@ -1130,6 +1130,7 @@ public partial class MainWindow : Window
         // timers running, so the app kept four tmux processes busy per tick behind the transcript (reported 2026-10-16:
         // "when i open terminal and click on session view breaks").
         CloseTerminals();
+        CloseCodeEditor();
         if (_contextMain != null) { Host.Children.Remove(_contextMain); _contextMain = null; }
         BottomColumn.IsVisible = true;
         if (_current != null) _current.Draft = Input.Text ?? "";
@@ -2107,6 +2108,43 @@ public partial class MainWindow : Window
 
     /// <summary>Where keystrokes go when the terminal grid is on screen.</summary>
     bool TerminalsVisible => _terminals is not null && Host.Children.Contains(_terminals);
+
+    // ================================================================== the file editor
+
+    CodeEditorView? _codeEditor;
+
+    /// <summary>Open the code editor for a project (tree + highlighting + file operations + autosave).</summary>
+    void OpenCodeEditor(string project)
+    {
+        if (_codeEditor is { } open && open.ProjectRoot == project) { CloseCodeEditor(); return; }   // the icon toggles
+        CloseCodeEditor();
+        CloseContextMain();
+        if (_terminals is not null) CloseTerminals();                 // one view in the main area at a time
+        _project = project;
+        foreach (var tv in Host.Children.OfType<TranscriptView>().ToList()) Host.Children.Remove(tv);
+        _codeEditor = new CodeEditorView(project, CloseCodeEditor, ShowInfo,
+            // "open in integrated terminal": the same grid, scoped to the folder you are looking at, with the same tmux
+            // persistence — a folder's session is named after the folder, so it comes back after a restart.
+            dir => OpenTerminals(dir));
+        Host.Children.Insert(0, _codeEditor);
+        BottomColumn.IsVisible = false;
+        EmptyState.IsVisible = false;
+        RebuildSidebar();
+    }
+
+    void CloseCodeEditor()
+    {
+        if (_codeEditor is null) return;
+        Host.Children.Remove(_codeEditor);
+        _codeEditor = null;
+        BottomColumn.IsVisible = true;
+        if (_current != null && !Host.Children.Contains(_current.Transcript))
+        {
+            Host.Children.Insert(0, _current.Transcript);
+            _current.Transcript.ScrollToEnd();
+        }
+        UpdateEmpty();
+    }
 
     /// <summary>
     /// The local scan flagged an image with something that looks like a credential. It is the only judge of pictures (no
@@ -3264,6 +3302,11 @@ public partial class MainWindow : Window
         ToolTip.SetTip(add, "New session in this project");
         add.Click += (_, _) => NewSession(path);
 
+        var files = new Button { Name = "FilesBtn", Classes = { "ghost" }, Content = Ui.Icon("IconBook", "KvMuted", 14), Padding = new Thickness(6), VerticalAlignment = VerticalAlignment.Center };
+        files.Tag = path;      // tests address it by project, like the terminal button
+        ToolTip.SetTip(files, $"Open the file editor for {Path.GetFileName(path.TrimEnd('/'))} (tree with search, syntax highlighting, autosave, file operations)");
+        files.Click += (_, _) => OpenCodeEditor(path);
+
         var terminals = new Button { Name = "TerminalBtn", Classes = { "ghost" }, Content = Ui.Icon("IconTerminal", "KvMuted", 14), Padding = new Thickness(6), VerticalAlignment = VerticalAlignment.Center };
         terminals.Tag = path;      // tests address the button by its project: several project rows carry the same name
         ToolTip.SetTip(terminals, $"Open the terminal grid for {Path.GetFileName(path.TrimEnd('/'))} (four terminals in a tmux session that outlives the app)");
@@ -3285,6 +3328,7 @@ public partial class MainWindow : Window
         var actions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 2, VerticalAlignment = VerticalAlignment.Center };
         actions.Children.Add(add);
         actions.Children.Add(terminals);
+        actions.Children.Add(files);
         var g = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto"), Margin = new Thickness(0, 6, 0, 0) };
         g.Children.Add(btn); Grid.SetColumn(actions, 1); g.Children.Add(actions);
         return g;
