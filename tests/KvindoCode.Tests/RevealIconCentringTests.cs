@@ -6,7 +6,6 @@ using Avalonia.Threading;
 using Avalonia.VisualTree;
 using KvindoCode.App.Views;
 using Xunit;
-using Xunit.Abstractions;
 
 namespace KvindoCode.Tests;
 

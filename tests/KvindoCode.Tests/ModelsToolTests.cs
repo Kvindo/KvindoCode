@@ -3,7 +3,6 @@ using KvindoCode.Core;
 using KvindoCode.Core.Agent;
 using KvindoCode.Core.Tools;
 using Xunit;
-using Xunit.Abstractions;
 
 namespace KvindoCode.Tests;
 

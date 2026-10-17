@@ -6,7 +6,6 @@ using System.Threading.Tasks;
 using KvindoCode.Core;
 using KvindoCode.Core.Telegram;
 using Xunit;
-using Xunit.Abstractions;
 
 namespace KvindoCode.Tests;
 

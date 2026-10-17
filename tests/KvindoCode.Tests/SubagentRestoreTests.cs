@@ -1,7 +1,6 @@
 using KvindoCode.Core;
 using KvindoCode.Core.Agent;
 using Xunit;
-using Xunit.Abstractions;
 
 namespace KvindoCode.Tests;
 

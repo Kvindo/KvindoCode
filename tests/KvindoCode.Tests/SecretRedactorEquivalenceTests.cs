@@ -1,6 +1,5 @@
 using KvindoCode.Core.Secrets;
 using Xunit;
-using Xunit.Abstractions;
 
 namespace KvindoCode.Tests;
 

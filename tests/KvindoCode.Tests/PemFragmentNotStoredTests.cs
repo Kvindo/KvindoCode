@@ -6,7 +6,6 @@ using KvindoCode.Core.Agent;
 using KvindoCode.Core.Llm;
 using KvindoCode.Core.Secrets;
 using Xunit;
-using Xunit.Abstractions;
 
 namespace KvindoCode.Tests;
 

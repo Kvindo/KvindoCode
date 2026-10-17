@@ -3,7 +3,6 @@ using Avalonia.Headless.XUnit;
 using Avalonia.Threading;
 using KvindoCode.App.Views;
 using Xunit;
-using Xunit.Abstractions;
 
 namespace KvindoCode.Tests;
 

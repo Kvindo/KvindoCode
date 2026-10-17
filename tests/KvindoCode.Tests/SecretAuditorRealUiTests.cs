@@ -30,7 +30,6 @@ using KvindoCode.Core.Agent;
 using KvindoCode.Core.Llm;
 using KvindoCode.Core.Secrets;
 using Xunit;
-using Xunit.Abstractions;
 
 namespace KvindoCode.Tests;
 
@@ -70,14 +69,14 @@ public sealed class SecretAuditorRealUiTests
             Window.KeyTextInput(text);
             Dispatcher.UIThread.RunJobs();
             Assert.Equal(text, Input.Text);
-            Window.KeyPress(Key.Return, RawInputModifiers.None);
-            Window.KeyRelease(Key.Return, RawInputModifiers.None);
+            Window.KeyPress(Key.Return, RawInputModifiers.None, PhysicalKey.Enter, null);
+            Window.KeyRelease(Key.Return, RawInputModifiers.None, PhysicalKey.Enter, null);
             Dispatcher.UIThread.RunJobs();
         }
 
         public void Click(Control c)
         {
-            TopLevel topLevel = (TopLevel)c.GetVisualRoot();
+            TopLevel topLevel = TopLevel.GetTopLevel(c)!;
             Point point = c.TranslatePoint(new Point(c.Bounds.Width / 2.0, c.Bounds.Height / 2.0), topLevel) ?? throw new InvalidOperationException("control is not laid out");
             topLevel.MouseMove(point);
             topLevel.MouseDown(point, MouseButton.Left);
@@ -1725,7 +1724,7 @@ public sealed class SecretAuditorRealUiTests
         Dispatcher.UIThread.RunJobs();
 
         Button dismiss = sidebar.GetVisualDescendants().OfType<Button>().First(b => b.Name == "AttentionRemove");
-        TopLevel top = (TopLevel)dismiss.GetVisualRoot();
+        TopLevel top = TopLevel.GetTopLevel(dismiss)!;
         // the ✕ sits at the row's right edge: its centre must be inside the window, otherwise the click lands on the frame
         Point centre = dismiss.TranslatePoint(new Point(dismiss.Bounds.Width / 2, dismiss.Bounds.Height / 2), top).Value;
         Assert.InRange(centre.X, 1, top.Bounds.Width - 2);

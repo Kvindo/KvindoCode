@@ -11,7 +11,6 @@ using Avalonia.Platform;
 using Avalonia.Threading;
 using KvindoCode.App;
 using Xunit;
-using Xunit.Abstractions;
 
 namespace KvindoCode.Tests;
 
