@@ -57,7 +57,16 @@
 
     <!-- ============ text ============ -->
     <Style Selector="TextBlock"><Setter Property="Foreground" Value="{DynamicResource KvText}"/></Style>
-    <Style Selector="SelectableTextBlock"><Setter Property="Foreground" Value="{DynamicResource KvText}"/></Style>
+    <!-- Avalonia 12 does NOT hit-test a control whose Background is null: measured, a SelectableTextBlock with no
+         background is missed by the hit test at a point inside its own bounds, while the same control with
+         Background="Transparent" is found. Every path and URL in the transcript is a click target on one of these, so
+         without this they all stop being clickable — silently, since the text still renders. A local Background (a code
+         block) still wins over this setter. -->
+    <Style Selector="SelectableTextBlock">
+      <Setter Property="Foreground" Value="{DynamicResource KvText}"/>
+      <Setter Property="Background" Value="Transparent"/>
+    </Style>
+    <Style Selector="TextBlock"><Setter Property="Background" Value="Transparent"/></Style>
     <Style Selector="TextBlock.muted"><Setter Property="Foreground" Value="{DynamicResource KvMuted}"/></Style>
     <Style Selector="TextBlock.accent"><Setter Property="Foreground" Value="{DynamicResource KvAccent}"/></Style>
     <Style Selector="TextBlock.ok"><Setter Property="Foreground" Value="{DynamicResource KvOk}"/></Style>

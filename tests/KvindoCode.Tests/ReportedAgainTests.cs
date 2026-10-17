@@ -113,15 +113,8 @@ public sealed class ReportedAgainUiTests
         Assert.Equal(script, opened[0]);
     }
 
-    static void ClickChar(SelectableTextBlock host, int charIndex)
-    {
-        var layout = host.TextLayout!;
-        var rect = layout.HitTestTextPosition(charIndex);
-        var p = new Point(rect.X + Math.Max(1, rect.Width / 2), rect.Y + rect.Height / 2);
-        host.RaiseEvent(new PointerPressedEventArgs(host, new Pointer(0, PointerType.Mouse, true), host, p, 0,
-            PointerPointProperties.None, KeyModifiers.None));
-        Dispatcher.UIThread.RunJobs();
-    }
+    /// <summary>Click a character through the window's own mouse input (see <see cref="TestClicks"/>).</summary>
+    static void ClickChar(SelectableTextBlock host, int charIndex) => TestClicks.At(host, charIndex);
 
     // ---------------------------------------------------------------- (7) selection across bullets
 
@@ -162,18 +155,17 @@ public sealed class ReportedAgainUiTests
         var file = System.IO.Path.Combine(dir, "notes.md");
         System.IO.File.WriteAllText(file, "x");
 
-        var host = new SelectableTextBlock { Text = $"see {file} here", Width = 900, Height = 60 };
+        // Background=Transparent is not cosmetic: Avalonia 12 does not hit-test a control with a null Background, and the
+        // app sets this on every text block for that reason (App.axaml).
+        var host = new SelectableTextBlock { Text = $"see {file} here", Width = 900, Height = 60, Background = Avalonia.Media.Brushes.Transparent };
         var w = new Window { Width = 1000, Height = 300, Content = host };
         w.Show();
         Dispatcher.UIThread.RunJobs();
         PathLinks.Attach(host, host.Text!, p => System.IO.File.Exists(p) ? p : null, (_, _) => { });
         Dispatcher.UIThread.RunJobs();
 
-        var layout = host.TextLayout!;
-        var rect = layout.HitTestTextPosition(host.Text!.IndexOf(file, StringComparison.Ordinal) + 2);
-        var p = new Point(rect.X + Math.Max(1, rect.Width / 2), rect.Y + rect.Height / 2);
-        host.RaiseEvent(new PointerEventArgs(InputElement.PointerMovedEvent, host, new Pointer(0, PointerType.Mouse, true), host, p, 0, PointerPointProperties.None, KeyModifiers.None));
-        Dispatcher.UIThread.RunJobs();
+        // ...and the pointer goes through the window: a hand-built PointerEventArgs no longer carries its position.
+        TestClicks.MoveTo(host, host.Text!.IndexOf(file, StringComparison.Ordinal) + 2);
 
         Assert.NotNull(host.Cursor);
     }

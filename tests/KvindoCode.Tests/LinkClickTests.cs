@@ -1,6 +1,7 @@
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.Documents;
+using Avalonia.Headless;
 using Avalonia.Headless.XUnit;
 using Avalonia.Input;
 using Avalonia.Threading;
@@ -22,15 +23,7 @@ namespace KvindoCode.Tests;
 public sealed class LinkClickTests
 {
     /// <summary>Press the pointer on the character at <paramref name="charIndex"/> of the control's own text.</summary>
-    static void ClickChar(SelectableTextBlock host, int charIndex)
-    {
-        var layout = host.TextLayout!;                       // public on SelectableTextBlock (no TextPresenter inside it)
-        var rect = layout.HitTestTextPosition(charIndex);
-        var p = new Point(rect.X + Math.Max(1, rect.Width / 2), rect.Y + rect.Height / 2);
-        host.RaiseEvent(new PointerPressedEventArgs(host, new Pointer(0, PointerType.Mouse, true), host, p, 0,
-            PointerPointProperties.None, KeyModifiers.None));
-        Dispatcher.UIThread.RunJobs();
-    }
+    static void ClickChar(SelectableTextBlock host, int charIndex) => TestClicks.At(host, charIndex);
 
     static SelectableTextBlock Shown(string text)
     {
