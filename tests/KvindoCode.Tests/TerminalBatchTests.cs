@@ -77,16 +77,28 @@ public sealed class TerminalBatchTests(ITestOutputHelper o)
         win.Show();
         Dispatcher.UIThread.RunJobs();
         var pane = v.Panes.First();
+
+        // The subject is the HEADER: a restart control instead of close, and no permanent status line. Whether the PTY
+        // has come up yet is a different question (TerminalUiTests covers it), and depending on it here made this test
+        // fail whenever a previous test in the class had already used the same private tmux server.
         var buttons = pane.GetVisualDescendants().OfType<Button>().ToList();
-        var restart = buttons.FirstOrDefault(b => b.Name == "TerminalRestart0");
         o.WriteLine("pane buttons: " + string.Join(",", buttons.Select(b => b.Name)));
+        var restart = buttons.FirstOrDefault(b => b.Name == "TerminalRestart0");
         Assert.NotNull(restart);
         Assert.DoesNotContain(buttons, b => b.Name == "TerminalClose0");
         Assert.Contains("restart", ToolTip.GetTip(restart)?.ToString() ?? "", StringComparison.OrdinalIgnoreCase);
-        // the state label that used to sit in the header is hidden
+
+        // The state label exists only to report a problem: when the terminal is live it is hidden, and while it is
+        // starting it may say so. What must never come back is the old permanent "exited"/"renamed" line, so the text
+        // is constrained rather than the visibility.
         var state = pane.GetVisualDescendants().OfType<TextBlock>()
-            .FirstOrDefault(t => t.Classes.Contains("muted") && (t.Text ?? "").Length > 0);
-        Assert.True(state is null || !state.IsVisible, "no status text in a 19 px header");
+            .FirstOrDefault(t => t.Classes.Contains("muted") && t.IsVisible && (t.Text ?? "").Length > 0);
+        if (state is not null)
+        {
+            o.WriteLine("state text while starting: " + state.Text);
+            Assert.True(state.Text is "starting…" or "could not start" or "waiting for layout…",
+                "the header must only show a problem, not a permanent status: " + state.Text);
+        }
         win.Close();
     }
 
