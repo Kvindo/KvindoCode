@@ -33,7 +33,7 @@ public sealed class AuditorPromptTests(ITestOutputHelper o)
         Assert.Contains("vendor key format", p);                    // format-anchored shapes stay reportable
         Assert.Contains("pem/openssh private key", p);
         Assert.Contains("jwt", p);
-        Assert.Contains("scheme://user:password@host", p);
+        Assert.Contains("scheme://<user>:<password>@host", p);   // the FORM, not a string the detector reads as a value
         // the recall guard: a value under a secret-named key is reported even when its shape is unrecognised
         Assert.Contains("even when its shape is unfamiliar", p);
     }
