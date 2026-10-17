@@ -100,7 +100,7 @@
     <Grid Grid.Column="1" ColumnDefinitions="*,Auto,0" x:Name="MainArea">
     <Grid Grid.Column="0" RowDefinitions="Auto,*,Auto">
       <Border Grid.Row="0" Classes="edge" Height="52" BorderThickness="0,0,0,1" x:Name="TopBar" Padding="22,0,10,0">
-        <Grid ColumnDefinitions="*,Auto,Auto,Auto,Auto">
+        <Grid ColumnDefinitions="*,Auto,Auto,Auto,Auto,Auto">
           <!-- One control per column: sharing a column is what makes two texts draw over each other. -->
           <Grid ColumnDefinitions="*,Auto,Auto,Auto,Auto" VerticalAlignment="Center" Margin="0,0,12,0">
             <!-- The title lives in a *-column INSIDE this group so it truncates instead of overlapping: with an Auto
@@ -149,7 +149,8 @@
           <Button Grid.Column="3" x:Name="ContextBtn" Classes="ghost" ToolTip.Tip="Project context: instructions, skills, memory, hooks">
             <StackPanel Orientation="Horizontal" Spacing="8" x:Name="ContextContent"/>
           </Button>
-          <Button Grid.Column="4" x:Name="PaneBtn" Classes="ghost" ToolTip.Tip="Side panel: plan, tool output, files"/>
+          <Button Grid.Column="4" x:Name="NotesBtn" Classes="ghost" ToolTip.Tip="This project's notes: one markdown file for the whole project, saved as you type (opens in the side panel)"/>
+          <Button Grid.Column="5" x:Name="PaneBtn" Classes="ghost" ToolTip.Tip="Side panel: plan, tool output, files"/>
         </Grid>
       </Border>
 
