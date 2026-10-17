@@ -66,6 +66,13 @@ public sealed class SessionWorkspace
 
     public int RepoCount { get { lock (_reposGate) return _repos.Count; } }
 
+    /// <summary>
+    /// Git's message when this session's worktree could not initialise its submodules, else null.
+    /// </summary>
+    /// <remarks>The session reports this once, with the command to run, instead of leaving the human to discover empty
+    /// submodule directories later (2026-10-17).</remarks>
+    public string? SubmoduleError { get; internal set; }
+
     /// <summary>Record that <paramref name="repoRoot"/>'s worktree for this session is at <paramref name="sessionPath"/>.</summary>
     public RepoLink NoteRepo(string repoRoot, string sessionPath, string branch)
     {
@@ -130,7 +137,16 @@ public static class Workspaces
             try
             {
                 if (File.Exists(Path.Combine(dir, ".git")))                 // an existing worktree: adopt it
-                    return new SessionWorkspace(root, dir, branch, true);
+                {
+                    // ADOPTION is when submodules went missing: they were initialised only when a worktree was CREATED,
+                    // so any tree whose first init failed (no network, auth, a .gitmodules added later on the branch)
+                    // stayed broken for ever, and every later session inherited it — including after every restart,
+                    // which is the adoption path. `git submodule update --init --recursive` is a fast no-op once they
+                    // are there, so paying it on adoption costs nothing and repairs the tree.
+                    var adopted = new SessionWorkspace(root, dir, branch, true);
+                    if (Submodules(dir) is { } problem) adopted.SubmoduleError = problem;
+                    return adopted;
+                }
 
                 Directory.CreateDirectory(Path.GetDirectoryName(dir)!);
                 var branchExists = Git(root, "rev-parse", "--verify", "--quiet", "refs/heads/" + branch).code == 0;
@@ -139,9 +155,10 @@ public static class Workspaces
                     : Git(root, ct, "worktree", "add", "-b", branch, dir, "HEAD");
                 if (add.code != 0) return SessionWorkspace.Shared(root);
 
-                Submodules(dir);
+                var created = new SessionWorkspace(root, dir, branch, true);
+                if (Submodules(dir) is { } createdProblem) created.SubmoduleError = createdProblem;
                 RunSetupScript(root, dir, settings.WorktreeSetupScript, ct);
-                return new SessionWorkspace(root, dir, branch, true);
+                return created;
             }
             catch { return SessionWorkspace.Shared(root); }
         }
@@ -227,7 +244,7 @@ public static class Workspaces
                                 "not edit its shared checkout.";
                         return null;
                     }
-                    Submodules(sessionPath);
+                    if (Submodules(sessionPath) is { } problem) ws.SubmoduleError = problem;
                 }
                 return ws.NoteRepo(repoRoot, sessionPath, branch);
             }
@@ -518,10 +535,30 @@ public static class Workspaces
         return int.TryParse(r.stdout.Trim(), out var n) && n > 0;
     }
 
-    static void Submodules(string dir)
+    /// <summary>
+    /// Bring a worktree's submodules in, and report a failure instead of losing it.
+    /// </summary>
+    /// <returns>null when there was nothing to do or it worked; git's own message when it did not.</returns>
+    /// <remarks>
+    /// Silent before this: the exit code was ignored and the caller's catch swallowed exceptions, so a worktree whose
+    /// submodules never initialised looked fine and the session only discovered it when it opened a file that was not
+    /// there ("sessions complain about missing submodules", 2026-10-17). The timeout is the whole call's (60 s in
+    /// <see cref="Git(string, CancellationToken, string[])"/>), so a credential prompt cannot hang session setup; the
+    /// message is what the human needs to run it by hand.
+    /// </remarks>
+    static string? Submodules(string dir)
     {
-        if (!File.Exists(Path.Combine(dir, ".gitmodules"))) return;
-        Git(dir, "submodule", "update", "--init", "--recursive");
+        if (!File.Exists(Path.Combine(dir, ".gitmodules"))) return null;
+        // git refuses `file://` and plain-path submodule transport unless it is allowed per call (CVE-2022-39253, and
+        // the default is right for repositories you did not write). A .gitmodules whose URL is a relative path or a
+        // file:// URL is exactly what a session's own repository can contain, and without this its submodules could
+        // never be initialised at all — the reported "missing submodules" for such a repo had nothing to do with
+        // timing. The allowance is scoped to this one command, not to the user's global config.
+        var r = Git(dir, "-c", "protocol.file.allow=always", "submodule", "update", "--init", "--recursive");
+        if (r.code == 0) return null;
+        var detail = (r.stderr + " " + r.stdout).Trim();
+        if (detail.Length > 400) detail = detail[..400] + "…";
+        return detail.Length == 0 ? $"git exited with {r.code}" : detail;
     }
 
     static void RunSetupScript(string root, string dir, string script, CancellationToken ct = default)

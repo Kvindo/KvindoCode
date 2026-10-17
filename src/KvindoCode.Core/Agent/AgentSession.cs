@@ -778,6 +778,8 @@ public sealed class AgentSession : IDisposable
     /// thread — never the constructor, which runs on the UI thread when a session is opened. A subagent passes its
     /// parent's worktree so it shares one tree with the parent instead of forking another.
     /// </summary>
+    bool _submoduleNoticeShown;
+
     async Task EnsureWorkspaceAsync(CancellationToken ct)
     {
         if (_workspaceReady) return;
@@ -801,6 +803,15 @@ public sealed class AgentSession : IDisposable
             _ctx.Isolated = ws.Isolated;
             _ctx.Cwd = ws.WorkDir;
             Emit(new WorkspaceReadyEvent(ws));
+            // A worktree whose submodules did not initialise is not a warning to bury: the session would spend the turn
+            // failing to open files that are supposed to be there. Say it once, with the command that fixes it.
+            if (ws.SubmoduleError is { Length: > 0 } subError && !_submoduleNoticeShown)
+            {
+                _submoduleNoticeShown = true;
+                Emit(new NoticeEvent("This session's work tree could not initialise its submodules, so files inside them " +
+                    "will appear missing: " + subError + "\n\nFix it in that work tree with: git submodule update --init --recursive" +
+                    " (in " + ws.WorkDir + ").", true));
+            }
         }
         catch (OperationCanceledException) { throw; }   // a Stop DURING setup is a stop, not a reason to fall back
         catch (Exception e)
