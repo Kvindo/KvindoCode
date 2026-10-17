@@ -364,6 +364,42 @@ public partial class MainWindow : Window
     {
         _lastAlive = _lastAliveAtStartup;
         await CheckInterruptedTurns();
+        SweepFinishedWorktrees();
+    }
+
+    /// <summary>
+    /// Remove the worktrees of sessions that are provably finished (branch merged into the project's HEAD, nothing
+    /// uncommitted, not open now).
+    /// </summary>
+    /// <remarks>
+    /// They accumulated until the disk was full — 34 GB of build output across ~25 session directories on 2026-10-17 —
+    /// because only deleting a session by hand ever removed one. Runs once per project, in the background, and reports
+    /// what it removed instead of doing it silently; an unmerged or dirty tree is kept and the reason logged.
+    /// </remarks>
+    void SweepFinishedWorktrees()
+    {
+        try
+        {
+            var live = _live.Keys.ToHashSet(StringComparer.Ordinal);
+            var projects = _settings.Projects.Concat(_all.Select(a => a.Cwd)).Where(p => p.Length > 0).Distinct().ToList();
+            _ = Task.Run(() =>
+            {
+                var removed = new List<string>();
+                foreach (var project in projects)
+                {
+                    try
+                    {
+                        removed.AddRange(Workspaces.SweepMerged(project, live, line => UiTrace.Line("worktree sweep: " + line)));
+                        // ...and the regenerable part of the ones that stay: build output is what actually fills the disk.
+                        Workspaces.PruneBuildOutput(project, live, line => UiTrace.Line("worktree prune: " + line));
+                    }
+                    catch (Exception e) { UiTrace.Line("worktree sweep failed for " + project + ": " + e.Message); }
+                }
+                if (removed.Count > 0)
+                    Dispatcher.UIThread.Post(() => ShowInfo($"Removed {removed.Count} finished session worktree(s) whose branches were already merged (they would otherwise keep filling the disk). The branches themselves are untouched."));
+            });
+        }
+        catch (Exception e) { UiTrace.Line("worktree sweep skipped: " + e.Message); }
     }
 
     /// <summary>Captured in OnOpenedAsync BEFORE this run's timestamp is written.</summary>

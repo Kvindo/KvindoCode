@@ -1608,6 +1608,14 @@ public sealed class SecretAuditorRealUiTests
 
         app.TypeAndSend("hello");
         await app.WaitForTurnAsync();
+        // WaitForTurnAsync returns when Running goes false, which can be a moment before the window has handled
+        // TurnEndEvent — so wait for the deferred entry rather than sampling once (this failed only in a full run).
+        var waited = System.Diagnostics.Stopwatch.StartNew();
+        while (waited.ElapsedMilliseconds < 5000 && !settings.AttentionPending.Contains(id) && !settings.AttentionSessions.Contains(id))
+        {
+            Dispatcher.UIThread.RunJobs();
+            await Task.Delay(25);
+        }
         Assert.Contains(id, (IEnumerable<string>)settings.AttentionPending);
 
         Invoke(app.Window, "DismissAttention", id);

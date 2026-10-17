@@ -94,7 +94,7 @@ public sealed class TerminalPaneView : UserControl
 
         // (asked 2026-10-17: "this line is not needed") the state label only ever said "exited" or "renamed"; the pane
         // shows an exited shell by itself, and the tooltip carries the failure message.
-        _state = new TextBlock { Classes = { "muted" }, FontSize = 11, IsVisible = false, VerticalAlignment = VerticalAlignment.Center };
+        _state = new TextBlock { Classes = { "muted" }, FontSize = 10.5, VerticalAlignment = VerticalAlignment.Center };
 
         var close = new Button
         {
@@ -153,22 +153,35 @@ public sealed class TerminalPaneView : UserControl
         Attempt(0);
     }
 
+    /// <summary>
+    /// Try to launch, and keep trying while the pane is on screen.
+    /// </summary>
+    /// <remarks>
+    /// A fixed number of retries was wrong: <see cref="TerminalControl.LaunchProcess"/> needs the control to be TEMPLATED,
+    /// and a control that has not been measured yet has no template. That happens whenever the window's layout is stale
+    /// (a resize, a hidden tab, the long shared-window run the UI tests use), and the old code gave up after 40 frames
+    /// and left a pane that looked alive with no process behind it — the grid then showed nothing and no tmux server was
+    /// ever created ("terminal grid comes up empty", 2026-10-17). So: retry until it works or the pane leaves the tree,
+    /// and after a few seconds SAY so instead of staying silent.
+    /// </remarks>
     void Attempt(int tries)
     {
+        if (VisualRoot is null) return;                     // the grid is gone: stop retrying
         try
         {
             Terminal.ApplyTemplate();
-            if (Terminal.Template is null && tries < 40)
+            // Give the control a real size: LaunchProcess needs a laid-out surface for the PTY's window size, and a
+            // control that has not been measured yet reports nothing. Measuring here is cheap and idempotent.
+            if (Terminal.Bounds.Width < 1 || Terminal.Bounds.Height < 1)
             {
-                Avalonia.Threading.Dispatcher.UIThread.Post(() => Attempt(tries + 1), Avalonia.Threading.DispatcherPriority.Loaded);
-                return;
+                var w = Bounds.Width > 1 ? Bounds.Width : 400;
+                var h = Bounds.Height > 1 ? Bounds.Height : 300;
+                Terminal.Measure(new Size(w, h));
+                Terminal.Arrange(new Rect(0, 0, w, h));
             }
             // The history FIRST: attaching to an existing tmux session repaints only the visible screen, so without this
-            // a restarted app showed an empty terminal (item 5, 2026-10-17). Read from the tmux server before the client
-            // attaches, and written straight into the emulator's buffer — nothing touches the disk.
-            // Bounded (5 s inside the backend) and only when a session already exists, so this can never hold up the
-            // launch: an unbounded synchronous tmux call here is what made the grid come up empty when a tmux server was
-            // wedged (2026-10-17).
+            // a restarted app showed an empty terminal. Bounded inside the backend, and only when the session already
+            // exists, so it can never hold up the launch.
             var history = _backend.History(_project, Index);
             Terminal.LaunchProcess();
             if (history.Length > 0)
@@ -176,27 +189,26 @@ public sealed class TerminalPaneView : UserControl
                 Terminal.Terminal.Write(history.TrimEnd((char)10) + "\r\n");
                 Terminal.Terminal.ScrollToBottom();
             }
-            SetState("");
+            if (Terminal.IsLive) { SetState(""); return; }
+            if (tries == 30) SetState("starting…");
+            Retry(tries);
         }
         catch (Exception e)
         {
-            if (tries < 40)
-            {
-                Avalonia.Threading.Dispatcher.UIThread.Post(() => Attempt(tries + 1), Avalonia.Threading.DispatcherPriority.Loaded);
-                return;
-            }
-            SetState("could not start");
-            ToolTip.SetTip(_state, e.Message);
-            return;
+            if (tries == 30) { SetState("could not start"); ToolTip.SetTip(_state, e.Message); }
+            Retry(tries);
         }
-        // A launch that produced no process is a failure worth retrying, not a pane that looks alive and does nothing.
-        if (!Terminal.IsLive && tries < 40)
-            Avalonia.Threading.Dispatcher.UIThread.Post(() => Attempt(tries + 1), Avalonia.Threading.DispatcherPriority.Background);
+
+        void Retry(int n) =>
+            Avalonia.Threading.Dispatcher.UIThread.Post(() => Attempt(n + 1),
+                n < 5 ? Avalonia.Threading.DispatcherPriority.Loaded : Avalonia.Threading.DispatcherPriority.Background);
     }
 
+    /// <summary>Show a short status in the header — empty hides it (the normal case: a working terminal needs no label).</summary>
     void SetState(string text)
     {
         if (_state.Text != text) _state.Text = text;
+        _state.IsVisible = text.Length > 0;
     }
 
     void CommitName()

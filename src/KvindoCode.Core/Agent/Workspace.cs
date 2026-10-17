@@ -270,6 +270,108 @@ public static class Workspaces
     }
 
     /// <summary>
+    /// Delete regenerable BUILD OUTPUT inside a worktree (<c>bin</c>, <c>obj</c>, <c>node_modules</c>, <c>.venv</c>,
+    /// <c>target</c>) — never source, never a commit.
+    /// </summary>
+    /// <remarks>
+    /// This is what actually filled the disk on 2026-10-17: 34 GB across ~25 session worktrees, almost all of it build
+    /// output from test and build runs. It is safe to delete at any time (the next build recreates it), and it does not
+    /// touch the working tree's state. Called for worktrees that are NOT open, so nothing a session is using goes away.
+    /// </remarks>
+    /// <returns>Bytes freed (approximately: the sizes are measured before deletion).</returns>
+    public static long PruneBuildOutput(string root, IReadOnlySet<string> liveSessionIds, Action<string>? log = null)
+    {
+        long freed = 0;
+        root = Path.GetFullPath(root);
+        var parent = Path.GetDirectoryName(DirFor(root, "x"))!;
+        if (!Directory.Exists(parent)) return 0;
+        var names = new HashSet<string>(StringComparer.Ordinal) { "bin", "obj", "node_modules", ".venv", "target" };
+        foreach (var dir in Directory.GetDirectories(parent))
+        {
+            if (liveSessionIds.Contains(Path.GetFileName(dir))) continue;          // in use: leave it alone
+            foreach (var candidate in EnumerateNamed(dir, names, depth: 0))
+            {
+                try
+                {
+                    var size = DirectorySize(candidate);
+                    Directory.Delete(candidate, recursive: true);
+                    freed += size;
+                }
+                catch (Exception e) { log?.Invoke($"could not prune {candidate}: {e.Message}"); }
+            }
+        }
+        if (freed > 0) log?.Invoke($"pruned {freed / (1024 * 1024)} MB of build output from idle session worktrees");
+        return freed;
+
+        // build output sits at the repo root or one level down (a container-of-repos mirror), never deeper in practice
+        static IEnumerable<string> EnumerateNamed(string dir, HashSet<string> names, int depth)
+        {
+            if (depth > 2) yield break;
+            string[] subs;
+            try { subs = Directory.GetDirectories(dir); } catch { yield break; }
+            foreach (var sub in subs)
+            {
+                var name = Path.GetFileName(sub);
+                if (names.Contains(name)) { yield return sub; continue; }
+                if (name is ".git" or ".kv-scratch") continue;
+                foreach (var deeper in EnumerateNamed(sub, names, depth + 1)) yield return deeper;
+            }
+        }
+
+        static long DirectorySize(string dir)
+        {
+            long total = 0;
+            try
+            {
+                foreach (var f in Directory.EnumerateFiles(dir, "*", SearchOption.AllDirectories))
+                    try { total += new FileInfo(f).Length; } catch { }
+            }
+            catch { }
+            return total;
+        }
+    }
+
+    /// <summary>
+    /// Delete every session worktree that is provably finished: merged into the project's HEAD, clean, and not open.
+    /// </summary>
+    /// <remarks>
+    /// Worktrees accumulated until the disk was full (34 GB of build output across ~25 session directories, 2026-10-17),
+    /// because nothing ever removed one except deleting the session by hand. The safety rules are the SAME as
+    /// <see cref="Forget"/>'s — an unmerged branch is kept, a dirty tree is kept — so this only deletes what could not
+    /// lose work: a branch whose commits are all in HEAD, with nothing uncommitted.
+    ///
+    /// "Not open" is the caller's knowledge: it passes the ids of the sessions that are live in this window.
+    /// </remarks>
+    /// <returns>The session ids whose worktrees were removed.</returns>
+    public static List<string> SweepMerged(string root, IReadOnlySet<string> liveSessionIds, Action<string>? log = null)
+    {
+        var removed = new List<string>();
+        root = Path.GetFullPath(root);
+        var parent = Path.GetDirectoryName(DirFor(root, "x"))!;
+        if (!Directory.Exists(parent)) return removed;
+        foreach (var dir in Directory.GetDirectories(parent))
+        {
+            var id = Path.GetFileName(dir);
+            if (id.Length == 0 || liveSessionIds.Contains(id)) continue;
+            if (!ValidRef(id)) continue;                       // not one of ours
+            try
+            {
+                if (Forget(root, id, out var reason))
+                {
+                    removed.Add(id);
+                    log?.Invoke($"Removed the worktree of session {id} (branch merged into HEAD, no uncommitted changes).");
+                }
+                else if (reason.Length > 0)
+                {
+                    log?.Invoke($"Kept the worktree of session {id}: {reason}.");
+                }
+            }
+            catch (Exception e) { log?.Invoke($"Kept the worktree of session {id}: {e.Message}"); }
+        }
+        return removed;
+    }
+
+    /// <summary>
     /// Remove a deleted session's worktree(s). Refuses while one is dirty or its branch is ahead of the project
     /// (uncommitted or unmerged work must never be thrown away); a BRANCH IS NEVER DELETED, so the user can still merge it.
     /// Returns false with a <paramref name="reason"/> the caller can show.
