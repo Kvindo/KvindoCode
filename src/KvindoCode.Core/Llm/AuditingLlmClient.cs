@@ -262,8 +262,16 @@ public sealed class AuditingLlmClient : ILlmClient
         // not be turned into a name is an error, not a licence to send it.
         if (names.Count == 0 && !anyKnown) return await _inner.StreamAsync(request, callbacks, ct);
         if (names.Count == 0)
-            return AuditUnavailable("A stored secret appears in this request but could not be identified for masking, " +
-                                    "so the request was not sent.");
+        {
+            // Same last resort as below: the vault says something is here, but the per-name list could not be built
+            // (the value reached the text in a spelling the name loop does not produce). Mask every spelling instead of
+            // refusing — refusing would repeat on every later turn for ever.
+            var rescued = RedactEverySpelling(request, redactor);
+            if (redactor.Contains(string.Join("\n", EveryOutboundString(rescued).Select(SecretPlaceholders.StripMarkers))))
+                return AuditUnavailable("A stored secret appears in this request but could not be masked, so the request was not sent.");
+            _onNotice?.Invoke("A stored secret appears in this request; it was masked with its placeholder in every spelling the vault knows.");
+            return await _inner.StreamAsync(rescued, callbacks, ct);
+        }
 
         // Said once per value: a secret the vault already holds is masked silently on every later request.
         if (newlyStored.Count > 0)
@@ -277,7 +285,28 @@ public sealed class AuditingLlmClient : ILlmClient
         // (the word "audited" inside a generated name), which is a name, not a leaked value. Stripping markers keeps the
         // check about values only, so a correctly masked request can never be refused.
         if (redactor.Contains(string.Join("\n", EveryOutboundString(protectedRequest).Select(SecretPlaceholders.StripMarkers))))
-            return AuditUnavailable("A secret value could not be reliably masked, so the request was not sent.");
+        {
+            // LAST RESORT before refusing. The check above recognises every spelling the redactor knows (including the
+            // JSON-escaped one), while the masking that produced this request replaces by (name, value) pairs. When the
+            // two disagree the request can never be sent — and because the offending text lives in the HISTORY, the
+            // session fails EVERY later turn ("The local secret auditor could not verify this request", reported by two
+            // sessions on 2026-10-17, one permanently stuck). So: mask every registered spelling, verify again, and only
+            // refuse if something is still visible.
+            var rescue = RedactEverySpelling(protectedRequest, redactor);
+            if (redactor.Contains(string.Join("\n", EveryOutboundString(rescue).Select(SecretPlaceholders.StripMarkers))))
+            {
+                // Name the entry (never the value): without this the message was undiagnosable and the session simply
+                // dead-ended (reported 2026-10-17).
+                var visible = targets.Where(t => t.Value.Length > 0 &&
+                    EveryOutboundString(rescue).Any(piece => piece.Contains(t.Value, StringComparison.Ordinal)))
+                    .Select(t => t.Name).Distinct().Take(5).ToList();
+                return AuditUnavailable("A secret value could not be reliably masked, so the request was not sent." +
+                    (visible.Count > 0 ? " Still visible: " + string.Join(", ", visible) + "." : ""));
+            }
+            _onNotice?.Invoke("A stored secret was still visible after the normal masking; it was masked with its " +
+                              "placeholder in every spelling the vault knows, and the request was sent. Nothing left the machine in plaintext.");
+            return await _inner.StreamAsync(rescue, callbacks, ct);
+        }
         return await _inner.StreamAsync(protectedRequest, callbacks, ct);
     }
 
@@ -420,6 +449,25 @@ public sealed class AuditingLlmClient : ILlmClient
     /// 552 locked vault reads per request (one per message, each re-decrypting the whole vault) — measured 119 ms,
     /// against ~10 ms when hoisted (2026-10-11).</param>
     /// <param name="redactor">The request's masker, reused for every tool call instead of rebuilt for each one.</param>
+    /// <summary>Mask every spelling of every registered value, in every outbound string of a request.</summary>
+    static LlmRequest RedactEverySpelling(LlmRequest r, SecretRedactor redactor)
+    {
+        var msgs = r.Messages.Select(m => new ChatMessage
+        {
+            Role = m.Role,
+            Content = redactor.RedactAll(m.Content),
+            Reasoning = redactor.RedactAll(m.Reasoning),
+            ToolCalls = m.ToolCalls?.Select(c => new ToolCall { Id = c.Id, Name = c.Name, Arguments = redactor.RedactAll(c.Arguments) }).ToList(),
+            ToolCallId = m.ToolCallId, IsError = m.IsError, IsSummary = m.IsSummary, IsNotification = m.IsNotification, IsInternal = m.IsInternal,
+            Model = m.Model, Ts = m.Ts, DurationMs = m.DurationMs, Images = m.Images?.ToList(),
+        }).ToList();
+        return new LlmRequest
+        {
+            SessionId = r.SessionId, AuditSecrets = r.AuditSecrets, Model = r.Model, System = redactor.RedactAll(r.System),
+            Messages = msgs, Tools = r.Tools, MaxTokens = r.MaxTokens, ReasoningEffort = r.ReasoningEffort,
+        };
+    }
+
     LlmRequest ProtectRequest(LlmRequest r, IReadOnlyList<(string Name, string Value)> targets, SecretRedactor redactor)
     {
         var msgs = r.Messages.Select(m => new ChatMessage

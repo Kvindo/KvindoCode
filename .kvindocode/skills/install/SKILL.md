@@ -50,6 +50,17 @@ git status --short                          # must be empty
 bash tools/release.sh <version>
 ```
 
+**Install means install AND release.** The user's standing rule (2026-10-17): "when you install you should also do a
+release". So an install is two steps, in this order, and the release is not optional:
+
+```bash
+bash tools/release.sh <date>      # 1. publish: all four RIDs, notes, GitHub release
+bash install.sh --from-release    # 2. install WHAT WAS RELEASED (not a local build — that is how the two drift)
+```
+
+A local `bash install.sh` is only for a build the user asked to test, and it must then be followed by the release +
+`--from-release` install so the machine runs exactly the published binaries.
+
 **When to cut one.** After any change a user would notice reaches `master` (a fix, a feature, a runtime/SDK
 requirement) — the release is how a user installs it, so a merged fix that is not released is a fix that is not
 delivered. The version is the date (`2026.10.17`). Sanity-check what the release will claim before publishing:
