@@ -252,7 +252,8 @@ public sealed class TerminalUiTests
     {
         if (!new TmuxBackend().IsAvailable) { _out.WriteLine("tmux not available; skipping"); return; }
         var sb = Shared().Sb;
-        Assert.Null(Shared().Win.GetVisualDescendants().OfType<TerminalsView>().FirstOrDefault());
+        // Not "the grid must be absent": the class shares ONE window, so a previous test's grid may still be up (and
+        // OpenGrid closes it). Asserting absence here was asserting the order the tests happen to run in.
         var terminals = OpenGrid();
 
         // four terminal CONTROLS, not text blocks
