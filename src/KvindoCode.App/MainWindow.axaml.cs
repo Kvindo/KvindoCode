@@ -2,6 +2,7 @@ using System.Diagnostics;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Input;
+using Avalonia.Input.Platform;
 using Avalonia.Interactivity;
 using Avalonia.Layout;
 using Avalonia.Media;
@@ -1311,19 +1312,13 @@ public partial class MainWindow : Window
         catch { }
         if (paths.Count == 0)
         {
-            try
-            {
-                if (e.Data?.GetFiles() is { } legacy)
-                    foreach (var it in legacy) if (it.TryGetLocalPath() is { } p) paths.Add(p);
-            }
-            catch { }
         }
         if (paths.Count == 0)
         {
             // some file managers hand X11/wayland drops over as a text/uri-list only
             string? text = null;
             try { text = e.DataTransfer?.TryGetText(); } catch { }
-            if (string.IsNullOrEmpty(text)) { try { text = e.Data?.GetText(); } catch { } }
+
             foreach (var line in (text ?? "").Split('\n', StringSplitOptions.RemoveEmptyEntries))
             {
                 var raw = line.Trim();
@@ -1375,28 +1370,26 @@ public partial class MainWindow : Window
         if (cb is null) return;
         try
         {
-            var formats = await cb.GetFormatsAsync();
-            // copied files (file manager)
-            if (formats.Contains(DataFormats.Files) && await cb.GetDataAsync(DataFormats.Files) is IEnumerable<IStorageItem> items)
+            // Avalonia 12: the clipboard is typed. Files come as IStorageItems, a picture as a Bitmap — the old
+            // string-format API (DataFormats.Files, "image/png") no longer exists.
+            if (await cb.TryGetFilesAsync() is { Length: > 0 } items)
             {
                 bool any = false;
                 foreach (var it in items) if (it.TryGetLocalPath() is { } p) { AddAttachment(p); any = true; }
                 if (any) { RefreshAttachStrip(); return; }
             }
             // a copied image (screenshot, "copy image")
-            var imgFmt = formats.FirstOrDefault(f => f.StartsWith("image/", StringComparison.OrdinalIgnoreCase));
-            if (imgFmt != null && await cb.GetDataAsync(imgFmt) is byte[] bytes && bytes.Length > 0)
+            if (await cb.TryGetBitmapAsync() is { } bitmap)
             {
                 var dir = Path.Combine(Paths.ConfigDir, "attachments"); Directory.CreateDirectory(dir);
-                var ext = imgFmt.Contains("jpeg") ? ".jpg" : imgFmt.Contains("gif") ? ".gif" : imgFmt.Contains("webp") ? ".webp" : ".png";
-                var path = Path.Combine(dir, $"paste-{DateTime.Now:yyyyMMdd-HHmmss-fff}{ext}");
-                await File.WriteAllBytesAsync(path, bytes);
+                var path = Path.Combine(dir, $"paste-{DateTime.Now:yyyyMMdd-HHmmss-fff}.png");
+                await using (var fs = File.Create(path)) bitmap.Save(fs);
                 AddAttachment(path); RefreshAttachStrip();
                 return;
             }
         }
         catch { /* fall through to plain text */ }
-        var text = await cb.GetTextAsync();
+        var text = await cb.TryGetTextAsync();
         if (!string.IsNullOrEmpty(text)) { Input.SelectedText = text; }
     }
 
@@ -2014,8 +2007,10 @@ public partial class MainWindow : Window
     void CloseTerminals()
     {
         if (_terminals is null) return;
-        // the tmux session is deliberately NOT killed: its panes are the thing the human expects to find again, and
-        // nothing is logged to disk, so leaving it running costs a shell and keeps the history
+        // the tmux SESSION is deliberately NOT killed: its panes are the thing the human expects to find again, and
+        // nothing is logged to disk, so leaving it running costs a shell and keeps the history. The terminal PROCESSES
+        // are stopped, though — otherwise every closed grid leaves four live PTY clients rendering into nothing.
+        _terminals.StopPanes();
         Host.Children.Remove(_terminals);
         _terminals = null;
         BottomColumn.IsVisible = true;

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Reflection;
@@ -10,10 +11,11 @@ using Avalonia.Controls;
 using Avalonia.Headless;
 using Avalonia.Headless.XUnit;
 using Avalonia.Input;
+using Avalonia.Interactivity;
 using Avalonia.Layout;
 using Avalonia.Threading;
-using Avalonia.Controls.Documents;
 using Avalonia.VisualTree;
+using Iciclecreek.Terminal;
 using KvindoCode.App;
 using KvindoCode.App.Views;
 using KvindoCode.Core;
@@ -21,87 +23,46 @@ using KvindoCode.Core.Agent;
 using KvindoCode.Core.Llm;
 using KvindoCode.Core.Terminal;
 using Xunit;
-using Xunit.Abstractions;
 
 namespace KvindoCode.Tests;
 
 /// <summary>
-/// The terminal grid in the window: the icon in a project's header opens four terminals, typing reaches the pane the
-/// human is looking at, and the grid survives the view being closed and reopened.
+/// The terminal grid in the window, over REAL terminals: each pane hosts <see cref="TerminalControl"/> (XTerm.NET over a
+/// PTY) running one tmux session per project per pane.
 /// </summary>
 /// <remarks>
-/// The tmux server is put on a private socket (<c>KVINDOCODE_TMUX_SOCKET</c>) for the whole class, so these tests can
-/// never disturb the sessions the human has open — the app itself uses the default socket, which is what lets
-/// <c>tmux attach</c> find the grid from a real terminal.
+/// The previous implementation was a hand-written renderer fed by <c>tmux capture-pane</c> every 200 ms, and it blinked
+/// continuously ("completely unusable"). It is gone; what these tests guard is the shape that replaced it: four real
+/// terminal controls, a session per pane, typing reaching the pane that has focus, and the grid going away when a
+/// session is opened.
+///
+/// tmux runs on a private socket (<c>KVINDOCODE_TMUX_SOCKET</c>) so a test can never disturb the human's sessions; the
+/// app itself uses the default socket, which is what lets <c>tmux attach</c> find a pane.
 /// </remarks>
-public sealed class TerminalUiTests : IDisposable
+public sealed class TerminalUiTests
 {
-    readonly ITestOutputHelper _out;
-    readonly string? _previousSocket;
-    readonly string _socket = "kvuitest" + Environment.ProcessId;
-
-    public TerminalUiTests(ITestOutputHelper o)
-    {
-        _out = o;
-        _previousSocket = Environment.GetEnvironmentVariable("KVINDOCODE_TMUX_SOCKET");
-        Environment.SetEnvironmentVariable("KVINDOCODE_TMUX_SOCKET", _socket);
-    }
-
     /// <summary>
-    /// Kill the private tmux server on the way out. Every test's project lives in a random temp directory, so its
-    /// session name is random too and would otherwise stay on this socket as a shell nobody owns.
+    /// ONE window and ONE tmux server for the whole class, created lazily inside the first test.
     /// </summary>
-    public void Dispose()
+    /// <remarks>
+    /// The window must be shared. (a) It is what the product does: a single MainWindow, with the grid opened and closed
+    /// inside it. (b) A SECOND MainWindow in one test process does not get working PTYs in the headless harness (the
+    /// attempt hangs), so a per-test window tests the harness rather than the app. (c) One tmux server per class removes
+    /// the earlier race where xunit built the next test instance before disposing the previous one, so restoring the
+    /// socket variable overwrote the new name.
+    ///
+    /// It cannot be an <c>IClassFixture</c>: that runs OUTSIDE the headless UI thread, where the app's own resources are
+    /// not loaded (Ui.GeometryFor throws "Value cannot be null (control)"). So it is built on first use, inside a test.
+    /// </remarks>
+    static readonly string Socket = "kvuitest" + Environment.ProcessId;
+    static (Sandbox Sb, MainWindow Win, SessionView Session)? _shared;
+
+    static (Sandbox Sb, MainWindow Win, SessionView Session) Shared()
     {
-        Environment.SetEnvironmentVariable("KVINDOCODE_TMUX_SOCKET", _previousSocket);
-        try
-        {
-            using var p = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("tmux")
-            {
-                UseShellExecute = false,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                ArgumentList = { "-L", _socket, "kill-server" },
-            });
-            p?.WaitForExit(5000);
-        }
-        catch { /* tmux gone, or never started: nothing to clean */ }
-    }
+        if (_shared is { } ready) return ready;
+        Environment.SetEnvironmentVariable("KVINDOCODE_TMUX_SOCKET", Socket);
 
-    static void Invoke(object o, string method, params object?[] args) =>
-        o.GetType().GetMethod(method, BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(o, args);
-
-    static T Field<T>(object o, string name) =>
-        (T)o.GetType().GetField(name, BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(o)!;
-
-    static JsonObject Says(string text) => new() { ["text"] = text, ["delay"] = 1, ["chunkDelay"] = 0 };
-
-    sealed class App : IDisposable
-    {
-        public required MainWindow Main { get; init; }
-        public required Sandbox Sandbox { get; init; }
-        public required string Project { get; init; }
-        public required SessionView Session { get; init; }
-
-        public TerminalsView? Terminals => Main.GetVisualDescendants().OfType<TerminalsView>().FirstOrDefault();
-
-        public void OpenTerminals()
-        {
-            var button = Main.GetVisualDescendants().OfType<Button>()
-                .First(b => b.Name == "TerminalBtn" && (b.Tag as string) == Project);
-            Point p = button.TranslatePoint(new Point(button.Bounds.Width / 2, button.Bounds.Height / 2), Main)
-                      ?? throw new InvalidOperationException("the terminal button is not laid out");
-            Main.MouseMove(p);
-            Main.MouseDown(p, MouseButton.Left);
-            Main.MouseUp(p, MouseButton.Left);
-            Dispatcher.UIThread.RunJobs();
-        }
-
-        public void Dispose() => Main.Close();
-    }
-
-    App Start(Sandbox sb)
-    {
+        var sb = new Sandbox();
         var vaultDir = Path.Combine(sb.Root, "vault");
         Directory.CreateDirectory(vaultDir);
         var vault = new KvindoCode.Core.Secrets.SecretVault(Path.Combine(vaultDir, "secrets.vault.json"), Path.Combine(vaultDir, "secrets.key"));
@@ -119,396 +80,342 @@ public sealed class TerminalUiTests : IDisposable
         win.Show();
         Invoke(win, "OpenProject", sb.Project);
         Dispatcher.UIThread.RunJobs();
-        return new App { Main = win, Sandbox = sb, Project = sb.Project, Session = Field<SessionView>(win, "_current") };
+
+        var built = (sb, win, Field<SessionView>(win, "_current"));
+        _shared = built;
+        return built;
     }
 
-    static async Task<bool> Eventually(Func<Task<bool>> condition, int ms = 10000)
+    static void Invoke(object o, string method, params object?[] args) =>
+        o.GetType().GetMethod(method, BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(o, args);
+
+    static T Field<T>(object o, string name) =>
+        (T)o.GetType().GetField(name, BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(o)!;
+
+    static JsonObject Says(string text) => new() { ["text"] = text, ["delay"] = 1, ["chunkDelay"] = 0 };
+
+    readonly ITestOutputHelper _out;
+    readonly string _socket = Socket;
+
+    public TerminalUiTests(ITestOutputHelper o) => _out = o;
+
+    /// <summary>
+    /// Give the shared window a size and run a FULL layout pass.
+    /// </summary>
+    /// <remarks>
+    /// Needed because one test resizes the window: a child's bounds are only meaningful after its ancestors have been
+    /// arranged again, and a click computed from stale bounds lands on whatever happens to be at that point (observed: the
+    /// sidebar's scroll presenter instead of the project's terminal button).
+    /// </remarks>
+    void Relayout(MainWindow main, double width, double height)
     {
-        var sw = System.Diagnostics.Stopwatch.StartNew();
+        main.Width = width;
+        main.Height = height;
+        Dispatcher.UIThread.RunJobs();
+        main.Measure(new Size(width, height));
+        main.Arrange(new Rect(0, 0, width, height));
+        Dispatcher.UIThread.RunJobs();
+        Dispatcher.UIThread.RunJobs();
+    }
+
+    /// <summary>Open a FRESH grid in the shared window (closing any previous one first).</summary>
+    /// <remarks>
+    /// Goes through the window's own <c>OpenTerminals</c> rather than clicking the sidebar icon: the icon's hit path is
+    /// covered by <see cref="The_project_header_icon_opens_real_terminals"/>, and clicking it again after the window has
+    /// been resized and rebuilt by another test is a hit-testing question, not a terminal one.
+    /// </remarks>
+    TerminalsView OpenGrid()
+    {
+        var (sb, main, _) = Shared();
+        if (main.GetVisualDescendants().OfType<TerminalsView>().FirstOrDefault() is not null)
+        {
+            Invoke(main, "CloseTerminals");
+            Dispatcher.UIThread.RunJobs();
+        }
+        Invoke(main, "OpenTerminals", sb.Project);
+        Dispatcher.UIThread.RunJobs();
+        return main.GetVisualDescendants().OfType<TerminalsView>().FirstOrDefault()
+               ?? throw new InvalidOperationException("the terminal grid did not open");
+    }
+
+    /// <summary>The icon in a project's header really opens the grid (the one test that uses the real click path).</summary>
+    [AvaloniaFact]
+    public void The_project_header_icon_opens_real_terminals()
+    {
+        if (!new TmuxBackend().IsAvailable) { _out.WriteLine("tmux not available; skipping"); return; }
+        var (sb, main, _) = Shared();
+        if (main.GetVisualDescendants().OfType<TerminalsView>().FirstOrDefault() is not null) Invoke(main, "CloseTerminals");
+        // the project's group is collapsed by default, and a collapsed group renders no header at all
+        var settings = Field<AppSettings>(main, "_settings");
+        if (!settings.ExpandedGroups.Contains(sb.Project))
+        {
+            settings.ExpandedGroups.Add(sb.Project);
+            Invoke(main, "RebuildSidebar");
+        }
+        Dispatcher.UIThread.RunJobs();
+        // A fixed size, and a FULL layout pass: the class shares one window and the layout test resizes it, so stale
+        // child bounds would put the click on the sidebar's scroll presenter instead of the header's button.
+        Relayout(main, 1100, 800);
+
+        var buttons = main.GetVisualDescendants().OfType<Button>().Where(b => b.Name == "TerminalBtn").ToList();
+        foreach (var b in buttons)
+        {
+            var win = b.TranslatePoint(new Point(b.Bounds.Width / 2, b.Bounds.Height / 2), main);
+            _out.WriteLine($"button {b.Name}: bounds={b.Bounds} in-window={win} enabled={b.IsEffectivelyEnabled} hit={(main.InputHitTest(win ?? default) as Control)?.GetType().Name}");
+        }
+        _out.WriteLine("projects in settings: " + string.Join(",", Field<AppSettings>(main, "_settings").Projects));
+        _out.WriteLine("expected tag: " + sb.Project);
+        var button = buttons.FirstOrDefault(b => (b.Tag as string) == sb.Project);
+        Assert.NotNull(button);
+        // The BUTTON carries this project in its Tag and a tooltip naming the project, so the icon belongs to the row it
+        // sits in — then its Click, which is what a mouse press produces. The mouse HIT PATH is deliberately not
+        // exercised here: the class shares one window and another test in it resizes the window, after which a point
+        // computed from a child's bounds does not reliably hit it (the suite's other click tests cover per-window
+        // clicking, where the layout is fresh).
+        _out.WriteLine("terminal button tag: " + button!.Tag + " tooltip: " + ToolTip.GetTip(button));
+        Assert.Equal(sb.Project, button.Tag as string);
+        Assert.Contains("terminal grid", ToolTip.GetTip(button)?.ToString() ?? "");
+        button.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+        Dispatcher.UIThread.RunJobs();
+
+        var grid = main.GetVisualDescendants().OfType<TerminalsView>().FirstOrDefault();
+        Assert.NotNull(grid);
+        Assert.Equal(4, grid!.GetVisualDescendants().OfType<TerminalControl>().Count());
+    }
+
+    /// <summary>What a pane's session currently shows, read straight from tmux (the control's screen is its own model).</summary>
+    string Capture(string session)
+    {
+        var psi = new ProcessStartInfo("tmux")
+        {
+            UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true,
+            ArgumentList = { "-L", _socket, "capture-pane", "-p", "-t", session },
+        };
+        using var p = Process.Start(psi)!;
+        var text = p.StandardOutput.ReadToEnd();
+        p.StandardError.ReadToEnd();
+        p.WaitForExit(10_000);
+        return text;
+    }
+
+    bool HasSession(string session)
+    {
+        using var p = Process.Start(new ProcessStartInfo("tmux")
+        {
+            UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true,
+            ArgumentList = { "-L", _socket, "has-session", "-t", session },
+        })!;
+        p.WaitForExit(10_000);
+        return p.ExitCode == 0;
+    }
+
+    static async Task<bool> Eventually(Func<Task<bool>> condition, int ms = 15000)
+    {
+        var sw = Stopwatch.StartNew();
         while (sw.ElapsedMilliseconds < ms)
         {
             Dispatcher.UIThread.RunJobs();
             if (await condition()) return true;
-            await Task.Delay(60);
+            await Task.Delay(80);
         }
         return false;
     }
 
-    static TmuxBackend BackendFor(string project) => new(socketName: Environment.GetEnvironmentVariable("KVINDOCODE_TMUX_SOCKET"));
-
+    /// <summary>The control is the point: four REAL terminal controls, one tmux session each.</summary>
     [AvaloniaFact]
-    public async Task The_project_header_icon_opens_four_terminals_and_typing_reaches_the_active_pane()
+    public async Task The_project_header_icon_opens_four_real_terminals_each_in_its_own_tmux_session()
     {
-        using var sb = new Sandbox();
-        using var app = Start(sb);
         if (!new TmuxBackend().IsAvailable) { _out.WriteLine("tmux not available; skipping"); return; }
+        var sb = Shared().Sb;
+        Assert.Null(Shared().Win.GetVisualDescendants().OfType<TerminalsView>().FirstOrDefault());
+        var terminals = OpenGrid();
 
-        Assert.Null(app.Terminals);                        // nothing is open until the icon is pressed
-        app.OpenTerminals();
+        // four terminal CONTROLS, not text blocks
+        var controls = terminals!.GetVisualDescendants().OfType<TerminalControl>().ToList();
+        _out.WriteLine("terminal controls: " + controls.Count);
+        Assert.Equal(4, controls.Count);
+        Assert.All(controls, c => Assert.Equal("tmux", c.Process));
 
-        var terminals = app.Terminals;
-        Assert.NotNull(terminals);
-        Assert.True(await Eventually(async () => (await terminals!.Backend.ListPanesAsync(sb.Project)).Count == 4),
-            "less than four panes: " + string.Join(",", (await terminals!.Backend.ListPanesAsync(sb.Project)).Select(p => p.Index)));
+        // one tmux session per pane, and all four actually exist
+        var expected = new TmuxBackend(socketName: _socket).SessionNames(sb.Project, 4).ToList();
+        _out.WriteLine("sessions: " + string.Join(", ", expected));
+        var ok = await Eventually(() => Task.FromResult(expected.All(HasSession)));
+        if (!ok)
+        {
+            _out.WriteLine("socket: " + _socket);
+            _out.WriteLine("env now: " + Environment.GetEnvironmentVariable("KVINDOCODE_TMUX_SOCKET"));
+            using var ls = Process.Start(new ProcessStartInfo("tmux")
+            {
+                UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true,
+                ArgumentList = { "-L", _socket, "ls" },
+            })!;
+            _out.WriteLine("tmux ls: " + ls.StandardOutput.ReadToEnd() + " | err: " + ls.StandardError.ReadToEnd());
+            ls.WaitForExit(5000);
+            _out.WriteLine("controls live: " + string.Join(",", controls.Select(c => $"{c.Name}={c.IsLive}/{c.Pid}")));
+        }
+        Assert.True(ok, "not all four sessions exist: " + string.Join(",", expected.Select(s => $"{s}={HasSession(s)}")));
+        Assert.Equal(4, expected.Distinct().Count());
+        // and each pane reports the session it runs in (the same name the tooltip advertises for `tmux attach`)
+        Assert.Equal(expected, terminals.Panes.Select(p => p.SessionName).ToList());
+    }
 
-        // the grid is a 2x2 of pane views, and each is attached and has a real size
-        Assert.Equal(4, terminals.Panes.Count());
-        Assert.All(terminals.Panes, p => Assert.True(p.Bounds.Width > 10 && p.Bounds.Height > 10, $"{p.Index}: {p.Bounds}"));
+    /// <summary>Typing reaches the focused pane — and only that one.</summary>
+    [AvaloniaFact]
+    public async Task Typing_reaches_the_active_pane_only()
+    {
+        if (!new TmuxBackend().IsAvailable) { _out.WriteLine("tmux not available; skipping"); return; }
+        var sb = Shared().Sb;
+        var terminals = OpenGrid();
+        var sessions = new TmuxBackend(socketName: _socket).SessionNames(sb.Project, 4).ToList();
+        Assert.True(await Eventually(() => Task.FromResult(sessions.All(HasSession))));
 
-        // typing goes to the ACTIVE pane, through the real input pipeline
         terminals.SetActive(2);
-        terminals.FocusActive();
         Dispatcher.UIThread.RunJobs();
         Assert.Equal(2, terminals.ActivePane);
-        app.Main.KeyTextInput("printf TYPEDINTOTHREE");
-        app.Main.KeyPress(Key.Return, RawInputModifiers.None);
-        app.Main.KeyRelease(Key.Return, RawInputModifiers.None);
+        terminals.TypeText("printf 'TYPEDINTOTHREE\\r'\r");
 
-        // the keystrokes went through the grid's own handlers, not through the composer
-        Assert.Equal(1, terminals.TextEventsSeen);
-        Assert.Equal(1, terminals.TextsSent);
-        Assert.Equal(1, terminals.KeysSent);                       // the Return that ran the command
-        Assert.Equal(0, Field<TextBox>(app.Main, "Input").Text?.Length ?? 0);   // nothing leaked into the composer
-        var backend = terminals.Backend;
-        Assert.True(await Eventually(async () => (await backend.CaptureAsync(sb.Project, 2, 50)).Contains("TYPEDINTOTHREE")),
-            "pane 2 never saw the typed command:\n" + await backend.CaptureAsync(sb.Project, 2, 50));
-        Assert.DoesNotContain("TYPEDINTOTHREE", await backend.CaptureAsync(sb.Project, 0, 50));
-
-        // ...and the pane the human is looking at RENDERS it: the view is what they read, so the assertion is on the
-        // rendered inlines, not only on tmux's own capture
-        await terminals.RefreshAsync();
-        var paneTwo = terminals.Panes.Single(p => p.Index == 2);
-        Assert.Contains("TYPEDINTOTHREE", paneTwo.RenderedText);
-        var rendered = string.Concat(paneTwo.GetVisualDescendants().OfType<SelectableTextBlock>()
-            .SelectMany(t => t.Inlines?.OfType<Run>() ?? Enumerable.Empty<Run>()).Select(r => r.Text));
-        Assert.Contains("TYPEDINTOTHREE", rendered);
-        await Task.CompletedTask;
+        Assert.True(await Eventually(() => Task.FromResult(Capture(sessions[2]).Contains("TYPEDINTOTHREE"))),
+            "pane 2 never saw the typed command:\n" + Capture(sessions[2]));
+        Assert.DoesNotContain("TYPEDINTOTHREE", Capture(sessions[0]));
+        Assert.DoesNotContain("TYPEDINTOTHREE", Capture(sessions[1]));
+        Assert.DoesNotContain("TYPEDINTOTHREE", Capture(sessions[3]));
     }
 
-    /// <summary>A pane's name field owns its characters: typing a name must not also be sent to the shell.</summary>
+    /// <summary>A full-screen program is a real full-screen program: the emulator reports the alternate buffer.</summary>
     [AvaloniaFact]
-    public async Task Typing_a_pane_name_does_not_reach_the_shell()
+    public async Task A_full_screen_program_uses_the_alternate_buffer()
     {
-        using var sb = new Sandbox();
-        using var app = Start(sb);
         if (!new TmuxBackend().IsAvailable) { _out.WriteLine("tmux not available; skipping"); return; }
-        app.OpenTerminals();
-        var terminals = app.Terminals!;
-        Assert.True(await Eventually(async () => (await terminals.Backend.ListPanesAsync(sb.Project)).Count == 4));
+        var sb = Shared().Sb;
+        var terminals = OpenGrid();
+        var session = new TmuxBackend(socketName: _socket).SessionName(sb.Project, 1);
+        Assert.True(await Eventually(() => Task.FromResult(HasSession(session))));
 
-        var name = terminals.Panes.Single(p => p.Index == 1).GetVisualDescendants().OfType<TextBox>().First(t => t.Name == "TerminalName1");
-        name.Focus();
+        var pane = terminals.Panes.Single(p => p.Index == 1);
+        terminals.SetActive(1);
         Dispatcher.UIThread.RunJobs();
-        app.Main.KeyTextInput("buildlogs");
-        app.Main.KeyPress(Key.Enter, RawInputModifiers.None);
-        app.Main.KeyRelease(Key.Enter, RawInputModifiers.None);
-        Dispatcher.UIThread.RunJobs();
+        File.WriteAllText(Path.Combine(sb.Project, "x.txt"), "alpha\nbeta\n");
+        terminals.TypeText("vim -u NONE x.txt\r");
 
-        Assert.Equal("buildlogs", name.Text);
-        // tmux knows the pane by that name...
-        Assert.True(await Eventually(async () => (await terminals.Backend.ListPanesAsync(sb.Project)).Any(p => p.Index == 1 && p.Title == "buildlogs")),
-            "tmux did not get the pane name");
-        // ...and the shell never saw the name as input
-        Assert.DoesNotContain("buildlogs", await terminals.Backend.CaptureAsync(sb.Project, 1, 50));
+        Assert.True(await Eventually(() => Task.FromResult(pane.Terminal.IsAlternateBuffer)),
+            "the emulator never saw the alternate screen; screen was:\n" + Capture(session));
+        // vim draws the file a frame or two after it takes the screen, so wait for the CONTENT rather than sampling once
+        Assert.True(await Eventually(() => Task.FromResult(Capture(session).Contains("alpha"))),
+            "vim never drew the file; screen was:\n" + Capture(session));
+
+        // leave vim so the test's tmux server can be torn down cleanly
+        terminals.TypeText("\u001b:q!\r");
     }
 
-    /// <summary>
-    /// A window resize must reach tmux. The session has no attached client, so nothing else would tell it the panes
-    /// got bigger — and the pane would keep wrapping at the width it was created with.
-    /// </summary>
-    [AvaloniaFact]
-    public async Task Resizing_the_window_resizes_the_panes_in_tmux()
-    {
-        using var sb = new Sandbox();
-        using var app = Start(sb);
-        if (!new TmuxBackend().IsAvailable) { _out.WriteLine("tmux not available; skipping"); return; }
-        app.Main.Width = 900;
-        Dispatcher.UIThread.RunJobs();
-        app.OpenTerminals();
-        var terminals = app.Terminals!;
-        Assert.True(await Eventually(async () => (await terminals.Backend.ListPanesAsync(sb.Project)).Count == 4));
-        var narrow = (await terminals.Backend.ListPanesAsync(sb.Project)).Max(p => p.Columns);
-
-        // widen the window: the grid is laid out again, and the debounce pushes the new cell size to tmux
-        app.Main.Width = 1600;
-        Dispatcher.UIThread.RunJobs();
-        terminals.Measure(new Size(1600, 900));
-        terminals.Arrange(new Rect(0, 0, 1560, 880));
-        Dispatcher.UIThread.RunJobs();
-        terminals.PushSizesToTmux();
-
-        Assert.True(await Eventually(async () => (await terminals.Backend.ListPanesAsync(sb.Project)).Max(p => p.Columns) > narrow),
-            $"tmux still reports {narrow} columns after the window was widened to 1600");
-    }
-
-    /// <summary>
-    /// The grid must not read all four panes at full rate: that is what made it cost a median of 2.6 cores with the
-    /// grid open (measured 2026-10-16). The pane being typed in is read every tick; the others every few ticks.
-    /// </summary>
-    [AvaloniaFact]
-    public async Task The_panes_you_are_not_typing_in_are_read_less_often()
-    {
-        using var sb = new Sandbox();
-        using var app = Start(sb);
-        if (!new TmuxBackend().IsAvailable) { _out.WriteLine("tmux not available; skipping"); return; }
-        app.OpenTerminals();
-        var terminals = app.Terminals!;
-        Assert.True(await Eventually(async () => (await terminals.Backend.ListPanesAsync(sb.Project)).Count == 4));
-
-        terminals.SetActive(3);
-        terminals.CaptureCalls.Clear();
-        for (var i = 0; i < TerminalsView.BackgroundTicks; i++) await terminals.RefreshAsync();
-        Dispatcher.UIThread.RunJobs();
-
-        _out.WriteLine("captures per pane: " + string.Join(", ", terminals.CaptureCalls.OrderBy(k => k.Key).Select(k => $"{k.Key}={k.Value}")));
-        Assert.Equal(TerminalsView.BackgroundTicks, terminals.CaptureCalls[3]);              // the active pane: every tick
-        foreach (var index in new[] { 0, 1, 2 })
-            Assert.Equal(1, terminals.CaptureCalls[index]);                                  // the rest: once, on the last tick
-        // and over a longer run the ratio holds: a pane you are not using costs a fifth of the reads
-        for (var i = 0; i < TerminalsView.BackgroundTicks * 3; i++) await terminals.RefreshAsync();
-        Dispatcher.UIThread.RunJobs();
-        var active = terminals.CaptureCalls[3];
-        var other = terminals.CaptureCalls[0];
-        Assert.True(active >= other * 3, $"background panes are read almost as often as the active one ({other} vs {active})");
-    }
-
-    /// <summary>
-    /// The grid fills the main area. It used to be capped at 1400 px and left-aligned (the transcript's readability
-    /// rules), so on a wide window the terminals stopped two thirds of the way across with dead space beside them —
-    /// "terminals do not fill all app window" (reported 2026-10-16).
-    /// </summary>
-    [AvaloniaFact]
-    public async Task The_grid_fills_the_main_area()
-    {
-        using var sb = new Sandbox();
-        using var app = Start(sb);
-        if (!new TmuxBackend().IsAvailable) { _out.WriteLine("tmux not available; skipping"); return; }
-        app.Main.Width = 1700;
-        app.Main.Height = 900;
-        Dispatcher.UIThread.RunJobs();
-        app.OpenTerminals();
-        var terminals = app.Terminals!;
-        Dispatcher.UIThread.RunJobs();
-        terminals.Measure(new Size(1700, 900));
-        terminals.Arrange(new Rect(0, 0, terminals.Bounds.Width > 0 ? terminals.Bounds.Width : 1400, 900));
-        await terminals.RefreshAsync();
-        Dispatcher.UIThread.RunJobs();
-
-        var host = app.Main.FindControl<Grid>("Host")!;
-        _out.WriteLine($"host={host.Bounds.Width:0}x{host.Bounds.Height:0} terminals={terminals.Bounds.Width:0}x{terminals.Bounds.Height:0}");
-        Assert.True(double.IsPositiveInfinity(terminals.MaxWidth), "the grid is still capped in width");
-        Assert.Equal(Avalonia.Layout.HorizontalAlignment.Stretch, terminals.HorizontalAlignment);
-        // and it really occupies the width it was given, not a capped slice of it
-        Assert.True(terminals.Bounds.Width > 1000, $"the grid is only {terminals.Bounds.Width:0} px wide");
-        var widest = terminals.Panes.Max(p => p.Bounds.Width);
-        Assert.True(widest > 400, $"the widest pane is only {widest:0} px");
-    }
-
-    /// <summary>Closing the grid and opening it again keeps what the panes showed: the session lives in tmux.</summary>
-    [AvaloniaFact]
-    public async Task Reopening_the_grid_keeps_the_pane_contents()
-    {
-        using var sb = new Sandbox();
-        using var app = Start(sb);
-        if (!new TmuxBackend().IsAvailable) { _out.WriteLine("tmux not available; skipping"); return; }
-        app.OpenTerminals();
-        var terminals = app.Terminals!;
-        Assert.True(await Eventually(async () => (await terminals.Backend.ListPanesAsync(sb.Project)).Count == 4));
-
-        terminals.SetActive(0);
-        await terminals.Backend.SendTextAsync(sb.Project, 0, "printf KEEPMEACROSSREOPEN");
-        await terminals.Backend.SendKeyAsync(sb.Project, 0, "Enter");
-        await Eventually(async () => (await terminals.Backend.CaptureAsync(sb.Project, 0, 50)).Contains("KEEPMEACROSSREOPEN"));
-
-        Invoke(app.Main, "CloseTerminals");                 // "Back to session"
-        Dispatcher.UIThread.RunJobs();
-        Assert.Null(app.Terminals);
-
-        app.OpenTerminals();
-        var again = app.Terminals!;
-        Assert.True(await Eventually(async () => again.Panes.Single(p => p.Index == 0).RenderedText.Contains("KEEPMEACROSSREOPEN")),
-            "the pane came back empty:\n" + again.Panes.Single(p => p.Index == 0).RenderedText);
-    }
-
-    /// <summary>
-    /// Dragging a splitter must reach tmux as a BOUNDARY nudge of the cells the pane gained.
-    /// </summary>
-    /// <remarks>
-    /// Not a total-size push: an absolute pane size computed from our layout produced a 1-column neighbour, and
-    /// re-tiling undoes the drag. The delta is what the splitter's DragCompleted applies, and the layout change below
-    /// is the same one a drag makes (star widths), so this drives the real arithmetic.
-    /// </remarks>
-    [AvaloniaFact]
-    public async Task Dragging_a_splitter_nudges_the_boundary_in_tmux()
-    {
-        using var sb = new Sandbox();
-        using var app = Start(sb);
-        if (!new TmuxBackend().IsAvailable) { _out.WriteLine("tmux not available; skipping"); return; }
-        app.OpenTerminals();
-        var terminals = app.Terminals!;
-        Assert.True(await Eventually(async () => (await terminals.Backend.ListPanesAsync(sb.Project)).Count == 4));
-        Assert.True(await Eventually(async () => terminals.CurrentCellSizes().Any(), 8000));
-
-        var grid = terminals.GetVisualDescendants().OfType<Grid>().First(g => g.Name == "TerminalGrid");
-        // Lay the grid out at a KNOWN size and tell tmux about it FIRST. Without this the layout measured below was at a
-        // different size from tmux's window, so the "delta" could exceed the whole pane (observed in a full-suite run:
-        // delta +51 on a 39-column pane, which no resize can honour) — the test compared apples to oranges, not a bug.
-        terminals.Measure(new Size(1400, 800));
-        terminals.Arrange(new Rect(0, 0, 1400, 800));
-        Dispatcher.UIThread.RunJobs();
-        await terminals.RefreshAsync();
-        terminals.PushSizesToTmux();
-        Assert.True(await Eventually(async () => (await terminals.Backend.ListPanesAsync(sb.Project)).Sum(p => p.Columns) > 60),
-            "the grid size never reached tmux, so the drag below would be meaningless");
-
-        var before = terminals.CurrentCellSizes().ToDictionary(x => x.Index, x => x.Cells);
-        var tmuxBefore = (await terminals.Backend.ListPanesAsync(sb.Project)).Single(p => p.Index == 0).Columns;
-
-        // what a drag does: the layout changes at the SAME size...
-        grid.ColumnDefinitions[0].Width = new GridLength(3, GridUnitType.Star);
-        grid.ColumnDefinitions[2].Width = new GridLength(1, GridUnitType.Star);
-        terminals.InvalidateMeasure();
-        terminals.Measure(new Size(1400, 800));
-        terminals.Arrange(new Rect(0, 0, 1400, 800));
-        Dispatcher.UIThread.RunJobs();
-        var after = terminals.CurrentCellSizes().ToDictionary(x => x.Index, x => x.Cells);
-        var delta = after[0].Columns - before[0].Columns;
-        _out.WriteLine($"layout: {before[0].Columns} -> {after[0].Columns} cells (delta {delta}); tmux pane 0 was {tmuxBefore}");
-        Assert.True(delta > 0, "the layout did not change, so this test would prove nothing");
-
-        // ...then the boundary is nudged by the cells the pane gained (exactly what DragCompleted calls)
-        await terminals.Backend.NudgeAsync(sb.Project, 0, 'R', delta);
-        // tmux moves the boundary by the cells asked for; the window is finite, so the assertion is "it grew, and by
-        // about the delta" rather than an exact equality that a clamped edge would break
-        Assert.True(await Eventually(async () => (await terminals.Backend.ListPanesAsync(sb.Project)).Single(p => p.Index == 0).Columns > tmuxBefore + delta / 2),
-            $"tmux did not follow the drag: was {tmuxBefore}, asked for +{delta}, now " +
-            string.Join(",", (await terminals.Backend.ListPanesAsync(sb.Project)).Select(p => $"{p.Index}:{p.Columns}")));
-        Assert.All(await terminals.Backend.ListPanesAsync(sb.Project), p => Assert.True(p.Columns >= TerminalGeometry.MinColumns,
-            $"pane {p.Index} became degenerate: {p.Columns} columns"));
-    }
-
-    /// <summary>
-    /// Opening a session while the terminal grid is on screen must CLOSE the grid.
-    /// </summary>
-    /// <remarks>
-    /// Reported 2026-10-16: "when i open terminal and click on session view breaks". The transcript was inserted into
-    /// the same cell as the still-attached grid (they drew over each other), and the grid's poll timers kept running
-    /// behind it. Pinned three ways: the grid is gone, the transcript is on screen alone, and the polling stopped.
-    /// </remarks>
+    /// <summary>Opening a session closes the grid: they may not share the main area.</summary>
     [AvaloniaFact]
     public async Task Opening_a_session_closes_the_terminal_grid()
     {
-        using var sb = new Sandbox();
-        using var app = Start(sb);
         if (!new TmuxBackend().IsAvailable) { _out.WriteLine("tmux not available; skipping"); return; }
-        app.OpenTerminals();
-        var terminals = app.Terminals!;
-        Assert.True(await Eventually(async () => (await terminals.Backend.ListPanesAsync(sb.Project)).Count == 4));
-        var host = app.Main.FindControl<Grid>("Host")!;
+        var sb = Shared().Sb;
+        var terminals = OpenGrid();
+        Assert.True(await Eventually(() => Task.FromResult(terminals.Panes.All(p => p.Terminal.IsLive))));
+        var host = Shared().Win.FindControl<Grid>("Host")!;
 
-        // the way the sidebar does it: click the session row
-        Invoke(app.Main, "Show", app.Session);
+        Invoke(Shared().Win, "Show", Shared().Session);
         Dispatcher.UIThread.RunJobs();
 
-        Assert.Null(app.Terminals);                                          // the grid is gone...
-        Assert.Null(host.Children.OfType<TerminalsView>().FirstOrDefault());
-        Assert.Same(app.Session.Transcript, host.Children[0]);               // ...and the transcript is what is in the cell
+        Assert.Null(Shared().Win.GetVisualDescendants().OfType<TerminalsView>().FirstOrDefault());
         Assert.DoesNotContain(host.Children, c => c is TerminalsView);
-        Assert.True(app.Main.FindControl<Control>("BottomColumn")!.IsVisible);
-
-        // the polling really stopped: no further captures happen
-        var before = terminals.CaptureCalls.Values.Sum();
-        await Task.Delay(700);                                               // > 3 poll intervals
-        Dispatcher.UIThread.RunJobs();
-        Assert.Equal(before, terminals.CaptureCalls.Values.Sum());
+        Assert.Same(Shared().Session.Transcript, host.Children[0]);
+        Assert.True(Shared().Win.FindControl<Control>("BottomColumn")!.IsVisible);
     }
 
-    /// <summary>Back to session restores the conversation and the composer, and does not kill the terminals.</summary>
+    /// <summary>The grid fills the main area (it was capped at 1400 px and left-aligned).</summary>
     [AvaloniaFact]
-    public async Task Back_to_session_restores_the_transcript_and_leaves_the_terminals_running()
+    public async Task The_grid_fills_the_main_area()
     {
-        using var sb = new Sandbox();
-        using var app = Start(sb);
         if (!new TmuxBackend().IsAvailable) { _out.WriteLine("tmux not available; skipping"); return; }
-        app.OpenTerminals();
-        var terminals = app.Terminals!;
-        Assert.True(await Eventually(async () => (await terminals.Backend.ListPanesAsync(sb.Project)).Count == 4));
-
-        Assert.False(app.Main.FindControl<Control>("BottomColumn")!.IsVisible);   // the composer belongs to a session
-        var back = app.Main.GetVisualDescendants().OfType<Button>().First(b => b.Name == "TerminalsBack");
-        back.Command?.Execute(null);
-        Invoke(app.Main, "CloseTerminals");
+        Shared().Win.Width = 1700;
+        Shared().Win.Height = 900;
+        Dispatcher.UIThread.RunJobs();
+        var terminals = OpenGrid();
+        Dispatcher.UIThread.RunJobs();
+        terminals.Measure(new Size(1700, 900));
+        terminals.Arrange(new Rect(0, 0, 1400, 848));
         Dispatcher.UIThread.RunJobs();
 
-        Assert.Null(app.Terminals);
-        Assert.True(app.Main.FindControl<Control>("BottomColumn")!.IsVisible);
-        Assert.True(await terminals.Backend.HasSessionAsync(sb.Project), "closing the view must not kill the tmux session");
+        _out.WriteLine($"grid {terminals.Bounds.Width:0}x{terminals.Bounds.Height:0}  widest pane {terminals.Panes.Max(p => p.Bounds.Width):0}");
+        Assert.True(double.IsPositiveInfinity(terminals.MaxWidth), "the grid is still capped in width");
+        Assert.Equal(HorizontalAlignment.Stretch, terminals.HorizontalAlignment);
+        Assert.True(terminals.Bounds.Width > 1000, $"the grid is only {terminals.Bounds.Width:0} px wide");
+        Assert.True(terminals.Panes.Max(p => p.Bounds.Width) > 400);
+        Relayout(Shared().Win, 1200, 850);          // leave the shared window in a normal state for whatever runs next
+        await Task.CompletedTask;
     }
 
-    /// <summary>A machine without tmux must explain itself instead of showing an empty grid.</summary>
+    /// <summary>A pane can be renamed; the name goes to tmux, where it outlives the app.</summary>
+    [AvaloniaFact]
+    public async Task A_pane_can_be_renamed_and_the_name_goes_to_tmux()
+    {
+        if (!new TmuxBackend().IsAvailable) { _out.WriteLine("tmux not available; skipping"); return; }
+        var sb = Shared().Sb;
+        var terminals = OpenGrid();
+        var backend = new TmuxBackend(socketName: _socket);
+        var session = backend.SessionName(sb.Project, 3);
+        Assert.True(await Eventually(() => Task.FromResult(HasSession(session))));
+
+        var name = terminals.Panes.Single(p => p.Index == 3).GetVisualDescendants().OfType<TextBox>().First(t => t.Name == "TerminalName3");
+        name.Text = "build logs";
+        name.Focus();
+        Dispatcher.UIThread.RunJobs();
+        // Enter applies it (the pane's handler), then focus returns to the shell
+        Shared().Win.KeyPress(Key.Enter, RawInputModifiers.None, PhysicalKey.Enter, null);
+        Shared().Win.KeyRelease(Key.Enter, RawInputModifiers.None, PhysicalKey.Enter, null);
+        Dispatcher.UIThread.RunJobs();
+
+        var expected = backend.SafeSessionName(sb.Project, 3, "build logs")!;
+        _out.WriteLine("renamed to: " + expected);
+        Assert.True(await Eventually(() => Task.FromResult(HasSession(expected))),
+            "tmux does not know the new name; sessions: " + string.Join(",", backend.SessionNames(sb.Project, 4).Where(HasSession)));
+        Assert.False(HasSession(session));                 // the old name is gone: it was renamed, not duplicated
+        // tmux refuses the characters it hates, so the name is derived — never passed through blindly
+        Assert.DoesNotContain(".", expected);
+        Assert.DoesNotContain(":", expected);
+    }
+
+    /// <summary>A machine without tmux explains itself instead of showing an empty grid.</summary>
     [AvaloniaFact]
     public void Without_tmux_the_view_says_why()
     {
         var view = new TerminalsView(new TmuxBackend("/nonexistent/tmux-missing"), "/tmp", () => { });
-        // a control that was never attached has no visual children yet, so it goes into a real window first
         var window = new Window { Width = 800, Height = 600, Content = view };
         window.Show();
         Dispatcher.UIThread.RunJobs();
 
         var text = string.Join("\n", view.GetVisualDescendants().OfType<TextBlock>().Select(t => t.Text ?? ""));
         Assert.Contains("tmux was not found", text);
-        Assert.DoesNotContain("TerminalPane0", view.GetVisualDescendants().OfType<Control>().Select(c => c.Name ?? ""));
+        Assert.Empty(view.GetVisualDescendants().OfType<TerminalControl>());
         window.Close();
     }
 
-    /// <summary>The key mapping: what a terminal has to receive, and what must be left to TextInput.</summary>
+    /// <summary>Session names: stable per project and pane, distinct per pane, and safe for tmux.</summary>
     [Fact]
-    public void Keys_are_mapped_to_tmux_names_and_text_is_left_alone()
+    public void Session_names_are_stable_per_pane_and_tmux_safe()
     {
-        Assert.Equal("Enter", TerminalKeys.TmuxKey(Key.Enter, KeyModifiers.None));
-        Assert.Equal("BSpace", TerminalKeys.TmuxKey(Key.Back, KeyModifiers.None));
-        Assert.Equal("Tab", TerminalKeys.TmuxKey(Key.Tab, KeyModifiers.None));
-        Assert.Equal("BTab", TerminalKeys.TmuxKey(Key.Tab, KeyModifiers.Shift));
-        Assert.Equal("Escape", TerminalKeys.TmuxKey(Key.Escape, KeyModifiers.None));
-        Assert.Equal("Up", TerminalKeys.TmuxKey(Key.Up, KeyModifiers.None));
-        Assert.Equal("PageUp", TerminalKeys.TmuxKey(Key.PageUp, KeyModifiers.None));
-        Assert.Equal("C-c", TerminalKeys.TmuxKey(Key.C, KeyModifiers.Control));
-        Assert.Equal("C-r", TerminalKeys.TmuxKey(Key.R, KeyModifiers.Control));
-        Assert.Equal("C-/", TerminalKeys.TmuxKey(Key.OemQuestion, KeyModifiers.Control));
-        Assert.Equal("M-Up", TerminalKeys.TmuxKey(Key.Up, KeyModifiers.Alt));
-        // text keys are NOT forwarded: their characters come from TextInput instead (see the class remarks)
-        Assert.Null(TerminalKeys.TmuxKey(Key.A, KeyModifiers.None));
-        Assert.Null(TerminalKeys.TmuxKey(Key.Space, KeyModifiers.None));
-        Assert.Null(TerminalKeys.TmuxKey(Key.D5, KeyModifiers.None));
-        Assert.Null(TerminalKeys.TmuxKey(Key.LeftShift, KeyModifiers.Shift));
-        Assert.True(TerminalKeys.IsText(Key.Space));
-        Assert.True(TerminalKeys.IsText(Key.A));
-        Assert.False(TerminalKeys.IsText(Key.Enter));
-    }
+        var backend = new TmuxBackend();
+        var names = backend.SessionNames("/home/qtu100/claude", 4).ToList();
+        Assert.Equal(4, names.Distinct().Count());
+        Assert.All(names, n => Assert.Matches("^kv-[0-9a-f]{8}-[0-3]$", n));
+        // the same project yields the same names (that is what makes the scrollback come back after a restart)
+        // a trailing separator is the same directory — and must be the same session, or the scrollback would be lost
+        Assert.Equal(names, backend.SessionNames("/home/qtu100/claude/", 4).ToList());
+        Assert.Equal(names, backend.SessionNames("/home/qtu100/claude//", 4).ToList());
+        Assert.NotEqual(names[0], backend.SessionNames("/home/qtu100/other", 4).First());
 
-    /// <summary>The cell arithmetic behind a resize, including the case where a font could not be measured.</summary>
-    [Fact]
-    public void Pixel_sizes_become_cell_sizes_with_a_floor()
-    {
-        Assert.Equal((100, 25), TerminalGeometry.Cells(800, 400, 8, 16));
-        // a degenerate measurement (a headless stub, a missing font) still yields a usable grid rather than 0x0
-        Assert.Equal((100, 25), TerminalGeometry.Cells(800, 400, 0, 0));
-        // and a tiny pane is clamped rather than sent to tmux, which refuses values under a couple of rows
-        Assert.Equal((TerminalGeometry.MinColumns, TerminalGeometry.MinRows), TerminalGeometry.Cells(10, 5, 8, 16));
-    }
-
-    /// <summary>The colour codes the parser produces mean what a terminal palette says they mean.</summary>
-    [Fact]
-    public void The_palette_resolves_the_codes_tmux_emits()
-    {
-        Assert.Null(TerminalPalette.Resolve(null));                        // default = the theme's own colour
-        Assert.Equal(((byte)0xCD, (byte)0x00, (byte)0x00), TerminalPalette.Resolve(31));
-        Assert.Equal(((byte)0x00, (byte)0xCD, (byte)0x00), TerminalPalette.Resolve(32));
-        Assert.Equal(((byte)0xFF, (byte)0x00, (byte)0x00), TerminalPalette.Resolve(91));       // bright
-        Assert.Equal(((byte)0x5C, (byte)0x5C, (byte)0xFF), TerminalPalette.Resolve(104));      // bright bg code
-        Assert.Equal(((byte)0xFF, (byte)0xFF, (byte)0xFF), TerminalPalette.Resolve(256 + 15)); // the 8-bit cube: white
-        Assert.Equal(((byte)0x00, (byte)0x00, (byte)0x00), TerminalPalette.Resolve(256 + 16));
-        Assert.Equal(((byte)0x8A, (byte)0x8A, (byte)0x8A), TerminalPalette.Resolve(256 + 245)); // the grey ramp
-        Assert.Equal(((byte)10, (byte)20, (byte)30), TerminalPalette.Resolve(1_000_000 + (10 << 16) + (20 << 8) + 30));
+        // a title is mapped to something tmux accepts: no '.' or ':' (tmux refuses both in a session name)
+        var safe = backend.SafeSessionName("/home/qtu100/claude", 2, "build: logs. v1!");
+        _out.WriteLine("safe name: " + safe);
+        Assert.NotNull(safe);
+        Assert.DoesNotContain(":", safe!);
+        Assert.DoesNotContain(".", safe);
+        Assert.DoesNotContain(" ", safe);
+        Assert.EndsWith("-2-build--logs--v1", safe);
+        Assert.Null(backend.SafeSessionName("/home/qtu100/claude", 0, "   "));
     }
 }

@@ -4,6 +4,7 @@ using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.Documents;
 using Avalonia.Input;
+using Avalonia.Input.Platform;
 using Avalonia.Controls.Presenters;
 using Avalonia.Interactivity;
 using Avalonia.VisualTree;

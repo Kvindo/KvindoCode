@@ -6,6 +6,7 @@ using Avalonia.Controls;
 using Avalonia.Controls.Primitives;
 using Avalonia.Layout;
 using Avalonia.Media;
+using Avalonia.Input.Platform;
 using Avalonia.Threading;
 using KvindoCode.Core;
 using KvindoCode.Core.Agent;
