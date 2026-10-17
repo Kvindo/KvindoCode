@@ -78,6 +78,27 @@ public sealed class TmuxBackend
     public string UnavailableReason =>
         IsAvailable ? "" : $"tmux was not found ({_tmux}). Install it (Debian/Ubuntu: sudo apt install tmux) to use the terminal grid.";
 
+    /// <summary>
+    /// The session's scrollback, as text, so a pane can be given its history back.
+    /// </summary>
+    /// <remarks>
+    /// Attaching to an existing tmux session repaints only the VISIBLE screen: the scrollback stays in the server and is
+    /// never sent to the client, so a restarted app showed an empty terminal — "history in terminal seems not preserved"
+    /// (reported 2026-10-17). The history is therefore read with <c>capture-pane -p -S -N</c> and written into the
+    /// terminal before the live session draws. Nothing goes to disk: tmux holds it in memory, which is what makes this
+    /// safe for output that must not leave the secret audit.
+    /// </remarks>
+    public string History(string projectPath, int index, int lines = 2000)
+    {
+        if (!IsAvailable) return "";
+        try
+        {
+            var r = Run(new[] { "capture-pane", "-p", "-J", "-t", SessionName(projectPath, index), "-S", "-" + lines });
+            return r.Code == 0 ? r.Output : "";
+        }
+        catch (Exception) { return ""; }
+    }
+
     /// <summary>End one pane's session (the pane's ✕). Its process exits, which the terminal control reports.</summary>
     public void KillSession(string projectPath, int index) => Run(new[] { "kill-session", "-t", SessionName(projectPath, index) });
 

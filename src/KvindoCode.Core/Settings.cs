@@ -172,6 +172,17 @@ public sealed class AppSettings
     public static bool WasActiveInPreviousRun(DateTimeOffset? lastAlive, DateTimeOffset newestMessage)
         => lastAlive is { } alive && newestMessage >= alive - ResumeActivityWindow && newestMessage <= alive + TimeSpan.FromMinutes(1);
 
+    /// <summary>
+    /// Was this session busy when the app last died — counting BACKGROUND TASK activity, not just messages?
+    /// </summary>
+    /// <remarks>
+    /// A session that started a long build and then wrote nothing has a stale "newest message", so it used to be left out
+    /// of the restart prompt although the work was cut off ("the app was restarted is not proposed to be sent to sessions
+    /// that run background tasks", 2026-10-17). Its task activity is the signal that it was alive.
+    /// </remarks>
+    public static bool WasActiveInPreviousRun(DateTimeOffset? lastAlive, DateTimeOffset newestMessage, DateTimeOffset lastTaskActivity)
+        => WasActiveInPreviousRun(lastAlive, newestMessage) || WasActiveInPreviousRun(lastAlive, lastTaskActivity);
+
     [JsonIgnore] public string EffectiveKey =>
         Environment.GetEnvironmentVariable("KVINDOCODE_API_KEY") is { Length: > 0 } k ? k : ApiKey;
     [JsonIgnore] public string EffectiveBaseUrl =>

@@ -42,8 +42,6 @@ public sealed class TerminalPaneView : UserControl
 
     /// <summary>Fired when this pane is clicked, so the grid can make it the one that receives the keyboard.</summary>
     public event Action<TerminalPaneView>? FocusRequested;
-    /// <summary>Fired when the human closes this pane.</summary>
-    public event Action<TerminalPaneView>? CloseRequested;
 
     public bool IsActive { get; private set; }
 
@@ -76,10 +74,14 @@ public sealed class TerminalPaneView : UserControl
             Name = $"TerminalName{index}",
             Classes = { "terminalname" },
             Watermark = $"terminal {index + 1}",
-            FontSize = 12,
-            Padding = new Thickness(4, 1),
+            FontSize = 11.5,
+            // (6) the header is HALF a line tall and the text fills that height: Padding 0 and no corner rounding of the
+            // content box, so the glyphs use the whole strip instead of floating in the middle of it.
+            Padding = new Thickness(4, 0),
+            MinHeight = 0,
             MinWidth = 40,
-            VerticalAlignment = VerticalAlignment.Center,
+            VerticalContentAlignment = VerticalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Stretch,
         };
         ToolTip.SetTip(_name, "Click to name this terminal (Enter applies it; see the tmux session name, which survives a restart).");
         _name.KeyDown += (_, e) =>
@@ -90,21 +92,25 @@ public sealed class TerminalPaneView : UserControl
             Terminal.Focus();                 // back to the shell: the name has been applied
         };
 
-        _state = new TextBlock { Classes = { "muted" }, FontSize = 11, VerticalAlignment = VerticalAlignment.Center };
+        // (asked 2026-10-17: "this line is not needed") the state label only ever said "exited" or "renamed"; the pane
+        // shows an exited shell by itself, and the tooltip carries the failure message.
+        _state = new TextBlock { Classes = { "muted" }, FontSize = 11, IsVisible = false, VerticalAlignment = VerticalAlignment.Center };
 
         var close = new Button
         {
-            Name = $"TerminalClose{index}",
+            Name = $"TerminalRestart{index}",
             Classes = { "ghost" },
-            Content = Ui.Icon("IconX", "KvMuted", 10, 2),
-            Padding = new Thickness(4, 2),
-            VerticalAlignment = VerticalAlignment.Center,
+            Content = Ui.Icon("IconRewind", "KvMuted", 12, 1.9),
+            Padding = new Thickness(4, 0),
+            VerticalAlignment = VerticalAlignment.Stretch,
             Margin = new Thickness(4, 0, 0, 0),
         };
-        ToolTip.SetTip(close, "Close this terminal (its tmux session is ended)");
-        close.Click += (_, _) => CloseRequested?.Invoke(this);
+        // (4) "instead of close this terminal there should be restart terminal that will clear it and start from scratch"
+        ToolTip.SetTip(close, "Restart this terminal: its session is ended and a fresh shell starts here (the pane stays)");
+        close.Click += (_, _) => Restart();
 
-        var head = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto,Auto"), Margin = new Thickness(2, 1, 2, 1) };
+        // (6) half the old header height: a single tight row, the text vertically centred in it.
+        var head = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto,Auto"), Margin = new Thickness(2, 0, 2, 0), Height = 19 };
         head.Children.Add(_name);
         Grid.SetColumn(_state, 1); head.Children.Add(_state);
         Grid.SetColumn(close, 2); head.Children.Add(close);
@@ -157,7 +163,16 @@ public sealed class TerminalPaneView : UserControl
                 Avalonia.Threading.Dispatcher.UIThread.Post(() => Attempt(tries + 1), Avalonia.Threading.DispatcherPriority.Loaded);
                 return;
             }
+            // The history FIRST: attaching to an existing tmux session repaints only the visible screen, so without this
+            // a restarted app showed an empty terminal (item 5, 2026-10-17). Read from the tmux server before the client
+            // attaches, and written straight into the emulator's buffer — nothing touches the disk.
+            var history = _backend.History(_project, Index);
             Terminal.LaunchProcess();
+            if (history.Length > 0)
+            {
+                Terminal.Terminal.Write(history.TrimEnd((char)10) + "\r\n");
+                Terminal.Terminal.ScrollToBottom();
+            }
             SetState("");
         }
         catch (Exception e)
@@ -223,7 +238,14 @@ public sealed class TerminalPaneView : UserControl
     public void Restart()
     {
         Stop();
-        Dispatcher.UIThread.Post(() => { if (VisualRoot is not null) Start(); }, DispatcherPriority.Loaded);
+        try { _backend.KillSession(_project, Index); } catch { /* already gone */ }
+        // recreated on the next frame, once the old process has really exited (the control launches only then)
+        Dispatcher.UIThread.Post(() =>
+        {
+            if (VisualRoot is null) return;
+            _started = false;
+            Start();
+        }, DispatcherPriority.Loaded);
     }
 
     /// <summary>End this pane's tmux session; its process exits and the control reports it.</summary>

@@ -18,6 +18,13 @@ public sealed class SessionInfo
     public string TitleSource { get; set; } = "";
     public DateTimeOffset Created { get; set; }
     public DateTimeOffset Updated { get; set; }
+    /// <summary>
+    /// The last time a BACKGROUND TASK of this session was seen running, while the session itself wrote no messages.
+    /// </summary>
+    /// <remarks>Recorded in the transcript meta, so "was this session busy when the app closed?" survives a restart even
+    /// for a session that went quiet behind a long build (asked 2026-10-17). Not persisted => defaults to
+    /// <see cref="Updated"/>'s value, which keeps the old behaviour for sessions that never had a task.</remarks>
+    public DateTimeOffset LastTaskActivity { get; set; }
     public string? Model { get; set; }                // as stored (Claude style for the registry)
     public string? KvModel { get; set; }              // exact gateway model id when KvindoCode wrote it
     public string? Effort { get; set; }
@@ -64,6 +71,7 @@ public sealed class Entry
     public string? WorkMode { get; set; }
     /// <summary>True while a turn is in flight; cleared when the turn ends. Used to resume after a restart.</summary>
     public bool? WasRunning { get; set; }
+    public DateTimeOffset? LastTaskActivity { get; set; }
     /// <summary>A subagent transcript, not one of the human's sessions.</summary>
     public bool? Subagent { get; set; }
     /// <summary>For a subagent transcript: the session that spawned it (see <see cref="SessionInfo.ParentSessionId"/>).</summary>
@@ -131,7 +139,7 @@ public static class SessionStore
                 // was overwritten on the next turn — the fix is only as good as this path.
                 if (line.StartsWith("{\"kind\":\"title\"")) { try { var te = JsonSerializer.Deserialize<Entry>(line, Json); if (!string.IsNullOrEmpty(te?.Title)) { info.Title = te.Title!; if (te!.TitleSource is { Length: > 0 } ts) info.TitleSource = ts; } } catch { } }
                 else if (line.StartsWith("{\"kind\":\"msg\"") && MessageTime(line) is { } mt) lastMessage = mt;
-                else if (line.StartsWith("{\"kind\":\"meta\"")) { try { var me = JsonSerializer.Deserialize<Entry>(line, Json); if (me?.WasRunning is { } wr) info.WasRunning = wr; if (me?.Subagent is { } sub) info.Subagent = sub; if (me?.ParentSessionId is { Length: > 0 } ps) info.ParentSessionId = ps; if (Enum.TryParse<SessionMode>(me?.WorkMode, out var wmode)) info.WorkMode = wmode; if (!string.IsNullOrEmpty(me?.Title)) { info.Title = me!.Title!; if (me.TitleSource is { Length: > 0 } ts) info.TitleSource = ts; } } catch { } }
+                else if (line.StartsWith("{\"kind\":\"meta\"")) { try { var me = JsonSerializer.Deserialize<Entry>(line, Json); if (me?.WasRunning is { } wr) info.WasRunning = wr; if (me?.LastTaskActivity is { } lta && lta > info.LastTaskActivity) info.LastTaskActivity = lta; if (me?.Subagent is { } sub) info.Subagent = sub; if (me?.ParentSessionId is { Length: > 0 } ps) info.ParentSessionId = ps; if (Enum.TryParse<SessionMode>(me?.WorkMode, out var wmode)) info.WorkMode = wmode; if (!string.IsNullOrEmpty(me?.Title)) { info.Title = me!.Title!; if (me.TitleSource is { Length: > 0 } ts) info.TitleSource = ts; } } catch { } }
                 continue;
             }
             if (line.Length == 0) continue;

@@ -1025,6 +1025,9 @@ public sealed class AgentSession : IDisposable
         catch (Exception ex) { Emit(new NoticeEvent("Could not save session: " + ex.Message, true)); }
     }
 
+    /// <summary>Persist the session's metadata now (for a caller that changed a field the restart logic reads).</summary>
+    public void SaveMetaNow() => SaveMeta();
+
     void SaveMeta()
     {
         try { Info.PermissionMode = _mode == PermissionMode.Plan ? "plan" : (Info.PermissionMode is null or "plan" ? "bypassPermissions" : Info.PermissionMode); Storage.SaveMeta(Info); }
@@ -1403,6 +1406,24 @@ public sealed class AgentSession : IDisposable
     }
 
     /// <summary>Asks a cheap model for a short title based on the conversation. Returns null on failure.</summary>
+    /// <summary>
+    /// The human's last prompts, oldest first — what ↑ should walk in the composer, including after a restart.
+    /// </summary>
+    /// <remarks>Read from the conversation itself (the transcript is the durable record), capped to the same size the
+    /// composer keeps. It used to live only in the view, so a restart emptied it (asked 2026-10-17).</remarks>
+    public IReadOnlyList<string> RecentPrompts
+    {
+        get
+        {
+            lock (_lock)
+                return _context.Where(m => m.Role == "user" && !m.IsSummary && !m.IsNotification && !m.IsInternal
+                                           && !string.IsNullOrWhiteSpace(m.Content))
+                               .Select(m => m.Content!)
+                               .TakeLast(100)
+                               .ToList();
+        }
+    }
+
     public async Task<string?> GenerateTitleAsync(CancellationToken ct)
     {
         List<ChatMessage> ctx; lock (_lock) ctx = _context.ToList();
@@ -1438,9 +1459,25 @@ public sealed class AgentSession : IDisposable
                 if (t.Length > 0 && t.Length <= 80 && t.Split(' ', StringSplitOptions.RemoveEmptyEntries).Length <= 12) return t;
             }
             catch (OperationCanceledException) { throw; }
-            catch { /* try the next model */ }
+            catch (Exception e)
+            {
+                // "Could not generate a title (is the title model available?)" was undiagnosable: every failure was
+                // swallowed here, so a masking refusal, a dead gateway, an unknown model id and a bad answer looked
+                // identical (reported 2026-10-17). Remember the reason and say it in the message.
+                TitleFailure ??= $"{model}: {e.Message}";
+                TraceTitle($"title model {model} failed: {e.Message}");
+            }
         }
         return null;
+    }
+
+    /// <summary>Why the last title attempt produced nothing, or null when it has not failed.</summary>
+    public string? TitleFailure { get; private set; }
+    bool _titleTraceSet;
+    void TraceTitle(string what)
+    {
+        _titleTraceSet = true;
+        try { File.AppendAllText(Path.Combine(Paths.ConfigDir, "title-trace.log"), DateTime.Now.ToString("HH:mm:ss ") + what + Environment.NewLine); } catch { }
     }
 
     public async Task<bool> RegenerateTitleAsync(CancellationToken ct)

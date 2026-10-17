@@ -375,9 +375,14 @@ public partial class MainWindow : Window
 
         if (_lastAlive is not null)
         {
+            // "Active" must include a session whose only activity was its BACKGROUND TASKS: a session that started a long
+            // build and went quiet writes no messages, so its Updated went stale and it was never offered after a restart
+            // ("the app was restarted is not proposed to be sent to sessions that run background tasks", 2026-10-17).
+            // WasRunning covers "a turn was in flight"; a finished turn with tasks still running does not set it, so the
+            // latest activity of a live task is the other signal.
             var active = _all
-                .Where(i => !i.Archived && AppSettings.WasActiveInPreviousRun(_lastAlive, i.Updated))
-                .OrderByDescending(i => i.Updated)
+                .Where(i => !i.Archived && AppSettings.WasActiveInPreviousRun(_lastAlive, i.Updated, i.LastTaskActivity))
+                .OrderByDescending(i => i.Updated > i.LastTaskActivity ? i.Updated : i.LastTaskActivity)
                 .ToList();
             if (active.Count > 0)
             {
@@ -693,6 +698,10 @@ public partial class MainWindow : Window
         session.SessionBridge = _sessionBridge ??= new WindowSessionBridge(this);
         session.Auditor = _auditor;
         var sv = new SessionView { Session = session, Transcript = new TranscriptView(), Interaction = inter, ContextWindow = session.ContextWindow, CostRub = session.CostRub };
+        // Composer history comes from the SESSION, so ↑ still walks the prompts you sent before the app was restarted
+        // (asked 2026-10-17: "history navigation in message enter should be preserved after restart"). It was a view-only
+        // list, so every restart started it empty.
+        foreach (var prompt in session.RecentPrompts) sv.SentPrompts.Add(prompt);
         session.IsForeground = _current is null || _current.Id == sv.Id;   // what is on screen stays silent
         sv.Transcript = MakeTranscript(sv);
         inter.View = sv.Transcript;
@@ -991,7 +1000,15 @@ public partial class MainWindow : Window
                 sv.Transcript.ProjectCwd = wr.Workspace.WorkDir;
                 if (cur) { UpdateWorkspaceButton(); if (PaneHost.IsVisible && _pane.HasContent) _pane.SetProject(wr.Workspace.WorkDir); }
                 break;
-            case TasksChangedEvent: if (cur) UpdateTasks(); RebuildSidebar(); break;
+            case TasksChangedEvent:
+                // Record that this session was busy BEHIND its own messages: the restart prompt must offer it even when
+                // its last message is older than the resume window (a long build writes nothing). Persisted with the
+                // session meta, so it survives the restart it exists for.
+                sv.Session.Info.LastTaskActivity = DateTimeOffset.UtcNow;
+                if (sv.Session.Tasks.Running.Count > 0) sv.Session.SaveMetaNow();
+                if (cur) UpdateTasks();
+                RebuildSidebar();
+                break;
             case TodosChangedEvent t:
                 {   // a changed list re-opens the panel; an unchanged one keeps the user's choice
                     var sig = string.Join("|", t.Todos.Select(x => x.Status + ":" + x.Content));
@@ -1546,7 +1563,16 @@ public partial class MainWindow : Window
         {
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(45));
             string? t = _live.TryGetValue(info.Id, out var live) ? await live.Session.GenerateTitleAsync(cts.Token) : await GenerateForAsync(info, cts.Token);
-            if (t != null) ApplyTitle(info, t, "auto"); else ShowError("Could not generate a title (is the title model available?).");
+            if (t != null) ApplyTitle(info, t, "auto");
+            else
+            {
+                // Say WHY (model id + the error), not just "is it available?" — the cause was swallowed before, and the
+                // same message covered a dead gateway, an unknown model and a secret that could not be masked.
+                var why = _live.TryGetValue(info.Id, out var lv2) ? lv2.Session.TitleFailure
+                        : await Task.Run(async () => { var s2 = AgentSession.Resume(_settings, _llm, info, new UiInteraction(), _storage, ResolveModel); try { await s2.GenerateTitleAsync(CancellationToken.None); return s2.TitleFailure; } finally { s2.Dispose(); } });
+                ShowError("Could not generate a title" + (string.IsNullOrEmpty(why) ? " (the model returned no usable title)." : ": " + why));
+                ShowInfo("Title details are in " + Path.Combine(Paths.ConfigDir, "title-trace.log"));
+            }
         }
         catch (Exception e) { ShowError("Title generation failed: " + e.Message); }
         finally { RegenBtn.IsEnabled = true; UpdateTitle(); if (old != null && TitleText.Text == "Generating title…") TitleText.Text = old; }

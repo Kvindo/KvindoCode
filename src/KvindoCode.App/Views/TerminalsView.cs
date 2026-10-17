@@ -52,13 +52,16 @@ public sealed class TerminalsView : UserControl
         _onNotice = onNotice ?? (_ => { });
 
         _grid.Name = "TerminalGrid";
-        _grid.ColumnDefinitions = new ColumnDefinitions("*,4,*,4,*");
-        _grid.RowDefinitions = new RowDefinitions("*,4,*,4,*");
+        // THREE tracks per axis: pane, splitter handle, pane. It was five ("*,4,*,4,*") with the panes placed on the
+        // first three, which left the last two tracks EMPTY — so the grid occupied only part of its area, a drag never
+        // matched the visible split, and the saved heights described tracks the layout did not use (reported
+        // 2026-10-17: "change in height of terminals is not saved").
+        _grid.ColumnDefinitions = new ColumnDefinitions("*,4,*");
+        _grid.RowDefinitions = new RowDefinitions("*,4,*");
         for (var i = 0; i < PaneCount; i++)
         {
             var pane = new TerminalPaneView(backend, project, i);
             pane.FocusRequested += p => SetActive(p.Index);
-            pane.CloseRequested += p => _ = ClosePaneAsync(p.Index);
             _panes[i] = pane;
         }
         Place(_panes[0], 0, 0); Place(_panes[1], 0, 2);
@@ -143,7 +146,7 @@ public sealed class TerminalsView : UserControl
     /// </remarks>
     void SaveLayout()
     {
-        if (_settings is null || _grid.ColumnDefinitions.Count < 5) return;
+        if (_settings is null || _grid.ColumnDefinitions.Count < 3) return;   // pane, splitter, pane
         var cols = $"{_grid.ColumnDefinitions[0].Width.Value:0.###},{_grid.ColumnDefinitions[2].Width.Value:0.###}";
         var rows = $"{_grid.RowDefinitions[0].Height.Value:0.###},{_grid.RowDefinitions[2].Height.Value:0.###}";
         _settings.TerminalLayouts[_project] = cols + ";" + rows;
@@ -203,12 +206,6 @@ public sealed class TerminalsView : UserControl
 
     /// <summary>Give the keyboard to the active terminal.</summary>
     public void FocusActive() => SetActive(_active);
-
-    Task ClosePaneAsync(int index)
-    {
-        if (_panes.TryGetValue(index, out var pane)) pane.Kill();
-        return Task.CompletedTask;
-    }
 
     /// <summary>End the four sessions and start four fresh ones, keeping the grid where it is.</summary>
     public void Restart()
