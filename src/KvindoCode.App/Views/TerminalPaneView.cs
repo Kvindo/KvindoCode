@@ -166,6 +166,9 @@ public sealed class TerminalPaneView : UserControl
             // The history FIRST: attaching to an existing tmux session repaints only the visible screen, so without this
             // a restarted app showed an empty terminal (item 5, 2026-10-17). Read from the tmux server before the client
             // attaches, and written straight into the emulator's buffer — nothing touches the disk.
+            // Bounded (5 s inside the backend) and only when a session already exists, so this can never hold up the
+            // launch: an unbounded synchronous tmux call here is what made the grid come up empty when a tmux server was
+            // wedged (2026-10-17).
             var history = _backend.History(_project, Index);
             Terminal.LaunchProcess();
             if (history.Length > 0)

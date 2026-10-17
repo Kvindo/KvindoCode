@@ -91,6 +91,9 @@ public sealed class TmuxBackend
     public string History(string projectPath, int index, int lines = 2000)
     {
         if (!IsAvailable) return "";
+        // No session, no history — and asking anyway would START a tmux server for a session that does not exist yet,
+        // then make the pane's own launch wait on it.
+        if (Run(new[] { "has-session", "-t", SessionName(projectPath, index) }).Code != 0) return "";
         try
         {
             var r = Run(new[] { "capture-pane", "-p", "-J", "-t", SessionName(projectPath, index), "-S", "-" + lines });
@@ -140,15 +143,33 @@ public sealed class TmuxBackend
     /// synchronisation context, so blocking the UI thread would wait on the very thread they need. That deadlocked the
     /// app once (a freeze on the first "is tmux installed?"), so this path drains the pipes without any await.
     /// </remarks>
-    (int Code, string Output, string Error) Run(IEnumerable<string> args)
+    /// <summary>
+    /// Run tmux synchronously, with a HARD deadline.
+    /// </summary>
+    /// <remarks>
+    /// Every caller of this is on the UI thread (the pane launches, the history read, the restart), so a tmux that does
+    /// not answer freezes the whole window — which is exactly what happened when the history read was added: a wedged
+    /// tmux server meant the pane's process was never launched, and the terminal grid came up empty in a full test run
+    /// while working fine alone (2026-10-17). A tmux command that takes seconds is already broken, so it is killed and
+    /// reported as a failure instead of being waited for.
+    /// </remarks>
+    (int Code, string Output, string Error) Run(IEnumerable<string> args, int timeoutMs = 5000)
     {
         var psi = new ProcessStartInfo(_tmux) { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true };
         if (Socket is not null) { psi.ArgumentList.Add("-L"); psi.ArgumentList.Add(Socket); }
         foreach (var a in args) psi.ArgumentList.Add(a);
         using var p = Process.Start(psi) ?? throw new InvalidOperationException($"could not start {_tmux}");
-        var output = p.StandardOutput.ReadToEnd();
-        var error = p.StandardError.ReadToEnd();
-        p.WaitForExit();
-        return (p.ExitCode, output, error);
+        // Drain both pipes concurrently, then bound the wait: reading stdout to the end first would block for ever on a
+        // tmux that never closes it.
+        var outTask = p.StandardOutput.ReadToEndAsync();
+        var errTask = p.StandardError.ReadToEndAsync();
+        if (!p.WaitForExit(timeoutMs))
+        {
+            try { p.Kill(entireProcessTree: true); } catch { }
+            return (-1, "", $"tmux {string.Join(' ', args)} did not finish within {timeoutMs} ms");
+        }
+        return (p.ExitCode, Drained(outTask), Drained(errTask));
+
+        static string Drained(Task<string> t) { try { return t.Wait(2000) ? t.Result : ""; } catch { return ""; } }
     }
 }
