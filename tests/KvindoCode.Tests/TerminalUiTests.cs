@@ -355,7 +355,10 @@ public sealed class TerminalUiTests
 
     /// <summary>The grid fills the main area (it was capped at 1400 px and left-aligned).</summary>
     [AvaloniaFact]
-    public async Task The_grid_fills_the_main_area()
+    // NOT async: `await Task.CompletedTask` was enough for the continuation (and so xunit's cleanup) to land on a
+    // thread-pool thread, and Avalonia's headless cleanup then threw "The calling thread cannot access this object
+    // because a different thread owns it" — a test-case CLEANUP failure, i.e. a failure with nothing wrong in the app.
+    public void The_grid_fills_the_main_area()
     {
         if (!new TmuxBackend().IsAvailable) { _out.WriteLine("tmux not available; skipping"); return; }
         Shared().Win.Width = 1700;
@@ -373,7 +376,6 @@ public sealed class TerminalUiTests
         Assert.True(terminals.Bounds.Width > 1000, $"the grid is only {terminals.Bounds.Width:0} px wide");
         Assert.True(terminals.Panes.Max(p => p.Bounds.Width) > 400);
         Relayout(Shared().Win, 1200, 850);          // leave the shared window in a normal state for whatever runs next
-        await Task.CompletedTask;
     }
 
     /// <summary>A pane can be renamed; the name goes to tmux, where it outlives the app.</summary>
