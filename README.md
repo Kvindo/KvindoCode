@@ -1,6 +1,32 @@
 # KvindoCode
 
-A Claude Code–style coding agent as a native desktop app, built with [Avalonia UI](https://avaloniaui.net/) 12 on .NET 10 and powered by the models of [plusvibeapi.ru](https://plusvibeapi.ru/?ref=DQPPLBH2) (OpenAI-compatible `/v1/chat/completions`).
+**A desktop AI coding agent for Linux, Windows and macOS - a native Avalonia app, not a terminal TUI.** It runs a
+full agent loop (files, shell, git worktrees, browser, background tasks, subagents) against any compatible
+`/v1/chat/completions` endpoint, and it is built around a *local, encrypted secret vault*: credentials in tool output
+and in outbound requests are detected, masked and optionally rotated instead of being pasted into a transcript.
+
+Built with [Avalonia UI](https://avaloniaui.net/) 12 on .NET 10 and powered by the models of
+[plusvibeapi.ru](https://plusvibeapi.ru/?ref=DQPPLBH2); any gateway that speaks the same protocol works.
+
+**Why it exists.** Two things are missing from most agent CLIs. *Isolation:* two agents editing one checkout corrupt
+each other's index, HEAD and files, so every session here gets its own **git worktree and branch**. *Secret hygiene:*
+a `cat .env` or a `psql -c` ends up in the transcript and then in every later request, so an **AES-256-GCM vault**
+sits in front of the wire - deterministic detection first, a local model only as a second opinion, reversible markers
+for the model, and a leak register for anything that escaped before it was known.
+
+**At a glance** - `git worktree` per session; plan mode with an adversarial plan reviewer; subagents with
+discoverable model tags; a real **XTerm grid** (four panes, tmux-backed persistence); file tree and side panel;
+find-in-session across the whole history; tokens, cost and cache figures; Telegram (Bot API and MTProto user
+session); Chrome automation over DevTools; encrypted vault with leak register and key rotation; per-session secret
+auditing that covers subagents.
+
+**Search terms** (what this project is, for people looking for it): AI coding agent, autonomous coding assistant,
+desktop GUI coding agent, Avalonia coding agent, C# / .NET AI agent, Linux AI coding agent, GUI alternative to a
+terminal coding agent, OpenAI-compatible agent client, local LLM agent GUI, git worktree isolation for coding agents,
+agent with secret scanning and masking, encrypted credential vault for an AI agent, embedded XTerm terminal in
+Avalonia.
+
+![KvindoCode mark](src/KvindoCode.App/Assets/kvindo-k.png)
 
 > **Renamed from PvCode (2026-10-08).** The product, its assemblies (`kvindocode.dll`), its launcher (`kvindocode`),
 > its config directory (`~/.kvindocode`) and its environment variables (`KVINDOCODE_*`) all carry the new name. Your
@@ -56,7 +82,7 @@ First run: *Settings* (bottom-left) → API key (`~/.kvindocode/settings.json`, 
 | **Bulk delete** | Hold **Alt**: every session row shows a ✕ (delete that one) and each project header offers *Delete all N listed…*, which names the sessions and asks once. Transcript files stay on disk. |
 | **Sidebar** | *Pinned* and project groups are collapsed by default; a dot shows a working session (pulsing) or one with running background tasks, also on collapsed group headers. A session that finished in the background gets a blue dot and an entry in **Needs attention** (pinned sessions are listed there too — a collapsed Pinned group shows only a dot): clicking the dot acknowledges it (the light goes out, the entry stays), the block's ✓ clears the dot and its ✕ removes the entry, and **removing all of them** is the ✕ in the block header — which, like the other bulk actions, appears only while **Alt** is held, and says in the transcript which sessions it removed. Writing to a session never clears its entry on its own — only another finished turn makes it wait again. A turn that ends in the session you are **currently looking at** is held back and enters the block the moment you switch away (or at the next start), because the block lists what you *cannot* see: it used to be skipped entirely, so a session that finished while you watched it was missing from the one list that answers "what is waiting for me?" (reported twice). |
 | **Continue after a restart** | At startup KvindoCode offers to continue the sessions that were active when it last was alive (`LastRunEnded`, refreshed every 20 s; a session counts if its newest message is within 15 min of it — `AppSettings.WasActiveInPreviousRun`). Continuing sends that session a real user turn: *“The app was restarted, please continue where you left off. Note that background tasks and loops will not be autocontinued, so you have to restore them yourself.”* The dialog offers *Continue all / Choose individually / Skip all*. |
-| **Terminals** | The icon beside a project's **+** opens a **2×2 grid of real terminals** (main area; *Back to session* closes it). Each pane is an **XTerm emulator** (`Iciclecreek.Avalonia.Terminal`, i.e. XTerm.NET over a PTY) — not text this app paints — so the screen model, colours, selection, scrollback, alternate screen (vim, htop, less) and graphics are the emulator's, and it repaints on a shared throttled frame instead of on a poll loop. Each pane runs **`tmux new-session -A -s kv-<hash>-<n>`**, so the scrollback lives in the tmux server: **closing the app or restarting keeps every pane**, and you can attach to the same pane from a real terminal — the session name is in the pane's tooltip and in the grid's status line. Panes start in the project directory, are resizable (dragging a splitter moves that boundary in tmux by the cells it moved on screen; a window resize resizes the whole grid), can be **renamed** (the name goes to tmux as a safe session name, so it survives a restart) and closed individually. Typing goes to the pane you clicked; a pane's ✕ ends its session. Nothing is written to disk, so terminal output never lands outside the secret audit; a machine without tmux explains itself instead of showing an empty grid. |
+| **Terminals** | The icon beside a project's **+** opens a **2×2 grid of real terminals** (main area; *Back to session* closes it). Each pane is an **XTerm emulator** (`Iciclecreek.Avalonia.Terminal`: XTerm.NET over a PTY) — not text this app paints — so the screen model, colours, selection, scrollback, alternate screen (vim, htop, less) and graphics are the emulator's, and it repaints on a shared throttled frame instead of a poll loop. Each pane runs **`tmux new-session -A -s kv-<hash>-<n>`**, so the scrollback lives in the tmux server: **closing or restarting the app keeps every pane**, and the same pane can be attached from a real terminal (the session name is in the pane's tooltip). Panes start in the project directory, are resizable — a splitter drag moves that boundary in tmux by the cells it moved on screen, and the sizes are **remembered per project** — can be **renamed** (the name goes to tmux, so it survives a restart) and closed. The ✕ in the grid header **restarts** the four terminals (fresh shells, same view). Typing goes to the pane you clicked. Nothing is written to disk, so terminal output never lands outside the secret audit; a machine without tmux explains itself instead of showing an empty grid. |
 | **UI** | Left-aligned transcript, collapsible tool cards with diffs, closable task list, light/dark theme. |
 
 The header has a **find-in-session** box (case-insensitive regexp, literal if invalid): Enter / Shift+Enter step through the matches, which are real selections and can be copied; Esc clears it. The **Notification** hook payload carries `session_title`, `session_id` and `project`, so a desktop notification can name the session.
@@ -74,3 +100,30 @@ python3 tools/update_scores.py      # refresh src/KvindoCode.App/Assets/scores.j
 dotnet run --project src/KvindoCode.App -- /path/to/project
 ```
 `KVINDOCODE_SCRIPT=file.json` swaps the API for a scripted fake (UI tests/demos); `KVINDOCODE_HOME` relocates `~/.kvindocode`.
+
+## FAQ
+
+**Is this a GUI for an existing coding agent, or its own agent?** Its own: the agent loop, tools, plan review and
+subagents are implemented here, talking to any `/v1/chat/completions` gateway. The session format is compatible with a
+Claude-style store, so existing sessions can be opened (see *Projects / sessions* above).
+
+**Why a desktop app instead of a terminal UI?** Cards, diffs, a file tree, a side panel, scrollable history and a real
+terminal grid are hard to do well in a terminal, and a GUI can hold several sessions side by side.
+
+**Does it need a specific model?** No. It is model-agnostic: the picker lists what the gateway serves, with per-model
+price, context, effort and benchmark columns. Planning and review want a strong model; titles and classification use a
+cheap one.
+
+**How does parallel work not destroy the repository?** Every session gets its own `git worktree` and branch
+(`kv/<session>`); nothing is committed or merged for you, and the app never merges. The header chip copies the merge
+command for that session's branch.
+
+**What happens to secrets it sees?** They are detected by patterns first (PEM blocks, kubeconfig, JWTs, vendor token
+shapes, credentials in URLs, secret-named assignments), stored encrypted, and replaced by reversible markers in what
+the model sees. A local model is only a second opinion, and its findings go through a dialog. Anything that reached a
+transcript before it was known is registered for rotation.
+
+**Does it work offline / with a local model?** The agent needs an endpoint; point it at a local [OI]-compatible server
+and it works. Detection, masking and the vault are local and need no model at all.
+
+**Platforms?** Linux (primary), Windows and macOS. Needs the .NET 10 SDK to build; releases are self-contained.
