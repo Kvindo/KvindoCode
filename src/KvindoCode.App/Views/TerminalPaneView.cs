@@ -150,8 +150,12 @@ public sealed class TerminalPaneView : UserControl
     {
         if (_started) return;
         _started = true;
+        _stopped = false;
         Attempt(0);
     }
+
+    /// <summary>Set by <see cref="Stop"/>, so a retry that is already queued does not relaunch a stopped pane.</summary>
+    bool _stopped;
 
     /// <summary>
     /// Try to launch, and keep trying while the pane is on screen.
@@ -166,7 +170,11 @@ public sealed class TerminalPaneView : UserControl
     /// </remarks>
     void Attempt(int tries)
     {
-        if (VisualRoot is null) return;                     // the grid is gone: stop retrying
+        // NOT "if (VisualRoot is null) return": a pane inside a view that has just been attached can have no visual root
+        // for a frame, and _started is already true — so bailing here left the pane dead for ever, with four controls on
+        // screen and no tmux server (exactly what a full test run showed while the class alone passed). Only Stop() ends
+        // the retries.
+        if (_stopped) return;
         try
         {
             Terminal.ApplyTemplate();
@@ -199,9 +207,16 @@ public sealed class TerminalPaneView : UserControl
             Retry(tries);
         }
 
-        void Retry(int n) =>
+        // BOUNDED. "Retry until it works" is an infinite chain of posted callbacks, and a headless test that pumps the
+        // dispatcher (Dispatcher.UIThread.RunJobs) never returns from it — the terminal suites hung for 15 minutes with
+        // no test completing. 150 frames is several seconds of real time, far longer than a layout pass needs, and a
+        // pane that still has no process then says so instead of spinning.
+        void Retry(int n)
+        {
+            if (n >= 150) { SetState("could not start"); return; }
             Avalonia.Threading.Dispatcher.UIThread.Post(() => Attempt(n + 1),
                 n < 5 ? Avalonia.Threading.DispatcherPriority.Loaded : Avalonia.Threading.DispatcherPriority.Background);
+        }
     }
 
     /// <summary>Show a short status in the header — empty hides it (the normal case: a working terminal needs no label).</summary>
@@ -242,6 +257,7 @@ public sealed class TerminalPaneView : UserControl
     public void Stop()
     {
         _started = false;
+        _stopped = true;
         try { Terminal.Kill(); } catch { /* already gone */ }
     }
 
@@ -259,6 +275,7 @@ public sealed class TerminalPaneView : UserControl
         {
             if (VisualRoot is null) return;
             _started = false;
+            _stopped = false;
             Start();
         }, DispatcherPriority.Loaded);
     }

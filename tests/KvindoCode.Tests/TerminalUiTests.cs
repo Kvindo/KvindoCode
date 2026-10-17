@@ -293,7 +293,18 @@ public sealed class TerminalUiTests
         var sb = Shared().Sb;
         var terminals = OpenGrid();
         var sessions = new TmuxBackend(socketName: _socket).SessionNames(sb.Project, 4).ToList();
-        Assert.True(await Eventually(() => Task.FromResult(sessions.All(HasSession))));
+        var allUp = await Eventually(() => Task.FromResult(sessions.All(HasSession)));
+        if (!allUp)
+        {
+            _out.WriteLine("SOCKET=" + _socket + " env=" + Environment.GetEnvironmentVariable("KVINDOCODE_TMUX_SOCKET"));
+            foreach (var p2 in terminals.Panes)
+                _out.WriteLine($"  pane {p2.Index}: session={p2.SessionName} live={p2.Terminal.IsLive} pid={p2.Terminal.Pid} present={HasSession(p2.SessionName)}");
+            using var ls = Process.Start(new ProcessStartInfo("tmux")
+            { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, ArgumentList = { "-L", _socket, "ls" } })!;
+            _out.WriteLine("tmux ls: " + ls.StandardOutput.ReadToEnd() + " | " + ls.StandardError.ReadToEnd());
+            ls.WaitForExit(5000);
+        }
+        Assert.True(allUp, "not every pane's session exists");
 
         terminals.SetActive(2);
         Dispatcher.UIThread.RunJobs();
