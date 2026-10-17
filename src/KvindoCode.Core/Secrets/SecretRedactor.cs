@@ -154,6 +154,29 @@ public sealed class SecretRedactor
 
     public string Redact(string? text) => text is not null && TryRedact(text, out var r) ? r : text ?? "";
 
+    /// <summary>
+    /// Replace EVERY registered spelling — the value and its JSON-escaped form — with its placeholder.
+    /// </summary>
+    /// <remarks>
+    /// This is the last-resort pass behind the fail-closed send check. <see cref="TryRedact"/> only replaces the RAW
+    /// spelling, while <see cref="Contains"/> also recognises <see cref="JsonEscape"/>d values; that asymmetry is what
+    /// could leave a value visible and make a request impossible to send — the session then failed every turn for ever
+    /// ("could not be reliably masked", reported 2026-08 and again 2026-10-17). Used ONLY when the normal masking is
+    /// followed by a verification that still finds something, and its result is verified again before sending.
+    /// </remarks>
+    public string RedactAll(string? text)
+    {
+        if (string.IsNullOrEmpty(text) || _map.Count == 0) return text ?? "";
+        if (!_automaton.Occurs(text)) return text;
+        var s = text;
+        foreach (var (value, name) in _map)
+        {
+            if (value.Length == 0 || !s.Contains(value, StringComparison.Ordinal)) continue;
+            s = s.Replace(value, Placeholder(name), StringComparison.Ordinal);
+        }
+        return s;
+    }
+
     /// <summary>Serialize a JSON tree the way the transcript stores it: placeholders stay readable instead of \u00ab-escaped.</summary>
     public static string Serialize(JsonNode node) => node.ToJsonString(new System.Text.Json.JsonSerializerOptions
     {
