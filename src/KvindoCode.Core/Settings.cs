@@ -145,6 +145,12 @@ public sealed class AppSettings
     /// <summary>Sidebar groups the user expanded (everything is collapsed by default).</summary>
     public List<string> ExpandedGroups { get; set; } = new();
     public string? LastProject { get; set; }
+    /// <summary>
+    /// The terminal grid's splitter sizes per project, as "left,right;top,bottom" Star weights.
+    /// </summary>
+    /// <remarks>Dragging a splitter is a deliberate act and it was lost on every switch away from the project — the grid
+    /// was rebuilt at an even 2x2 (reported 2026-10-17). Kept per project because the sizes suit one project's work.</remarks>
+    public Dictionary<string, string> TerminalLayouts { get; set; } = new();
     public List<string> Projects { get; set; } = new();
 
     /// <summary>The last time a previous run was seen alive. Refreshed every 20 s while the app runs, so after a restart

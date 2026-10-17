@@ -7,6 +7,7 @@ using Avalonia.Controls;
 using Avalonia.Controls.Primitives;
 using Avalonia.Layout;
 using Avalonia.Media;
+using KvindoCode.Core;
 using KvindoCode.Core.Terminal;
 
 namespace KvindoCode.App.Views;
@@ -30,7 +31,6 @@ public sealed class TerminalsView : UserControl
     readonly Action _close;
     readonly Action<string> _onNotice;
     readonly Dictionary<int, TerminalPaneView> _panes = new();
-    readonly TextBlock _status = new() { Classes = { "muted" }, FontSize = 12, VerticalAlignment = VerticalAlignment.Center, TextTrimming = TextTrimming.CharacterEllipsis };
     readonly Grid _grid = new();
     int _active;
 
@@ -39,9 +39,12 @@ public sealed class TerminalsView : UserControl
 
     public const int PaneCount = 4;
 
-    public TerminalsView(TmuxBackend backend, string project, Action close, Action<string>? onNotice = null)
+    readonly AppSettings? _settings;
+
+    public TerminalsView(TmuxBackend backend, string project, Action close, Action<string>? onNotice = null, AppSettings? settings = null)
     {
         Name = "TerminalsView";
+        _settings = settings;
         Focusable = true;
         _backend = backend;
         _project = project;
@@ -77,14 +80,16 @@ public sealed class TerminalsView : UserControl
 
         var back = new Button { Name = "TerminalsBack", Classes = { "outline" }, Content = "Back to session", VerticalAlignment = VerticalAlignment.Center };
         back.Click += (_, _) => _close();
-        var killAll = new Button { Name = "TerminalsKillAll", Classes = { "ghost" }, Content = Ui.Icon("IconX", "KvMuted", 12, 2), Padding = new Thickness(6, 3), VerticalAlignment = VerticalAlignment.Center };
-        ToolTip.SetTip(killAll, "End every terminal in this grid (the four tmux sessions are killed; nothing is written to disk)");
-        killAll.Click += (_, _) => KillAll();
+        // RESTART, not "kill everything": it ends the four sessions, starts four fresh ones and leaves the grid alone. That
+        // is what the ✕ was being asked for — a way out of a broken terminal without losing the view (asked 2026-10-17).
+        var restart = new Button { Name = "TerminalsRestart", Classes = { "ghost" }, Content = Ui.Icon("IconRewind", "KvMuted", 13, 1.9), Padding = new Thickness(6, 3), VerticalAlignment = VerticalAlignment.Center };
+        ToolTip.SetTip(restart, "Restart the terminals: end the four tmux sessions and start fresh shells (the panes stay; scrollback and any running program are discarded)");
+        restart.Click += (_, _) => Restart();
 
+        // No session-name line: it was a wall of ids that nobody reads, and the names are in each pane's tooltip.
         var head = new Grid { ColumnDefinitions = new ColumnDefinitions("Auto,*,Auto,Auto"), Margin = new Thickness(2, 2, 2, 6) };
         head.Children.Add(title);
-        Grid.SetColumn(_status, 1); _status.HorizontalAlignment = HorizontalAlignment.Right; _status.Margin = new Thickness(12, 0); head.Children.Add(_status);
-        Grid.SetColumn(killAll, 2); head.Children.Add(killAll);
+        Grid.SetColumn(restart, 2); head.Children.Add(restart);
         Grid.SetColumn(back, 3); back.Margin = new Thickness(8, 0, 0, 0); head.Children.Add(back);
 
         if (!_backend.IsAvailable)
@@ -101,8 +106,9 @@ public sealed class TerminalsView : UserControl
         Content = new DockPanel { Children = { head, _grid } };
         DockPanel.SetDock(head, Dock.Top);
 
+        RestoreLayout();
         AttachedToVisualTree += (_, _) => StartPanes();
-        DetachedFromVisualTree += (_, _) => StopPanes();
+        DetachedFromVisualTree += (_, _) => { SaveLayout(); StopPanes(); };
     }
 
     void Place(Control c, int row, int column)
@@ -127,13 +133,49 @@ public sealed class TerminalsView : UserControl
         _grid.Children.Add(s);
     }
 
+    /// <summary>
+    /// Remember the splitter sizes for this project and put them back when the grid is reopened.
+    /// </summary>
+    /// <remarks>
+    /// The grid is rebuilt every time it is opened (switching projects, closing and reopening), so a drag was lost the
+    /// moment the user looked at another project (reported 2026-10-17). Stored as Star weights, which survive any window
+    /// size — the pixel sizes would not.
+    /// </remarks>
+    void SaveLayout()
+    {
+        if (_settings is null || _grid.ColumnDefinitions.Count < 5) return;
+        var cols = $"{_grid.ColumnDefinitions[0].Width.Value:0.###},{_grid.ColumnDefinitions[2].Width.Value:0.###}";
+        var rows = $"{_grid.RowDefinitions[0].Height.Value:0.###},{_grid.RowDefinitions[2].Height.Value:0.###}";
+        _settings.TerminalLayouts[_project] = cols + ";" + rows;
+        try { _settings.Save(); } catch { /* a layout is not worth an error dialog */ }
+    }
+
+    void RestoreLayout()
+    {
+        if (_settings is null || !_settings.TerminalLayouts.TryGetValue(_project, out var saved)) return;
+        var parts = saved.Split(';');
+        if (parts.Length != 2) return;
+        var c = parts[0].Split(',');
+        var r = parts[1].Split(',');
+        if (c.Length != 2 || r.Length != 2) return;
+        if (!double.TryParse(c[0], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var cl)
+            || !double.TryParse(c[1], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var cr)
+            || !double.TryParse(r[0], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var rt)
+            || !double.TryParse(r[1], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var rb)) return;
+        // a zero or negative weight would collapse a pane, so a damaged value is ignored rather than obeyed
+        if (cl <= 0 || cr <= 0 || rt <= 0 || rb <= 0) return;
+        _grid.ColumnDefinitions[0].Width = new GridLength(cl, GridUnitType.Star);
+        _grid.ColumnDefinitions[2].Width = new GridLength(cr, GridUnitType.Star);
+        _grid.RowDefinitions[0].Height = new GridLength(rt, GridUnitType.Star);
+        _grid.RowDefinitions[2].Height = new GridLength(rb, GridUnitType.Star);
+    }
+
     /// <summary>Launch the four PTYs, once, when the grid first appears.</summary>
     public void StartPanes()
     {
         if (!_backend.IsAvailable) return;
         foreach (var (_, pane) in _panes.OrderBy(p => p.Key)) pane.Start();
         SetActive(_active);
-        _status.Text = string.Join(" · ", _panes.Values.Select(p => p.SessionName));
     }
 
     public IEnumerable<TerminalPaneView> Panes => _panes.Values.OrderBy(p => p.Index);
@@ -166,6 +208,16 @@ public sealed class TerminalsView : UserControl
     {
         if (_panes.TryGetValue(index, out var pane)) pane.Kill();
         return Task.CompletedTask;
+    }
+
+    /// <summary>End the four sessions and start four fresh ones, keeping the grid where it is.</summary>
+    public void Restart()
+    {
+        StopPanes();
+        _backend.KillAll(_project, PaneCount);
+        foreach (var pane in _panes.Values) pane.Restart();
+        SetActive(_active);
+        _onNotice("The terminals were restarted: four fresh shells in " + Path.GetFileName(_project.TrimEnd('/')) + ".");
     }
 
     void KillAll()
