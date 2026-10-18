@@ -27,11 +27,16 @@ public sealed partial class BashTool : Tool
      "required":["command"]}
     """)!;
 
-    /// <summary>`git stash` in any spelling: "git stash", "git -c x=y stash", "git stash pop", "GIT stash".</summary>
-    /// <remarks>Matched on the command text rather than by parsing the shell: a false positive costs one clear message,
-    /// and the message names the safe alternatives. A leading `!` or a quoted mention does not match because the verb
-    /// must follow "git" directly.</remarks>
-    [System.Text.RegularExpressions.GeneratedRegex(@"\bgit\b[^;&|\n]*?\bstash\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase)]
+    /// <summary>The stash subcommand as the FIRST verb after git: "git stash", "git -c x=y stash", "GIT stash".</summary>
+    /// <remarks>
+    /// The verb must follow `git` directly (after any `-c key=value` options), at the start of a command or after a
+    /// separator. A first draft matched "git" followed by anything up to "stash" anywhere on the line, which refused a
+    /// release note that merely MENTIONED the command — and a false positive that blocks real work is worse than the
+    /// risk this guards.
+    /// </remarks>
+    [System.Text.RegularExpressions.GeneratedRegex(
+        @"(^|[;&|\n])\s*(?:(?:cd|export|env)\s+[^;&|\n]*?\s*)?git\s+(?:-c\s+\S+\s+)*stash\b",
+        System.Text.RegularExpressions.RegexOptions.IgnoreCase)]
     private static partial System.Text.RegularExpressions.Regex StashCommandRx();
 
     /// <summary>`git stash create` is the one stash form that does NOT touch refs/stash — it prints a commit id — so it
