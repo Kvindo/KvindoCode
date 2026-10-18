@@ -243,10 +243,6 @@ public static partial class DeterministicSecretDetector
         var v = value.Trim('"', '\'', '`', ';', ',', '.', ':');
         if (v.Length < 8) return false;
         if (v.Any(char.IsWhiteSpace)) return false;      // a value is one token; a phrase or a code line is not (passphrases go through the 'password:' rule)
-        // A MARKER is masking machinery, never a candidate, and the rules below would refuse it by its punctuation
-        // (it starts with "%[$"). It is checked FIRST for that reason: "is this worth offering?" has one right answer
-        // for a placeholder, and it is yes — the value behind it is already in the vault.
-        if (SecretPlaceholders.Contains(v)) return true;
         if (v.StartsWith("%[$", StringComparison.Ordinal) || v.StartsWith("$", StringComparison.Ordinal) || v.StartsWith("<", StringComparison.Ordinal) || v.StartsWith("{", StringComparison.Ordinal) || v.StartsWith("«", StringComparison.Ordinal)) return false;
         if (PlaceholderWordRx().IsMatch(v) || HyphenatedPhraseRx().IsMatch(v)) return false;
         if (HeaderNameRx().IsMatch(v)) return false;                                             // a header/option NAME the model quoted from code, not a value

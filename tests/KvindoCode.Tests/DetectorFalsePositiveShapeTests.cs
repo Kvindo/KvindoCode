@@ -61,14 +61,6 @@ public sealed class DetectorFalsePositiveShapeTests(ITestOutputHelper o)
     /// The test records that trade-off rather than pretending it does not exist.
     /// </remarks>
     [Fact]
-    public void A_marker_is_always_plausible_because_it_stands_for_a_stored_secret()
-    {
-        var marker = KvindoCode.Core.Secrets.SecretPlaceholders.Marker("audited-token-11526c0ebcb2");
-        o.WriteLine($"marker len={marker.Length} contains={KvindoCode.Core.Secrets.SecretPlaceholders.Contains(marker)}");
-        Assert.True(DeterministicSecretDetector.IsPlausibleSecretValue(marker));
-    }
-
-    [Fact]
     public void A_pipe_bearing_value_is_left_to_the_pattern_detector()
     {
         const string withPipe = "abcd|efgh1234ijkl";
