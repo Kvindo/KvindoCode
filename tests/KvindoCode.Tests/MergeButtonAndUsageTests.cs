@@ -1,6 +1,7 @@
 using System.Reflection;
 using System.Text.Json.Nodes;
 using Avalonia.Controls;
+using Avalonia.Input.Platform;
 using Avalonia.Headless.XUnit;
 using Avalonia.Threading;
 using KvindoCode.App;
@@ -128,6 +129,27 @@ public sealed class MergeButtonAndUsageTests(ITestOutputHelper o)
         Assert.False(sep2.IsVisible);                              // nothing to its left: no dangling dot
         Assert.Equal(2, Grid.GetColumn(cost));                      // aligned under the cache figure
         Assert.NotEqual(new GridLength(0), panel.RowDefinitions[1].Height);
+        app.Window.Close();
+    }
+
+    /// <summary>Copy name puts "name (id)" on the clipboard — one line, the id in brackets.</summary>
+    /// <remarks>Asked 2026-10-18: "when copying session name it should be in format name (id), id in brackets, not on the
+    /// new line". A two-line clip pastes badly into a chat or a command.</remarks>
+    [AvaloniaFact]
+    public async Task Copying_the_session_name_includes_the_id_in_brackets()
+    {
+        using var sb = new Sandbox();
+        using var app = SecretAuditorRealUiTests.StartUi(sb, new JsonArray { Script.Text("hi") });
+        var title = app.Session.Session.Info.Title;
+        var id = app.Session.Id;
+        var btn = app.Window.FindControl<Button>("CopyNameBtn")!;
+        btn.RaiseEvent(new Avalonia.Interactivity.RoutedEventArgs(Button.ClickEvent));
+        for (var i = 0; i < 40; i++) { Dispatcher.UIThread.RunJobs(); await Task.Delay(25); }
+
+        var clip = await app.Window.Clipboard!.TryGetTextAsync();
+        o.WriteLine($"clipboard: '{clip}'");
+        Assert.Equal(title + " (" + id + ")", clip);
+        Assert.DoesNotContain("\n", clip ?? "");
         app.Window.Close();
     }
 

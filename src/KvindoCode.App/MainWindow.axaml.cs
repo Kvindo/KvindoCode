@@ -125,7 +125,8 @@ public partial class MainWindow : Window
             // The ID travels WITH the name (asked 2026-10-18): a name is not unique and cannot be handed to another
             // session or to a command, while the id can. Two lines, so a paste reads as a pair rather than a run-on.
             var id = _current!.Session.Info.Id;
-            var text = string.IsNullOrWhiteSpace(id) ? name : name + "\n" + id;
+            // "name (id)", one line (asked 2026-10-18) — a two-line clip pastes badly into a chat or a command
+            var text = string.IsNullOrWhiteSpace(id) ? name : name + " (" + id + ")";
             try
             {
                 var cb = TopLevel.GetTopLevel(this)?.Clipboard;
