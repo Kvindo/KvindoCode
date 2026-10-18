@@ -189,6 +189,62 @@ public sealed class SessionSearchAndInjectedTextTests(ITestOutputHelper o)
         }
     }
 
+    /// <summary>
+    /// A message written with one suffix still shows only the user's words after the suffix is EDITED.
+    /// </summary>
+    /// <remarks>
+    /// Reported 2026-10-18: "when i open transcript i see text after every prompt in all historic messages". The wrap
+    /// was stripped on replay by matching the CURRENT settings, so the moment the user grew their suffix every older
+    /// message kept its old block on screen. The stored <see cref="ChatMessage.Display"/> is the fix — it records what
+    /// the human typed at the time, so later edits cannot reach history.
+    /// </remarks>
+    [AvaloniaFact]
+    public async Task Editing_the_prompt_suffix_does_not_bring_the_old_suffix_back()
+    {
+        using var sb = new Sandbox();
+        var settings = sb.Settings(x => { x.PromptSuffix = "OLD-RULE-ONE\nOLD-RULE-TWO\nOLD-RULE-THREE"; });
+        var s = new AgentSession(settings, Script.Client(Script.Text("ok")), sb.Project, new FakeInteraction());
+        await s.RunTurnAsync("the user's real words", default);
+
+        // The user then REPLACES the suffix with unrelated text. This is the case the fallback cannot fix (the old block
+        // is not a prefix of the new one), so it is what proves the stored Display is load-bearing rather than a
+        // belt-and-braces addition. Extension — the shape the user actually hit — is covered by the legacy test below.
+        settings.PromptSuffix = "COMPLETELY-DIFFERENT-RULE-SET\nWITH-OTHER-WORDS-IN-IT";
+
+        var events = new List<AgentEvent>();
+        s.Event += events.Add;
+        s.Replay(50);
+        var shown = events.OfType<UserMessageEvent>().Select(u => u.Text).ToList();
+        o.WriteLine("shown: " + string.Join(" | ", shown));
+        var mine = shown.Single(t => t.Contains("the user's real words"));
+        Assert.DoesNotContain("OLD-RULE", mine);
+        Assert.DoesNotContain("COMPLETELY-DIFFERENT", mine);
+        Assert.Equal("the user's real words", mine);
+    }
+
+    /// <summary>A message written BEFORE the Display field existed is cleaned by the "grown suffix" fallback.</summary>
+    /// <remarks>
+    /// Those transcripts cannot be fixed exactly — nothing recorded what was injected. What is recoverable is the
+    /// common shape: the old block is a PREFIX of today's suffix, because a suffix is usually grown rather than
+    /// replaced. The fallback must also leave the user's own words alone when the tail merely resembles the suffix.
+    /// </remarks>
+    [Fact]
+    public void A_legacy_message_written_with_an_older_suffix_is_cleaned()
+    {
+        const string today = "C = Check logs pedantically\nQ: = Read only\n3.1) Do not be lazy\n3.2) Prefer subagents";
+        const string old = "C = Check logs pedantically\nQ: = Read only";
+        var legacy = "my real question\n\n" + old;
+
+        var cleaned = AgentSession.StripTrailingRunThatIsPrefixOf(legacy, today);
+        o.WriteLine("cleaned: " + (cleaned ?? "<null>"));
+        Assert.Equal("my real question", cleaned);
+
+        // a short coincidence is not an injected block
+        Assert.Null(AgentSession.StripTrailingRunThatIsPrefixOf("please answer: Q: = Read only", today));
+        // ...and neither is a long one that does not start a line
+        Assert.Null(AgentSession.StripTrailingRunThatIsPrefixOf("text that runs into C = Check logs pedantically\nQ: = Read only", today));
+    }
+
     // ---------------------------------------------------------------- (4) naming the sending session
 
     /// <summary>

@@ -6,10 +6,12 @@ using System.Threading.Tasks;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Input;
+using Avalonia.Input.Platform;
 using Avalonia.Interactivity;
 using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Threading;
+using Avalonia.VisualTree;
 using AvaloniaEdit;
 using AvaloniaEdit.TextMate;
 using KvindoCode.Core;
@@ -60,6 +62,25 @@ public sealed class CodeEditorView : UserControl
     string _lastSaved = "";
     bool _loading;
 
+    // ---- in-file find/replace (VS Code's Ctrl+F bar) ----
+    readonly TextBox _findInFile = new() { Watermark = "Find", FontSize = 12, MinHeight = 26, Width = 200 };
+    readonly TextBox _replaceInFile = new() { Watermark = "Replace", FontSize = 12, MinHeight = 26, Width = 200 };
+    readonly TextBlock _findInFileStatus = new() { Classes = { "muted" }, FontSize = 11.5, VerticalAlignment = VerticalAlignment.Center, Width = 60 };
+    readonly Border _findBar;
+
+    // ---- find in files (the project-wide search with Replace All) ----
+    readonly TextBox _searchAll = new() { Watermark = "Search in files…", FontSize = 12, MinHeight = 28 };
+    readonly TextBox _replaceAll = new() { Watermark = "Replace with…", FontSize = 12, MinHeight = 28 };
+    readonly StackPanel _searchHits = new() { Spacing = 0 };
+    readonly TextBlock _searchSummary = new() { Classes = { "muted" }, FontSize = 11.5, TextWrapping = TextWrapping.Wrap };
+    readonly Border _searchPanel;
+
+    // ---- the bottom terminal ----
+    Border _terminalHost = null!;
+    TerminalPaneView? _terminalPane;
+    string _terminalDir = "";
+    readonly TextBlock _terminalTitle = new() { Classes = { "muted" }, FontSize = 11.5, VerticalAlignment = VerticalAlignment.Center };
+
     public CodeEditorView(string projectRoot, Action close, Action<string> onNotice, Action<string> openTerminalHere)
     {
         Name = "CodeEditorView";
@@ -81,8 +102,10 @@ public sealed class CodeEditorView : UserControl
             _save.Stop();
             _save.Start();
         };
-        DetachedFromVisualTree += (_, _) => Save();
+        DetachedFromVisualTree += (_, _) => { Save(); CloseTerminalPane(); };
 
+        _findBar = BuildFindBar();
+        _searchPanel = BuildSearchPanel();
         var head = BuildHeader();
         var body = new Grid { ColumnDefinitions = new ColumnDefinitions("300,6,*") };
         body.Children.Add(BuildTreeColumn());
@@ -95,12 +118,24 @@ public sealed class CodeEditorView : UserControl
         Grid.SetColumn(_status, 1);
         DockPanel.SetDock(statusBar, Dock.Bottom);
         editorArea.Children.Add(statusBar);
+        // the in-file find/replace bar sits above the text, as it does in VS Code
+        DockPanel.SetDock(_findBar, Dock.Top);
+        editorArea.Children.Add(_findBar);
         editorArea.Children.Add(_editor);
         Grid.SetColumn(editorArea, 2); body.Children.Add(editorArea);
+
+        // The terminal is a PANEL AT THE BOTTOM of the file manager, not a replacement for the whole area
+        // ("file manager terminal should be at the bottom like in vs code", 2026-10-18). It starts hidden and is
+        // toggled from the header (or F4 / Ctrl+`); the tmux session it attaches to is the project's pane 0, so it is
+        // the same shell the terminal grid shows and it survives a restart.
+        _terminalHost = BuildTerminalPanel();
+        DockPanel.SetDock(_terminalHost, Dock.Bottom);
+        _terminalHost.IsVisible = false;
 
         var dock = new DockPanel();
         DockPanel.SetDock(head, Dock.Top);
         dock.Children.Add(head);
+        dock.Children.Add(_terminalHost);
         dock.Children.Add(body);
         Content = dock;
 
@@ -131,7 +166,9 @@ public sealed class CodeEditorView : UserControl
         actions.Children.Add(Icon("IconPencil", "Rename the selected entry", () => _ = RenameAsync(), "EditorRename"));
         actions.Children.Add(Icon("IconCopy", "Copy the selected entry (Ctrl+C), then Ctrl+V to paste it into another folder", CopySelected, "EditorCopy"));
         actions.Children.Add(Icon("IconTrash", "Delete the selected entry (asks first)", () => _ = DeleteAsync(), "EditorDelete"));
-        actions.Children.Add(Icon("IconTerminal", "Open a terminal in the selected folder", () => OpenTerminal(), "EditorTerminal"));
+        actions.Children.Add(Icon("IconSearch", "Search in files, with replace (Ctrl+Shift+F)", ShowFindInFiles, "EditorSearchFiles"));
+        actions.Children.Add(Icon("IconTerminal", "Terminal panel at the bottom (F4), in the selected folder", () => ShowTerminalAt(
+            SelectedPath() is { } sp0 ? (Directory.Exists(sp0) ? sp0 : Path.GetDirectoryName(sp0)!) : _root), "EditorTerminal"));
 
         var back = new Button { Name = "EditorBack", Classes = { "outline" }, Content = "Back to session", VerticalAlignment = VerticalAlignment.Center };
         back.Click += (_, _) => _close();
@@ -146,27 +183,502 @@ public sealed class CodeEditorView : UserControl
     Control BuildTreeColumn()
     {
         _search.TextChanged += (_, _) => ApplyFilter();
-        _tree.SelectionChanged += (_, _) => { if (SelectedPath() is { } p && File.Exists(p)) _ = OpenFileAsync(p); };
-        _tree.DoubleTapped += (_, _) => { if (SelectedPath() is { } p && Directory.Exists(p)) _ = OpenFileAsync(p); };
-        // Ctrl+C / Ctrl+V on the TREE, and only on the tree: the editor's own Ctrl+C is text copy and must keep working.
-        // Tunnel, so the TreeView's own handling does not swallow the key first.
+        _tree.Classes.Add("compact");
+        // A file OPENS ON A CLICK. SelectionChanged alone was not enough: clicking the row that is already selected
+        // fires nothing, and clicking a row whose item the TreeView considers already current fires nothing either, so
+        // "when i click on file it wont open" (reported 2026-10-18) happened for exactly the file you had looked at
+        // before. PointerReleased resolves the item under the pointer and acts on it directly.
+        _tree.AddHandler(PointerReleasedEvent, (object? _, PointerReleasedEventArgs e) =>
+        {
+            if (e.InitialPressMouseButton != MouseButton.Left) return;
+            if (ItemAt(e.GetPosition(_tree)) is not { } item) return;
+            _tree.Focus();                                     // so Ctrl+C / Ctrl+V below reach the TREE, not the editor
+            if (item.Tag as string is not { } path) return;
+            _tree.SelectedItem = item;
+            if (Directory.Exists(path)) { item.IsExpanded = !item.IsExpanded; return; }
+            _ = OpenFileAsync(path);
+        }, RoutingStrategies.Tunnel);
+        // right-click: the context menu a file manager is expected to have ("when i do right click on tree view there
+        // is no context menu", 2026-10-18). One menu for the whole tree, opened on the item under the pointer, so a
+        // thousand nodes do not carry a thousand menus.
+        _tree.AddHandler(PointerPressedEvent, (object? _, PointerPressedEventArgs e) =>
+        {
+            if (!e.GetCurrentPoint(_tree).Properties.IsRightButtonPressed) return;
+            if (ItemAt(e.GetPosition(_tree)) is not { } item) return;
+            _tree.SelectedItem = item;
+            ShowContextMenu(item);
+            e.Handled = true;
+        }, RoutingStrategies.Tunnel);
         _tree.AddHandler(KeyDownEvent, (object? _, KeyEventArgs e) =>
         {
             var ctrl = (e.KeyModifiers & KeyModifiers.Control) != 0;
+            var shift = (e.KeyModifiers & KeyModifiers.Shift) != 0;
             switch (e.Key)
             {
-                case Key.C when ctrl: CopySelected(); e.Handled = true; break;
-                case Key.V when ctrl: Paste(); e.Handled = true; break;
+                case Key.C when ctrl && !shift: CopySelected(); e.Handled = true; break;
+                case Key.V when ctrl && !shift: Paste(); e.Handled = true; break;
                 case Key.F2: _ = RenameAsync(); e.Handled = true; break;
                 case Key.Delete: _ = DeleteAsync(); e.Handled = true; break;
+                // Ctrl+Shift+F opens the find-in-files panel, as in VS Code; F4 toggles the bottom terminal.
+                case Key.F when ctrl && shift: ShowFindInFiles(); e.Handled = true; break;
             }
         }, RoutingStrategies.Tunnel);
+        // F4 is not a tree key; it belongs to the whole view (toggle the terminal), so it is handled there.
+        KeyDown += (object? _, KeyEventArgs e) =>
+        {
+            var ctrl = (e.KeyModifiers & KeyModifiers.Control) != 0;
+            if (e.Key == Key.F4 || (e.Key == Key.OemTilde && ctrl))
+            {
+                ToggleTerminal();
+                e.Handled = true;
+            }
+            else if (e.Key == Key.F && ctrl && (e.KeyModifiers & KeyModifiers.Shift) != 0)
+            {
+                ShowFindInFiles();
+                e.Handled = true;
+            }
+            else if (e.Key == Key.F && ctrl)
+            {
+                // Ctrl+F finds in the OPEN FILE, seeding the box from the selection — as VS Code does
+                ShowFindBar(_editor.SelectedText is { Length: > 0 } sel ? sel : null);
+                e.Handled = true;
+            }
+        };
+        // the find-in-files panel sits above the tree, in the sidebar column, exactly where VS Code puts its search
         var sp = new DockPanel { Margin = new Thickness(10, 0, 0, 0) };
+        DockPanel.SetDock(_searchPanel, Dock.Top);
+        sp.Children.Add(_searchPanel);
         DockPanel.SetDock(_search, Dock.Top);
         sp.Children.Add(_search);
         sp.Children.Add(_tree);
         return sp;
     }
+
+    /// <summary>The tree row under a point in the tree's coordinates, or null.</summary>
+    TreeViewItem? ItemAt(Point p)
+    {
+        foreach (var item in _tree.GetVisualDescendants().OfType<TreeViewItem>())
+        {
+            if (!item.IsVisible) continue;
+            var b = item.Bounds;
+            var origin = item.TranslatePoint(new Point(0, 0), _tree);
+            if (origin is not { } o) continue;
+            if (p.X >= o.X && p.X <= o.X + b.Width && p.Y >= o.Y && p.Y <= o.Y + b.Height) return item;
+        }
+        return null;
+    }
+
+    /// <summary>The right-click menu: the operations a file manager offers, on the item that was right-clicked.</summary>
+    void ShowContextMenu(TreeViewItem item)
+    {
+        var path = item.Tag as string;
+        var isDir = path is not null && Directory.Exists(path);
+        MenuItem Mi(string header, Action action, bool enabled = true)
+        {
+            var mi = new MenuItem { Header = header, IsEnabled = enabled };
+            mi.Click += (_, _) => action();
+            return mi;
+        }
+
+        var menu = new ContextMenu
+        {
+            ItemsSource = new object[]
+            {
+                Mi("New file", () => _ = NewEntryAsync(false), path is not null),
+                Mi("New folder", () => _ = NewEntryAsync(true), path is not null),
+                new Separator(),
+                Mi("Open", () => { if (path is not null && File.Exists(path)) _ = OpenFileAsync(path); }, path is not null && !isDir),
+                Mi("Rename", () => _ = RenameAsync(), path is not null && path != _root),
+                Mi("Copy", CopySelected, path is not null && path != _root),
+                Mi("Paste", Paste, _copied is not null && path is not null),
+                Mi("Duplicate", () => { if (path is not null) { _copied = path; _pasteTarget = Path.GetDirectoryName(path); try { Paste(); } finally { _pasteTarget = null; } } }, path is not null && path != _root),
+                Mi("Delete", () => _ = DeleteAsync(), path is not null && path != _root),
+                new Separator(),
+                Mi("Open in terminal", () =>
+                {
+                    var dir = path is null ? _root : (Directory.Exists(path) ? path : Path.GetDirectoryName(path)!);
+                    ShowTerminalAt(dir);
+                }, path is not null),
+                Mi("Open in the terminal grid", OpenTerminal, path is not null),
+                Mi("Copy path", () => _ = CopyPathAsync(path), path is not null),
+            },
+        };
+        menu.Open(item);
+    }
+
+    async Task CopyPathAsync(string? path)
+    {
+        if (path is null) return;
+        var clip = TopLevel.GetTopLevel(this)?.Clipboard;
+        if (clip is null) return;
+        await clip.SetTextAsync(Path.GetRelativePath(_root, path));
+        _onNotice("Copied the relative path of " + Path.GetFileName(path));
+    }
+
+    // ---------------------------------------------------------------- find / replace
+
+    /// <summary>The find bar above the text: find, next, previous, replace, replace all.</summary>
+    /// <remarks>
+    /// Asked 2026-10-18: "search should be the same as in vs code (there is reach search there where i can also
+    /// replace)". Two separate things in VS Code and two here: this bar searches the OPEN FILE (Ctrl+F), and the panel
+    /// below searches the whole project with Replace All (Ctrl+Shift+F).
+    /// </remarks>
+    Border BuildFindBar()
+    {
+        Button Btn(string key, string tip, Action click, string name)
+        {
+            var b = new Button { Name = name, Classes = { "ghost" }, Padding = new Thickness(6), Content = Ui.Icon(key, "KvMuted", 13) };
+            ToolTip.SetTip(b, tip);
+            b.Click += (_, _) => click();
+            return b;
+        }
+
+        _findInFile.KeyDown += (object? _, KeyEventArgs e) =>
+        {
+            if (e.Key == Key.Enter) { FindNextInFile((e.KeyModifiers & KeyModifiers.Shift) != 0); e.Handled = true; }
+            else if (e.Key == Key.Escape) { HideFindBar(); e.Handled = true; }
+        };
+        _replaceInFile.KeyDown += (object? _, KeyEventArgs e) =>
+        {
+            if (e.Key == Key.Enter) { ReplaceInFile(false); e.Handled = true; }
+            else if (e.Key == Key.Escape) { HideFindBar(); e.Handled = true; }
+        };
+
+        var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6, VerticalAlignment = VerticalAlignment.Center };
+        row.Children.Add(_findInFile);
+        row.Children.Add(_findInFileStatus);
+        row.Children.Add(Btn("IconChevronDown", "Next match (Enter)", () => FindNextInFile(false), "EditorFindNext"));
+        row.Children.Add(Btn("IconChevronRight", "Previous match (Shift+Enter)", () => FindNextInFile(true), "EditorFindPrev"));
+        row.Children.Add(_replaceInFile);
+        row.Children.Add(Btn("IconReplace", "Replace this match", () => ReplaceInFile(false), "EditorReplaceOne"));
+        row.Children.Add(Btn("IconCheck", "Replace all matches in this file", () => ReplaceInFile(true), "EditorReplaceAll"));
+        var close = Btn("IconX", "Close (Esc)", HideFindBar, "EditorFindClose");
+        row.Children.Add(close);
+
+        var bar = new Border { Padding = new Thickness(8, 4), BorderThickness = new Thickness(0, 0, 0, 1), Child = row, IsVisible = false };
+        Ui.BindBrush(bar, Border.BorderBrushProperty, "KvBorder");
+        return bar;
+    }
+
+    void ShowFindBar(string? seed = null)
+    {
+        _findBar.IsVisible = true;
+        if (seed is not null) _findInFile.Text = seed;
+        _findInFile.Focus();
+        _findInFile.SelectAll();
+    }
+
+    void HideFindBar()
+    {
+        _findBar.IsVisible = false;
+        _editor.Focus();
+    }
+
+    /// <summary>Move the caret to the next (or previous) occurrence of the find text, wrapping around.</summary>
+    void FindNextInFile(bool backwards)
+    {
+        var needle = _findInFile.Text ?? "";
+        if (needle.Length == 0) { _findInFileStatus.Text = ""; return; }
+        var text = _editor.Text ?? "";
+        var hits = CountOccurrences(text, needle);
+        if (hits == 0) { _findInFileStatus.Text = "no results"; return; }
+        var start = _editor.SelectionStart;
+        int at;
+        if (backwards)
+        {
+            at = text.LastIndexOf(needle, Math.Max(0, start - 1), StringComparison.OrdinalIgnoreCase);
+            if (at < 0) at = text.LastIndexOf(needle, StringComparison.OrdinalIgnoreCase);
+        }
+        else
+        {
+            var from = Math.Min(text.Length, start + Math.Max(1, _editor.SelectionLength));
+            at = text.IndexOf(needle, from, StringComparison.OrdinalIgnoreCase);
+            if (at < 0) at = text.IndexOf(needle, StringComparison.OrdinalIgnoreCase);
+        }
+        if (at < 0) return;
+        _editor.Select(at, needle.Length);
+        _editor.CaretOffset = at + needle.Length;
+        _findInFileStatus.Text = $"{hits} match" + (hits == 1 ? "" : "es");
+    }
+
+    /// <summary>Replace the current selection (when it is the match) or all matches in the open file.</summary>
+    void ReplaceInFile(bool all)
+    {
+        if (_openPath is null) return;
+        var needle = _findInFile.Text ?? "";
+        if (needle.Length == 0) return;
+        var with = _replaceInFile.Text ?? "";
+        var text = _editor.Text ?? "";
+        if (all)
+        {
+            var count = CountOccurrences(text, needle);
+            if (count == 0) { _findInFileStatus.Text = "no results"; return; }
+            _loading = true;
+            _editor.Text = ReplaceAll(text, needle, with);
+            _loading = false;
+            Save();
+            _findInFileStatus.Text = $"replaced {count}";
+            _onNotice($"Replaced {count} occurrence(s) in {Path.GetFileName(_openPath)}");
+            return;
+        }
+        var sel = _editor.SelectedText;
+        if (!string.Equals(sel, needle, StringComparison.OrdinalIgnoreCase)) { FindNextInFile(false); return; }
+        var at = _editor.SelectionStart;
+        _loading = true;
+        _editor.Text = text[..at] + with + text[(at + _editor.SelectionLength)..];
+        _loading = false;
+        _editor.CaretOffset = at + with.Length;
+        Save();
+        FindNextInFile(false);
+    }
+
+    static int CountOccurrences(string text, string needle)
+    {
+        if (needle.Length == 0) return 0;
+        var n = 0;
+        for (var i = text.IndexOf(needle, StringComparison.OrdinalIgnoreCase); i >= 0; i = text.IndexOf(needle, i + needle.Length, StringComparison.OrdinalIgnoreCase)) n++;
+        return n;
+    }
+
+    static string ReplaceAll(string text, string needle, string with)
+    {
+        if (needle.Length == 0) return text;
+        var sb = new System.Text.StringBuilder(text.Length);
+        var i = 0;
+        while (true)
+        {
+            var at = text.IndexOf(needle, i, StringComparison.OrdinalIgnoreCase);
+            if (at < 0) { sb.Append(text, i, text.Length - i); break; }
+            sb.Append(text, i, at - i).Append(with);
+            i = at + needle.Length;
+        }
+        return sb.ToString();
+    }
+
+    /// <summary>The project-wide search panel: query, replacement, the hits, and Replace All.</summary>
+    Border BuildSearchPanel()
+    {
+        var go = new Button { Content = "Search", Classes = { "outline" }, FontSize = 12, Padding = new Thickness(10, 4) };
+        var replaceBtn = new Button { Content = "Replace all", Classes = { "outline" }, FontSize = 12, Padding = new Thickness(10, 4) };
+        ToolTip.SetTip(replaceBtn, "Replace every match in every file. Files are rewritten whole, so keep it to text you meant to change.");
+        var close = new Button { Classes = { "ghost" }, Padding = new Thickness(6), Content = Ui.Icon("IconX", "KvMuted", 13) };
+        ToolTip.SetTip(close, "Close the search panel");
+
+        go.Click += (_, _) => RunSearchInFiles();
+        replaceBtn.Click += (_, _) => ReplaceInFiles();
+        close.Click += (_, _) => HideFindInFiles();
+        _searchAll.KeyDown += (object? _, KeyEventArgs e) =>
+        {
+            if (e.Key == Key.Enter) { RunSearchInFiles(); e.Handled = true; }
+            else if (e.Key == Key.Escape) { HideFindInFiles(); e.Handled = true; }
+        };
+
+        var buttons = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
+        buttons.Children.Add(go);
+        buttons.Children.Add(replaceBtn);
+        buttons.Children.Add(close);
+
+        var stack = new StackPanel { Spacing = 6, Margin = new Thickness(8) };
+        stack.Children.Add(_searchAll);
+        stack.Children.Add(_replaceAll);
+        stack.Children.Add(buttons);
+        stack.Children.Add(_searchSummary);
+        var scroll = new ScrollViewer
+        {
+            MaxHeight = 260, VerticalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto,
+            Content = _searchHits,
+        };
+        stack.Children.Add(scroll);
+
+        var border = new Border { Child = stack, IsVisible = false, BorderThickness = new Thickness(0, 0, 0, 1) };
+        Ui.BindBrush(border, Border.BorderBrushProperty, "KvBorder");
+        return border;
+    }
+
+    void ShowFindInFiles()
+    {
+        _searchPanel.IsVisible = true;
+        _searchAll.Focus();
+        _searchAll.SelectAll();
+    }
+
+    void HideFindInFiles()
+    {
+        _searchPanel.IsVisible = false;
+        _editor.Focus();
+    }
+
+    /// <summary>Every file whose text contains the query, with its hits listed under it.</summary>
+    void RunSearchInFiles()
+    {
+        var q = _searchAll.Text ?? "";
+        _searchHits.Children.Clear();
+        if (q.Length == 0) { _searchSummary.Text = ""; return; }
+        var files = 0;
+        var total = 0;
+        foreach (var f in ProjectFiles().Take(3000))
+        {
+            string text;
+            try
+            {
+                var info = new FileInfo(f);
+                if (info.Length > 2_000_000) continue;                 // a 2 MB source file is not what this is for
+                text = File.ReadAllText(f);
+            }
+            catch { continue; }
+            if (text.IndexOf(q, StringComparison.OrdinalIgnoreCase) < 0) continue;
+            files++;
+            var rel = Path.GetRelativePath(_root, f);
+            _searchHits.Children.Add(new TextBlock { Text = rel, FontSize = 12, FontWeight = FontWeight.Medium, Margin = new Thickness(0, 6, 0, 1) });
+            var line = 0;
+            foreach (var raw in text.Split('\n'))
+            {
+                line++;
+                var col = raw.IndexOf(q, StringComparison.OrdinalIgnoreCase);
+                if (col < 0) continue;
+                total++;
+                var snippet = raw.Trim();
+                if (snippet.Length > 160) snippet = snippet[..160] + "…";
+                var hit = new Button
+                {
+                    Name = "SearchHit" + total,
+                    Classes = { "ghost" },
+                    HorizontalAlignment = HorizontalAlignment.Stretch,
+                    HorizontalContentAlignment = HorizontalAlignment.Left,
+                    Padding = new Thickness(10, 1),
+                    Content = new TextBlock { Text = $"{line}: {snippet}", FontSize = 11.5, TextTrimming = TextTrimming.CharacterEllipsis },
+                };
+                var at = col;
+                hit.Click += (_, _) => _ = OpenFileAtAsync(f, at);
+                _searchHits.Children.Add(hit);
+                if (total >= 500) break;
+            }
+            if (total >= 500) break;
+        }
+        _searchSummary.Text = total == 0 ? "No results" : $"{total} match(es) in {files} file(s)" + (total >= 500 ? " (stopped at 500)" : "");
+    }
+
+    /// <summary>Replace the query with the replacement text in every file that contains it.</summary>
+    /// <remarks>
+    /// A whole-file rewrite, deliberately: the alternative is a per-hit in-place edit, and one wrong offset in a file
+    /// the user did not open would corrupt it silently. Every file is read, rewritten only when it changed, and the
+    /// open file is reloaded afterwards so the editor cannot overwrite the result with a stale buffer.
+    /// </remarks>
+    void ReplaceInFiles()
+    {
+        var q = _searchAll.Text ?? "";
+        if (q.Length == 0) return;
+        var with = _replaceAll.Text ?? "";
+        var changed = 0;
+        var hits = 0;
+        foreach (var f in ProjectFiles().Take(3000).ToList())
+        {
+            try
+            {
+                var info = new FileInfo(f);
+                if (info.Length > 2_000_000) continue;
+                var text = File.ReadAllText(f);
+                var n = CountOccurrences(text, q);
+                if (n == 0) continue;
+                File.WriteAllText(f, ReplaceAll(text, q, with));
+                changed++;
+                hits += n;
+            }
+            catch (Exception e) { _onNotice("Could not rewrite " + Path.GetFileName(f) + ": " + e.Message); }
+        }
+        _onNotice($"Replaced {hits} occurrence(s) in {changed} file(s).");
+        if (_openPath is { } open && File.Exists(open)) _ = OpenFileAsync(open);
+        RunSearchInFiles();
+    }
+
+    /// <summary>Open a file and put the caret at <paramref name="offset"/> (a search hit).</summary>
+    async Task OpenFileAtAsync(string path, int offset)
+    {
+        await OpenFileAsync(path);
+        _editor.CaretOffset = Math.Min(offset, (_editor.Text ?? "").Length);
+        _editor.Focus();
+    }
+
+    /// <summary>Source files under the project, skipping build output and VCS metadata.</summary>
+    IEnumerable<string> ProjectFiles()
+    {
+        IEnumerable<string> all;
+        try { all = Directory.EnumerateFiles(_root, "*", SearchOption.AllDirectories); }
+        catch { yield break; }
+        foreach (var f in all)
+        {
+            var rel = Path.GetRelativePath(_root, f).Replace('\\', '/');
+            if (rel.Contains("/bin/") || rel.Contains("/obj/") || rel.Contains("/.git/") || rel.Contains("node_modules")
+                || rel.Contains("/.venv/") || rel.Contains("/target/") || rel.StartsWith(".git/") || rel.StartsWith("bin/") || rel.StartsWith("obj/"))
+                continue;
+            yield return f;
+        }
+    }
+
+    // ---------------------------------------------------------------- the bottom terminal
+
+    /// <summary>A terminal panel docked at the bottom, the way VS Code has one.</summary>
+    Border BuildTerminalPanel()
+    {
+        var head = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto"), Height = 24, Margin = new Thickness(8, 0, 4, 0) };
+        head.Children.Add(_terminalTitle);
+        var hide = new Button { Name = "EditorTerminalClose", Classes = { "ghost" }, Padding = new Thickness(6), Content = Ui.Icon("IconX", "KvMuted", 12) };
+        ToolTip.SetTip(hide, "Hide the terminal panel (F4)");
+        hide.Click += (_, _) => ToggleTerminal();
+        Grid.SetColumn(hide, 1);
+        head.Children.Add(hide);
+
+        var host = new Border
+        {
+            BorderThickness = new Thickness(0, 1, 0, 0),
+            Height = 260,
+            Child = new DockPanel { Children = { head } },
+        };
+        DockPanel.SetDock(head, Dock.Top);
+        Ui.BindBrush(host, Border.BorderBrushProperty, "KvBorder");
+        return host;
+    }
+
+    /// <summary>Show or hide the bottom terminal.</summary>
+    void ToggleTerminal()
+    {
+        if (_terminalHost.IsVisible) CloseTerminalPane(); else ShowTerminalAt(_root);
+    }
+
+    /// <summary>Open the bottom terminal, rooted at <paramref name="dir"/>.</summary>
+    void ShowTerminalAt(string dir)
+    {
+        if (_terminalPane is not null && _terminalDir == dir) { _terminalHost.IsVisible = true; _terminalPane.FocusTerminal(); return; }
+        CloseTerminalPane();                 // stops the old pane AND hides the host; the line below shows it again
+        _terminalHost.IsVisible = true;
+        _terminalDir = dir;
+        var backend = new KvindoCode.Core.Terminal.TmuxBackend(socketName: Environment.GetEnvironmentVariable("KVINDOCODE_TMUX_SOCKET"));
+        var pane = new TerminalPaneView(backend, dir, 0);
+        _terminalPane = pane;
+        _terminalTitle.Text = "Terminal — " + Path.GetRelativePath(_root, dir).Replace("/", "/") is { Length: > 0 } rel and not "." ? rel : Path.GetFileName(dir.TrimEnd('/'));
+        if (_terminalHost.Child is DockPanel dock) dock.Children.Add(pane);
+        // the pane launches its PTY when it is attached, which happens on the next layout pass
+        Dispatcher.UIThread.Post(() => { pane.Start(); pane.FocusTerminal(); }, DispatcherPriority.Loaded);
+    }
+
+    /// <summary>Stop the terminal PROCESS; the tmux session stays, so the scrollback survives (as in the grid).</summary>
+    void CloseTerminalPane()
+    {
+        _terminalHost.IsVisible = false;
+        if (_terminalPane is { } pane)
+        {
+            try { pane.Stop(); } catch { }
+            if (_terminalHost.Child is DockPanel dock) dock.Children.Remove(pane);
+        }
+        _terminalPane = null;
+    }
+
+    /// <summary>The bottom terminal is on screen (tests read this).</summary>
+    internal bool TerminalVisible => _terminalHost.IsVisible && _terminalPane is not null;
+
+    /// <summary>The bottom terminal's pane (tests read this).</summary>
+    internal TerminalPaneView? TerminalPaneForTest => _terminalPane;
+
 
     // ---------------------------------------------------------------- tree
 

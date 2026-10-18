@@ -58,20 +58,51 @@ public sealed class AgentSession : IDisposable
     /// to the user's own message (reported 2026-10-15: "when i open old session and read my messages i see text that
     /// was injected after prompt. I should not see that").
     ///
-    /// The prefix/suffix are matched against the CURRENT settings. A session whose settings have since changed keeps
-    /// those older words — that is the honest limit of not storing the original text separately, and it is strictly
-    /// better than showing it every time.
+    /// The prefix/suffix used to be matched against the CURRENT settings only, and that was wrong in the common case:
+    /// editing the suffix (the user grew theirs from three rules to six) meant every message written with the OLD one
+    /// kept showing it — "when i open transcript i see text after every prompt in all historic messages" (2026-10-18).
+    /// Two things fix it. New messages store <see cref="ChatMessage.Display"/>, so replay is exact and settings edits
+    /// cannot touch history at all. Messages written before that field existed have no such record, so they fall back to
+    /// the old exact-match strip PLUS a prefix-of-the-current-suffix strip, which is the shape a grown suffix leaves
+    /// behind (the old text is a leading part of the new one).
     /// </remarks>
-    string DisplayUserText(string? stored)
+    string DisplayUserText(ChatMessage m)
     {
-        var text = StripReminders(stored);
+        if (m.Display is { Length: > 0 } own) return own;      // recorded when the message was written: exact
+        var text = StripReminders(m.Content);
         var pre = _settings.PromptPrefix?.Trim();
         if (!string.IsNullOrEmpty(pre) && text.StartsWith(pre, StringComparison.Ordinal))
             text = text[pre.Length..].TrimStart();
         var suf = _settings.PromptSuffix?.Trim();
-        if (!string.IsNullOrEmpty(suf) && text.EndsWith(suf, StringComparison.Ordinal))
-            text = text[..^suf.Length].TrimEnd();
+        if (!string.IsNullOrEmpty(suf))
+        {
+            if (text.EndsWith(suf, StringComparison.Ordinal)) text = text[..^suf.Length].TrimEnd();
+            // the suffix was EXTENDED after this message was written, so the stored tail is a PREFIX of today's
+            else if (StripTrailingRunThatIsPrefixOf(text, suf) is { } shorter) text = shorter;
+        }
         return text;
+    }
+
+    /// <summary>A tail this short is never treated as an injected block — a coincidence must not eat the user's words.</summary>
+    internal const int MinInjectedRun = 24;
+
+    /// <summary>Remove the longest tail of <paramref name="text"/> that is also a leading part of <paramref name="suffix"/>.</summary>
+    /// <remarks>
+    /// Bounded work: only the last <c>suffix.Length</c> characters can match. The match must also start at a LINE
+    /// boundary — the injected block is separated from the user's text by a blank line — so a phrase that merely
+    /// happens to end the message is left alone.
+    /// </remarks>
+    internal static string? StripTrailingRunThatIsPrefixOf(string text, string suffix)
+    {
+        var max = Math.Min(text.Length, suffix.Length);
+        for (var len = max; len >= MinInjectedRun; len--)
+        {
+            var cut = text.Length - len;
+            if (!suffix.AsSpan().StartsWith(text.AsSpan(cut))) continue;
+            if (cut == 0 || text[cut - 1] == '\n') return text[..cut].TrimEnd();
+            return null;                       // the same words, but not where an injected block would begin
+        }
+        return null;
     }
 
     JsonObject HookPayload(JsonObject? extra = null)
@@ -1248,7 +1279,7 @@ public sealed class AgentSession : IDisposable
                 case "user":
                     if (m.IsSummary || m.IsInternal) break;
                     if (m.IsNotification) Emit(new TaskNoticeEvent(0, "background tasks", StripTags(m.Content ?? ""), false));
-                    else Emit(new UserMessageEvent(DisplayUserText(m.Content), hIdx, Replayed: true));
+                    else Emit(new UserMessageEvent(DisplayUserText(m), hIdx, Replayed: true));
                     break;
                 case "assistant":
                     if (!string.IsNullOrEmpty(m.Reasoning)) Emit(new ThinkingDeltaEvent(m.Reasoning));
@@ -1293,7 +1324,7 @@ public sealed class AgentSession : IDisposable
                 case "user":
                     if (m.IsSummary || m.IsInternal) break;
                     if (m.IsNotification) Emit(new TaskNoticeEvent(0, "background tasks", StripTags(m.Content ?? ""), false));
-                    else Emit(new UserMessageEvent(DisplayUserText(m.Content), hIdx, Replayed: true));
+                    else Emit(new UserMessageEvent(DisplayUserText(m), hIdx, Replayed: true));
                     break;
                 case "assistant":
                     if (!string.IsNullOrEmpty(m.Reasoning)) Emit(new ThinkingDeltaEvent(m.Reasoning));
@@ -1604,11 +1635,13 @@ public sealed class AgentSession : IDisposable
                 }
                 // §3: text the user configured to go with every prompt. Added to the OUTBOUND content (like the
                 // UserPromptSubmit context above), so what is shown and titled stays the user's own words.
+                var wrapped = false;
                 if ((_settings.PromptPrefix + _settings.PromptSuffix).Trim().Length > 0)
                 {
                     content = (string.IsNullOrWhiteSpace(_settings.PromptPrefix) ? "" : _settings.PromptPrefix.Trim() + "\n\n")
                             + content
                             + (string.IsNullOrWhiteSpace(_settings.PromptSuffix) ? "" : "\n\n" + _settings.PromptSuffix.Trim());
+                    wrapped = true;
                 }
                 // A secret the HUMAN types was never detected at all: this path only ran `Mask` (replacement of values
                 // the vault already knows), so a password pasted into the composer travelled to the provider in
@@ -1617,7 +1650,16 @@ public sealed class AgentSession : IDisposable
                 // by the same call, so it never reaches the transcript or the model (asked 2026-10-11). interactive:
                 // false — the human typed it, so nothing asks them to classify their own words.
                 if (AuditSecretsEnabled) await DetectSecretsAsync(content, "your message", ct, interactive: false);
-                Add(new ChatMessage { Role = "user", Content = content, Images = images is { Count: > 0 } ? images.ToList() : null });
+                // Display is what the human typed, masked the same way Content is, and it is what the transcript shows
+                // again. Storing it is the fix for "text after every prompt in all historic messages": the wrap used
+                // to be stripped on replay by matching the CURRENT settings, so growing the suffix (as the user did)
+                // left the old words on screen for ever.
+                Add(new ChatMessage
+                {
+                    Role = "user", Content = content,
+                    Display = wrapped ? Redactor.Redact(StripReminders(userText)) : null,
+                    Images = images is { Count: > 0 } ? images.ToList() : null,
+                });
                 Emit(new UserMessageEvent(userText, _history.Count - 1));
             }
             // a long turn pauses at the cap and continues on its own from where it stopped

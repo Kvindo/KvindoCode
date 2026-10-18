@@ -2080,6 +2080,7 @@ public partial class MainWindow : Window
         _terminals = new TerminalsView(Tmux, project, CloseTerminals, ShowInfo, _settings);
         Host.Children.Insert(0, _terminals);
         BottomColumn.IsVisible = false;      // the composer belongs to a session, and no session is on screen now
+        TopBar.IsVisible = false;            // and neither does the session bar (asked 2026-10-18)
         EmptyState.IsVisible = false;
         _terminals.FocusActive();
         // ...and again once it has been laid out: a control that is not yet attached cannot take focus, and without
@@ -2098,6 +2099,7 @@ public partial class MainWindow : Window
         Host.Children.Remove(_terminals);
         _terminals = null;
         BottomColumn.IsVisible = true;
+        TopBar.IsVisible = _codeEditor is null;      // the editor may still be on screen, and it hides the bar too
         if (_current != null && !Host.Children.Contains(_current.Transcript))
         {
             Host.Children.Insert(0, _current.Transcript);
@@ -2128,6 +2130,7 @@ public partial class MainWindow : Window
             dir => OpenTerminals(dir));
         Host.Children.Insert(0, _codeEditor);
         BottomColumn.IsVisible = false;
+        TopBar.IsVisible = false;            // the file manager is not a session either: no title, no merge, no usage line
         EmptyState.IsVisible = false;
         RebuildSidebar();
     }
@@ -2138,6 +2141,7 @@ public partial class MainWindow : Window
         Host.Children.Remove(_codeEditor);
         _codeEditor = null;
         BottomColumn.IsVisible = true;
+        TopBar.IsVisible = _terminals is null;
         if (_current != null && !Host.Children.Contains(_current.Transcript))
         {
             Host.Children.Insert(0, _current.Transcript);

@@ -468,13 +468,21 @@ public sealed class AuditingLlmClient : ILlmClient
     /// the other costs (reported by the allocation-churn session 2026-10-11).</param>
     string ProtectArguments(string json, SecretRedactor redactor)
     {
+        if (redactor.IsEmpty) return json;
         // a repeated key must not throw: the parse deferred the key handling, and the redactor below walks the tree
         var node = KvindoCode.Core.JsonText.TryParse(json);
-        if (node is null) return json;               // truncated / unparsable arguments: leave them exactly as they are
-        // NOT gated on a marker being present: the arguments may carry the RAW value of a stored secret (a tool call
-        // from an earlier turn), which must be replaced by its marker exactly as the plain-text path does.
-        if (redactor.IsEmpty) return json;
-        return SecretRedactor.Serialize(redactor.RedactJson(node)!);
+        // UNPARSABLE arguments used to be returned exactly as they were, which sends whatever they hold in the clear.
+        // They are masked as TEXT instead: no tree to walk, but the values are still literal substrings of this string.
+        var masked = node is null ? redactor.RedactAll(json) : SecretRedactor.Serialize(redactor.RedactJson(node)!);
+        // PROVE it per field, exactly as the request-level check does for the whole request — so the request-level
+        // rescue never has to fire for a tool call. RedactJson replaces values in DECODED text; a value the vault holds
+        // in an ESCAPED spelling (an entry stored before 2026-10-18) is invisible to it and comes back when the tree is
+        // re-serialized, which is what put "a stored secret was still visible" in front of the user on every request.
+        // RedactAll works on the TEXT, so it sees that spelling; a field that survives even that is withheld.
+        if (!redactor.Contains(SecretPlaceholders.StripMarkers(masked))) return masked;
+        var again = redactor.RedactAll(masked);
+        if (!redactor.Contains(SecretPlaceholders.StripMarkers(again))) return again;
+        return Withheld;
     }
 
     /// <param name="targets">The vault's redaction targets, read ONCE for the request. Passing them in is the fix for
@@ -528,16 +536,28 @@ public sealed class AuditingLlmClient : ILlmClient
 
     LlmRequest ProtectRequest(LlmRequest r, IReadOnlyList<(string Name, string Value)> targets, SecretRedactor redactor)
     {
+        // Mask, then PROVE it per field. Doing this here — rather than only at request level in the rescue — is what
+        // keeps a field that cannot be cleaned from costing the whole request its notice, and it is the same contract
+        // the rescue applies: clean stays as it is, uncleannable is withheld, everything else is sent.
+        string CleanField(string? text)
+        {
+            if (string.IsNullOrEmpty(text)) return text ?? "";
+            var masked = SecretPlaceholders.Protect(text, targets, redactor);
+            if (!redactor.Contains(SecretPlaceholders.StripMarkers(masked))) return masked;
+            var again = redactor.RedactAll(masked);
+            return redactor.Contains(SecretPlaceholders.StripMarkers(again)) ? Withheld : again;
+        }
+
         var msgs = r.Messages.Select(m => new ChatMessage
         {
             Role = m.Role,
-            Content = SecretPlaceholders.Protect(m.Content ?? "", targets, redactor),
-            Reasoning = SecretPlaceholders.Protect(m.Reasoning ?? "", targets, redactor),
+            Content = CleanField(m.Content),
+            Reasoning = CleanField(m.Reasoning),
             ToolCalls = m.ToolCalls?.Select(c => new ToolCall { Id = c.Id, Name = c.Name, Arguments = ProtectArguments(c.Arguments, redactor) }).ToList(),
             ToolCallId = m.ToolCallId, IsError = m.IsError, IsSummary = m.IsSummary, IsNotification = m.IsNotification, IsInternal = m.IsInternal,
             Model = m.Model, Ts = m.Ts, DurationMs = m.DurationMs, Images = m.Images?.ToList(),
         }).ToList();
-        return new LlmRequest { SessionId = r.SessionId, AuditSecrets = r.AuditSecrets, Model = r.Model, System = SecretPlaceholders.Protect(r.System, targets, redactor), Messages = msgs, Tools = r.Tools, MaxTokens = r.MaxTokens, ReasoningEffort = r.ReasoningEffort };
+        return new LlmRequest { SessionId = r.SessionId, AuditSecrets = r.AuditSecrets, Model = r.Model, System = CleanField(r.System), Messages = msgs, Tools = r.Tools, MaxTokens = r.MaxTokens, ReasoningEffort = r.ReasoningEffort };
     }
 
 }

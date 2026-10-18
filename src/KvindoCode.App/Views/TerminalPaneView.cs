@@ -303,6 +303,13 @@ public sealed class TerminalPaneView : UserControl
         try { Terminal.Kill(); } catch { /* already gone */ }
     }
 
+    /// <summary>Give the shell the keyboard (the pane is used standalone in the file manager's bottom panel too).</summary>
+    public void FocusTerminal()
+    {
+        Terminal.Focus();
+        Dispatcher.UIThread.Post(() => { if (Terminal.IsAttachedToVisualTree()) Terminal.Focus(); }, DispatcherPriority.Loaded);
+    }
+
     /// <summary>What tmux calls this pane's session (shown in the grid header and usable by `tmux attach`).</summary>
     public string SessionName => _backend.SessionName(_project, Index);
 }
