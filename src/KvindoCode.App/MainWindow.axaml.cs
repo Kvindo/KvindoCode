@@ -765,6 +765,15 @@ public partial class MainWindow : Window
         };
         session.DequeueQueuedTurnPending = () => sv.SnapshotQueue().Count > 0;
         session.WakeRequested += () => Dispatcher.UIThread.Post(() => { if (_live.ContainsKey(sv.Id) && !sv.Running) Start(sv, null, null); });
+        // The Terminal TOOL opens a real tmux session and asks for it to be SHOWN: put it in the side panel, so the human
+        // can type into the same shell the model is driving (asked 2026-10-18: a terminal to a server that is already
+        // logged in). Only the session on screen opens the pane — a background session must not steal the panel.
+        session.TerminalRequested += (tmuxSession, title, dir) => Dispatcher.UIThread.Post(() =>
+        {
+            if (!_live.ContainsKey(sv.Id) || sv != _current) return;
+            OpenPane();
+            _pane.ShowTerminal(tmuxSession, title, dir);
+        });
 
         if (replay)
         {

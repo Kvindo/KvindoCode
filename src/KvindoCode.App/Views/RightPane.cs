@@ -719,10 +719,57 @@ public sealed class RightPane : UserControl
     KvindoCode.Core.Tasks.BackgroundTask? _task;
     Avalonia.Threading.DispatcherTimer? _taskTimer;
 
+    /// <summary>The pane's live terminal, when the Terminal TOOL opened one.</summary>
+    TerminalPaneView? _toolTerminal;
+    string _toolTerminalSession = "";
+
+    /// <summary>
+    /// Show a tmux session as a real terminal in the side panel.
+    /// </summary>
+    /// <remarks>
+    /// The Terminal tool does its work through tmux, so the model can type and read without the UI; this puts the SAME
+    /// session on screen, which is the point of the request: a shell on a server that is already logged in, which the
+    /// human can take over ("I want to get terminal to the server which is already setup and logged in", 2026-10-18).
+    /// Re-showing the session that is already up just re-focuses it — the pane is not rebuilt, so its scrollback and
+    /// the running program stay.
+    /// </remarks>
+    public void ShowTerminal(string session, string title, string dir)
+    {
+        if (_toolTerminal is not null && _toolTerminalSession == session && _active == "terminal")
+        {
+            _toolTerminal.FocusTerminal();
+            return;
+        }
+        CloseToolTerminal();
+        _toolTerminalSession = session;
+        _title.Text = "Terminal — " + title;
+        var backend = new KvindoCode.Core.Terminal.TmuxBackend(socketName: Environment.GetEnvironmentVariable("KVINDOCODE_TMUX_SOCKET"));
+        var pane = new TerminalPaneView(backend, dir, 0, session);
+        _toolTerminal = pane;
+        _body.Content = pane;
+        _active = "terminal";
+        Avalonia.Threading.Dispatcher.UIThread.Post(() => { pane.Start(); pane.FocusTerminal(); }, Avalonia.Threading.DispatcherPriority.Loaded);
+    }
+
+    /// <summary>Stop the pane's PTY client; the tmux session keeps running, so the terminal is still there next time.</summary>
+    void CloseToolTerminal()
+    {
+        if (_toolTerminal is { } pane)
+        {
+            try { pane.Stop(); } catch { }
+            _toolTerminal = null;
+            _toolTerminalSession = "";
+        }
+    }
+
+    /// <summary>The terminal this pane is showing (tests read this).</summary>
+    internal TerminalPaneView? ToolTerminalForTest => _toolTerminal;
+
     void Activate(string kind)
     {
         _active = kind;
         if (kind != "task") { _task = null; _taskTimer?.Stop(); }
+        if (kind != "terminal") CloseToolTerminal();
         foreach (var (b, k) in _pills)
         {
             b.Classes.Remove("plan");
