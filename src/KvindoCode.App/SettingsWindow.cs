@@ -172,6 +172,7 @@ public sealed class SettingsWindow : Window
             catch (Exception e) { chromeLauncherStatus.Text = "Failed: " + e.Message; }
         };
         var chromeAuto = new CheckBox { Content = "Launch Chrome (own profile) automatically when the agent needs the browser", IsChecked = s.ChromeAutoLaunch, FontSize = 13 };
+        var chromeQuiet = new CheckBox { Content = "Keep KvindoCode's browser work in the background (give focus back after Chrome raises its window)", IsChecked = s.ChromeKeepBackground, FontSize = 13 };
 
         var status = new TextBlock { Classes = { "muted" }, FontSize = 12.5, TextWrapping = TextWrapping.Wrap };
         var test = new Button { Content = "Test connection", Classes = { "outline" } };
@@ -232,6 +233,7 @@ public sealed class SettingsWindow : Window
             s.TelegramDefaultChat = (tgChat.Text ?? "").Trim();
             s.ClaudeSessionsDir = (claudeDir.Text ?? "").Trim(); s.ClaudeProjectsDir = (claudeProj.Text ?? "").Trim();
             s.ChromePort = (int)(chromePort.Value ?? 9222); s.ChromePath = (chromePath.Text ?? "").Trim(); s.ChromeAutoLaunch = chromeAuto.IsChecked == true; s.ChromeUseMyProfile = chromeMine.IsChecked == true;
+            s.ChromeKeepBackground = chromeQuiet.IsChecked == true;
             try { s.Save(); Saved = true; Close(); }
             catch (Exception e) { status.Text = "Could not save: " + e.Message; status.Classes.Add("err"); }
         };
@@ -315,7 +317,8 @@ public sealed class SettingsWindow : Window
                 chromeMine,
                 Field("Remote-debugging port", chromePort, "A running Chrome can only be attached if it was started with --remote-debugging-port. If yours was not, KvindoCode asks before closing it gracefully and reopening it with the flag on the same profile (tabs restored). Without “my profile” it uses a separate persistent profile (~/.kvindocode/chrome-profile) with no extensions."),
                 chromeLauncher, chromeLauncherStatus,
-                Field("Chrome executable", chromePath), chromeAuto) },
+                Field("Chrome executable", chromePath), chromeAuto, chromeQuiet,
+                new TextBlock { Text = "Chrome raises its window even for a background tab. With this on, focus goes back to the window you were in (needs xprop and xdotool); turn it off only if you want to watch the agent work in the browser.", Classes = { "muted" }, FontSize = 11.5, TextWrapping = TextWrapping.Wrap }) },
         });
         tabs.Items.Add(new TabItem
         {

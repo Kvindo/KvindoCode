@@ -93,6 +93,13 @@ public sealed class AppSettings
     public string TelegramApiHashSecret { get; set; } = "telegram-api-hash";
     public int ChromePort { get; set; } = 9222;
     public string ChromePath { get; set; } = "";
+    /// <summary>
+    /// Keep KvindoCode's browser work out of the foreground: after a tab is created, focus goes back to the window that
+    /// had it. On by default, because Chrome raises its window for a background tab and that stole focus from whatever
+    /// the user was doing ("sessions randomly bring tabs to front", 2026-10-18).
+    /// </summary>
+    public bool ChromeKeepBackground { get; set; } = true;
+
     public bool ChromeAutoLaunch { get; set; } = true;
     /// <summary>Use the user's real Chrome profile (extensions, logins) — restarting Chrome with remote debugging if needed — instead of a separate KvindoCode profile.</summary>
     public bool ChromeUseMyProfile { get; set; } = true;

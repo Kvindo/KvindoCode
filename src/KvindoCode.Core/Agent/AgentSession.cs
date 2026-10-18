@@ -197,6 +197,7 @@ public sealed class AgentSession : IDisposable
     {
         Confirm = msg => _ctx.Interaction.ConfirmAsync(msg, "Restart Chrome", CancellationToken.None),
         SessionId = Info.Id,                                  // tabs are owned per session, so the browser must know whose it is
+        KeepBackground = _settings.ChromeKeepBackground,      // do not steal focus when Chrome raises its window
     };
     public bool ModelSupportsVision => ModelLookup?.Invoke(Model)?.Vision ?? true;
     public string Model { get; set; }

@@ -24,6 +24,14 @@ public sealed class BrowserSession
 
     public bool HasTab => _tab != null;
 
+    /// <summary>
+    /// Give focus back after Chrome raises its window. On by default; off only when the human WANTS to watch the agent
+    /// work in the browser.
+    /// </summary>
+    /// <remarks>Chrome raises its window for a background tab (measured 2026-10-18), so creating one steals focus from
+    /// whatever the user was doing — reported as "sessions randomly bring tabs to front".</remarks>
+    public bool KeepBackground { get; set; } = true;
+
     async Task<CdpConnection> Conn(CancellationToken ct)
     {
         if (_cdp is { Alive: true }) return _cdp;
@@ -88,8 +96,12 @@ public sealed class BrowserSession
         if (SessionId.Length > 0 && Owners.OwnedTab(SessionId, byId.Keys) is { } mine && byId.TryGetValue(mine, out var owned))
             return await Attach(c, owned, ct);
 
-        // background=true for the same reason as NewTabAsync: a tab the agent works in must not raise the window
-        var r = await c.SendAsync("Target.createTarget", new JsonObject { ["url"] = "about:blank", ["background"] = true }, null, ct);
+        // background=true for the same reason as NewTabAsync: a tab the agent works in must not raise the window.
+        // It is NOT enough on its own — measured 2026-10-18: Chrome raises its window even for a background tab — so
+        // whatever had focus is captured first and given back below.
+        var hadFocus = KeepBackground ? WindowFocus.Active() : null;
+        var r = await c.SendAsync("Target.createTarget", new JsonObject { ["url"] = "about:blank", ["background"] = true, ["newWindow"] = false }, null, ct);
+        if (hadFocus is not null) WindowFocus.Restore(hadFocus);
         var fresh = new BrowserTab { TargetId = (string)r["targetId"]! };
         if (SessionId.Length > 0) Owners.Claim(SessionId, fresh.TargetId);
         return await Attach(c, fresh, ct);
@@ -130,7 +142,9 @@ public sealed class BrowserSession
         var c = await Conn(ct);
         // background=true: creating a tab for the agent's work must not raise the Chrome window over whatever the
         // user is doing. Only the explicit bring_to_front action focuses a page (decided 2026-10-07).
-        var r = await c.SendAsync("Target.createTarget", new JsonObject { ["url"] = string.IsNullOrWhiteSpace(url) ? "about:blank" : NormalizeUrl(url), ["background"] = true }, null, ct);
+        var hadFocus = KeepBackground ? WindowFocus.Active() : null;
+        var r = await c.SendAsync("Target.createTarget", new JsonObject { ["url"] = string.IsNullOrWhiteSpace(url) ? "about:blank" : NormalizeUrl(url), ["background"] = true, ["newWindow"] = false }, null, ct);
+        if (hadFocus is not null) WindowFocus.Restore(hadFocus);
         var tab = new BrowserTab { TargetId = (string)r["targetId"]! };
         if (SessionId.Length > 0) Owners.Claim(SessionId, tab.TargetId);
         await Attach(c, tab, ct);

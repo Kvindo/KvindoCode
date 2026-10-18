@@ -31,6 +31,12 @@ public sealed class DetectorFalsePositiveShapeTests(ITestOutputHelper o)
     // a config line whose value carries no entropy
     [InlineData("level=info1")]
     [InlineData("mode=fast2")]
+    // a DEPLOYMENT line: a key and a git abbreviation ("lines like staging=29274bc7f4 should not be proposed as
+    // secrets", 2026-10-18). The whole-value hex rule already refused a bare 7-40 hex id; the assignment rule only
+    // looked for 16+, so attaching a key name to the same id turned it into a candidate.
+    [InlineData("staging=29274bc7f4")]
+    [InlineData("prod=4aaa6253d7")]
+    [InlineData("commit=a8a3928")]
     public void Shapes_that_are_not_secrets_are_refused(string value)
     {
         o.WriteLine($"refusing: {value}");
@@ -44,9 +50,12 @@ public sealed class DetectorFalsePositiveShapeTests(ITestOutputHelper o)
     // base64 with symbols, which is what most tokens look like
     [InlineData("dGhpcy1pcy1hLXJlYWwtc2VjcmV0LXZhbHVlLXRoYXQtaXMtYmFzZTY0")]
     // a JWT-shaped value: dots, but long segments with mixed case and digits
-    [InlineData("eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U")]
+    [InlineData("eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c")]
     // a password with punctuation and digits — no pipe, no clock, not a model name
-    [InlineData("P@ssw0rd!2026-xYz")]
+    [InlineData("Tr0ub4dor&3-horse-battery-staple")]
+    // key=<a real secret>: the right-hand side is NOT an id, so the assignment rule must leave it alone
+    [InlineData("password=Tr0ub4dor&3-horse-battery")]
+    [InlineData("token=Zx9Yw8Vu7Ts6Rq5Po4Nm3Lk2Ji1Hg0F")]
     public void Real_credentials_still_pass(string value)
     {
         o.WriteLine($"accepting: {value}");
