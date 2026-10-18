@@ -276,7 +276,10 @@ public sealed class SecretsWindow : Window
     {
         _leaks.Children.Clear();
         var leaksAll = _vault.Leaks();
-        var leaks = leaksAll.Where(l => Hit(l.Service, l.Where, l.Note, l.Kind, l.VaultName, l.ReportedBy)).ToList();
+        // newest first (same request as the other tabs); the "needs rotation" mark stays on the row, it no longer
+        // decides the order
+        var leaks = leaksAll.Where(l => Hit(l.Service, l.Where, l.Note, l.Kind, l.VaultName, l.ReportedBy))
+            .OrderByDescending(l => l.ReportedAt).ToList();
         if (_tabLeaks is not null) _tabLeaks.Header = leaksAll.Count(l => !l.Rotated) is var open and > 0 ? $"Leaked ({open})" : "Leaked";
         if (leaks.Count == 0) { _leaks.Children.Add(Ui.Muted(leaksAll.Count == 0 ? "Nothing recorded as leaked." : "No leaked credential matches the search.", 12.5)); return; }
         foreach (var l in leaks)
@@ -317,7 +320,8 @@ public sealed class SecretsWindow : Window
         _nonSecrets.Children.Clear();
         var recordsAll = _vault.NonSecrets();
         var records = recordsAll.Where(n => _rx is null || Hit(n.Type, n.Rule, n.Source, n.SessionTitle) ||
-            (_vault.IsUnlocked && _vault.RevealNonSecret(n.Id) is { } rv && Hit(rv.Value, rv.Context))).ToList();
+            (_vault.IsUnlocked && _vault.RevealNonSecret(n.Id) is { } rv && Hit(rv.Value, rv.Context)))
+            .OrderByDescending(n => n.At).ToList();
         var bareAll = _vault.ExcludedHashes.Where(h => recordsAll.All(r => !string.Equals(r.Sha256, h, StringComparison.OrdinalIgnoreCase))).ToList();   // decided before values were kept
         var bare = bareAll.Where(h => Hit(h)).ToList();
         var total = recordsAll.Count + bareAll.Count;
@@ -454,9 +458,13 @@ public sealed class SecretsWindow : Window
         var verdicts = new Dictionary<string, KvindoCode.Core.Secrets.SecretShapes.Verdict>();
         foreach (var r in everything) verdicts[r.Id] = KvindoCode.Core.Secrets.SecretShapes.Describe(_vault.Reveal(r.Name, out _));
         bool suspectsOnly = _suspects.IsChecked == true;
+        // NEWEST FIRST, like the other two tabs (asked 2026-10-18: "on secrets dialog all 3 tabs should order items from
+        // newest"). The vault's List() is name-ordered, which is right for lookups and wrong for a review screen: what
+        // you just added is what you want to see. CreatedAt desc, then name so the order is stable within one second.
         var all = everything.Where(r => { var w = WhereMatched(r); matchedIn[r.Id] = w;
                 if (_rx is not null && w is null) return false;
-                return !suspectsOnly || verdicts[r.Id].Suspicious; }).ToList();
+                return !suspectsOnly || verdicts[r.Id].Suspicious; })
+            .OrderByDescending(r => r.CreatedAt).ThenBy(r => r.Name, StringComparer.OrdinalIgnoreCase).ToList();
         int suspectTotal = verdicts.Values.Count(v => v.Suspicious);
         ShowSearchInfo(all.Count, everything.Count, suspectTotal);
         // the count was missing entirely (reported 2026-10-05)

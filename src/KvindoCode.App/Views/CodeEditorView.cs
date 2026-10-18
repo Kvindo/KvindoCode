@@ -49,9 +49,17 @@ public sealed class CodeEditorView : UserControl
     /// the actual reason for "CtrlC + CtrlV doesnt work on tree items" (2026-10-18). Measured: Focusable was false and
     /// <c>_tree.Focus()</c> returned false, so the shortcuts were unreachable however the handler was written.
     /// </remarks>
-    readonly TreeView _tree = new() { Background = Brushes.Transparent, Focusable = true };
+    /// <remarks>No HORIZONTAL scrollbar (asked 2026-10-18): long names trim with an ellipsis instead of sliding the whole
+    /// tree sideways, which in a 300 px column only ever hid the hierarchy the user was reading.</remarks>
+    readonly TreeView _tree = new()
+    {
+        Background = Brushes.Transparent, Focusable = true,
+        HorizontalAlignment = HorizontalAlignment.Stretch,
+    };
     readonly TextBlock _path = new() { Classes = { "muted" }, FontSize = 11.5, VerticalAlignment = VerticalAlignment.Center, TextTrimming = TextTrimming.CharacterEllipsis };
     readonly TextBlock _status = new() { Classes = { "muted" }, FontSize = 11.5, VerticalAlignment = VerticalAlignment.Center };
+    /// <summary>The open file's facts, shown at the bottom of the editor.</summary>
+    readonly TextBlock _fileFacts = new() { FontSize = 11.5, VerticalAlignment = VerticalAlignment.Center };
     readonly TextEditor _editor = new()
     {
         ShowLineNumbers = true,
@@ -138,8 +146,13 @@ public sealed class CodeEditorView : UserControl
         var editorArea = new DockPanel { Margin = new Thickness(0) };
         var statusBar = new Border { Padding = new Thickness(8, 3), BorderThickness = new Thickness(0, 1, 0, 0) };
         Ui.BindBrush(statusBar, Border.BorderBrushProperty, "KvBorder");
-        statusBar.Child = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto"), Children = { _path, _status } };
-        Grid.SetColumn(_status, 1);
+        // The status bar carries the FILE'S FACTS (asked 2026-10-18): characters, lines, size, created, owner/group and
+        // the access attributes. One muted line under the editor, the same place an editor puts them.
+        _fileFacts.FontSize = 11.5; _fileFacts.Classes.Add("muted");
+        _fileFacts.TextTrimming = TextTrimming.CharacterEllipsis;
+        statusBar.Child = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto,Auto"), Children = { _path, _fileFacts, _status } };
+        Grid.SetColumn(_fileFacts, 1); _fileFacts.Margin = new Thickness(12, 0);
+        Grid.SetColumn(_status, 2);
         DockPanel.SetDock(statusBar, Dock.Bottom);
         editorArea.Children.Add(statusBar);
         // the in-file find/replace bar sits above the text, as it does in VS Code
@@ -162,55 +175,35 @@ public sealed class CodeEditorView : UserControl
         Content = dock;
 
         LoadTree();
-        _editor.Focus();
+        // "search should be opened" (2026-10-18): the box is the first thing you can type into, and the tree is one
+        // click away. POSTED, because a control that is not attached yet cannot take focus — calling Focus() in the
+        // constructor did nothing at all (measured: IsFocused stayed false). The editor takes the keyboard as soon as a
+        // file is opened.
+        AttachedToVisualTree += (_, _) => Dispatcher.UIThread.Post(() => { if (!_editor.IsFocused) _search.Focus(); },
+            DispatcherPriority.Loaded);
     }
 
-    /// <summary>The file operations and "back to session", as one compact icon row in the TREE column.</summary>
+    /// <summary>"Back to session", and nothing else: the operation icons were removed on request.</summary>
     /// <remarks>
-    /// There used to be a full-width header row — "Files — 40-KVINDO" plus the icons plus a Back button — and it was a
-    /// whole line of the main area doing nothing ("this line should not be present in file view, it consumes space",
-    /// 2026-10-18). The title only repeated the project name that the sidebar and the project header already show, so
-    /// it is gone; the controls moved into the top of the tree column, which has the width to hold them as icons and
-    /// costs no height in the editor. "Back to session" is a left chevron for the same reason — a text button would not
-    /// fit beside seven icons in a 300 px column.
+    /// Asked 2026-10-18: "this icons are not needed, search should be opened". Every operation the row carried is still
+    /// reachable — the right-click menu has new file/folder, rename, copy, paste, duplicate, delete, open in terminal and
+    /// copy path, and the same actions have F2 / Delete / Ctrl+C / Ctrl+V / Ctrl+Shift+F. A row of eight glyphs at the
+    /// top of a 300 px column was mostly decoration, and it pushed the tree down. The chevron stays because it is the
+    /// only way back out of the view with the mouse.
     /// </remarks>
     Control BuildTools()
     {
-        Button Icon(string key, string tip, Action onClick, string name)
-        {
-            var b = new Button
-            {
-                Name = name, Classes = { "ghost" }, Content = Ui.Icon(key, "KvMuted", 14),
-                Padding = new Thickness(5), MinWidth = 0, VerticalAlignment = VerticalAlignment.Center,
-            };
-            ToolTip.SetTip(b, tip);
-            b.Click += (_, _) => onClick();
-            return b;
-        }
-
-        var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 1, Margin = new Thickness(0, 0, 0, 4) };
-        row.Children.Add(Icon("IconPlus", "New file in the selected folder", () => _ = NewEntryAsync(false), "EditorNewFile"));
-        row.Children.Add(Icon("IconFolder", "New folder", () => _ = NewEntryAsync(true), "EditorNewFolder"));
-        row.Children.Add(Icon("IconPencil", "Rename the selected entry (F2)", () => _ = RenameAsync(), "EditorRename"));
-        row.Children.Add(Icon("IconCopy", "Copy the selected entry (Ctrl+C), then Ctrl+V to paste it into another folder", CopySelected, "EditorCopy"));
-        row.Children.Add(Icon("IconTrash", "Delete the selected entry (Del, asks first)", () => _ = DeleteAsync(), "EditorDelete"));
-        row.Children.Add(Icon("IconSearch", "Search in files, with replace (Ctrl+Shift+F)", ShowFindInFiles, "EditorSearchFiles"));
-        row.Children.Add(Icon("IconTerminal", "Terminal panel at the bottom (F4), in the selected folder", () => ShowTerminalAt(
-            SelectedPath() is { } sp0 ? (Directory.Exists(sp0) ? sp0 : Path.GetDirectoryName(sp0)!) : _root), "EditorTerminal"));
-
-        // "Back to session" as a left-pointing chevron: the same shape as the tree's own expander, mirrored.
         var back = new Button
         {
             Name = "EditorBack", Classes = { "ghost" }, Padding = new Thickness(5), MinWidth = 0,
-            VerticalAlignment = VerticalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Left,
             Content = Ui.Icon("IconChevronRight", "KvMuted", 14),
         };
         if (back.Content is Avalonia.Controls.Shapes.Path arrow)
             arrow.RenderTransform = new Avalonia.Media.RotateTransform(180);
         ToolTip.SetTip(back, "Back to the session");
         back.Click += (_, _) => _close();
-        row.Children.Add(back);
-        return row;
+        return new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 2), Children = { back } };
     }
 
     /// <summary>Dark Plus in a dark app, Light Plus in a light one — the theme the app is actually rendering in.</summary>
@@ -264,7 +257,15 @@ public sealed class CodeEditorView : UserControl
             Dispatcher.UIThread.Post(() => _tree.Focus(), DispatcherPriority.Input);
             if (item.Tag as string is not { } path) return;
             _tree.SelectedItem = item;
-            if (Directory.Exists(path)) { item.IsExpanded = !item.IsExpanded; return; }
+            if (Directory.Exists(path))
+            {
+                // NOT when the click was on the EXPANDER: the TreeView's own chevron already toggles the item on press,
+                // so toggling again here undid it and the arrow appeared to do nothing at all ("clicking on arrows in
+                // file manager does not collaps tree", 2026-10-18). Clicking the row BODY still expands/collapses, which
+                // is what a file manager does.
+                if (!IsExpander(e.Source)) item.IsExpanded = !item.IsExpanded;
+                return;
+            }
             _ = OpenFileAsync(path, focus: false);
         }, RoutingStrategies.Tunnel);
         // right-click: the context menu a file manager is expected to have ("when i do right click on tree view there
@@ -324,6 +325,19 @@ public sealed class CodeEditorView : UserControl
         sp.Children.Add(_search);
         sp.Children.Add(_tree);
         return sp;
+    }
+
+    /// <summary>Was this pointer event aimed at an item's expand/collapse chevron?</summary>
+    /// <remarks>Avalonia's TreeViewItem template names it <c>PART_ExpandCollapseChevron</c> and it is a ToggleButton,
+    /// which toggles the item itself — so a handler that also toggles makes the arrow do nothing.</remarks>
+    static bool IsExpander(object? source)
+    {
+        for (var v = source as Avalonia.Visual; v is not null; v = v.GetVisualParent())
+        {
+            if (v is Avalonia.Controls.Primitives.ToggleButton { Name: "PART_ExpandCollapseChevron" }) return true;
+            if (v is TreeViewItem) return false;          // reached the row without meeting the chevron
+        }
+        return false;
     }
 
     /// <summary>The tree row under a point in the tree's coordinates, or null.</summary>
@@ -852,6 +866,8 @@ public sealed class CodeEditorView : UserControl
             _lastSaved = text;
             _path.Text = Path.GetRelativePath(_root, path);
             ToolTip.SetTip(_path, path);
+            _fileFacts.Text = DescribeFile(path, text);
+            ToolTip.SetTip(_fileFacts, path);
             var ext = Path.GetExtension(path).ToLowerInvariant();
             var scope = _registry.GetScopeByExtension(ext);
             _textMate.SetGrammar(scope);
@@ -860,6 +876,60 @@ public sealed class CodeEditorView : UserControl
         }
         catch (Exception e) { _onNotice("Could not open " + path + ": " + e.Message); }
         return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// The facts a file manager shows for the open file: characters, lines, size, created, owner/group and attributes.
+    /// </summary>
+    /// <remarks>
+    /// Asked 2026-10-18: "on bottom there should be characters count, create date, owner/group, lines count, access
+    /// attributes, size". Owner and group come from <c>stat</c> (there is no managed API for a uid's NAME, and a numeric
+    /// id is useless to a human); attributes are the same "drwxr-xr-x" string ls prints. A file whose owner cannot be
+    /// resolved still shows everything else — a status bar must never throw.
+    /// </remarks>
+    internal static string DescribeFile(string path, string text)
+    {
+        var lines = text.Length == 0 ? 0 : text.Count(c => c == '\n') + (text[^1] == '\n' ? 0 : 1);
+        var parts = new List<string>
+        {
+            $"{text.Length:n0} chars",
+            $"{lines:n0} lines",
+        };
+        try
+        {
+            var info = new FileInfo(path);
+            parts.Add(Size(info.Length));
+            parts.Add("created " + info.CreationTime.ToString("yyyy-MM-dd HH:mm"));
+            var (owner, group, mode) = Stat(path);
+            if (owner is { Length: > 0 }) parts.Add(owner + (group is { Length: > 0 } ? ":" + group : ""));
+            if (mode is { Length: > 0 }) parts.Add(mode);
+        }
+        catch (Exception e) { parts.Add("(no stat: " + e.GetType().Name + ")"); }
+        return string.Join("  ·  ", parts);
+    }
+
+    static string Size(long bytes) => bytes < 1024 ? $"{bytes} B"
+        : bytes < 1024 * 1024 ? $"{bytes / 1024.0:0.#} KB"
+        : $"{bytes / (1024.0 * 1024.0):0.#} MB";
+
+    /// <summary>Owner, group and the rwx string, from stat(1) — one call, and no assumption that it exists.</summary>
+    static (string? Owner, string? Group, string? Mode) Stat(string path)
+    {
+        try
+        {
+            var p = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("stat")
+            {
+                UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true,
+                ArgumentList = { "-c", "%U\t%G\t%A", path },
+            });
+            if (p is null) return (null, null, null);
+            var text = p.StandardOutput.ReadToEnd().Trim();
+            p.StandardError.ReadToEnd();
+            p.WaitForExit(3000);
+            var f = text.Split('\t');
+            return f.Length == 3 ? (f[0], f[1], f[2]) : (null, null, null);
+        }
+        catch { return (null, null, null); }
     }
 
     void Save()

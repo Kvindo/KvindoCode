@@ -243,7 +243,9 @@ public sealed class CodeEditorTests(ITestOutputHelper o)
         Assert.DoesNotContain(texts, t => t.StartsWith("Files —", StringComparison.Ordinal));
 
         // ...and the operations are all still there, inside the tree column (left of the editor)
-        var names = new[] { "EditorNewFile", "EditorNewFolder", "EditorRename", "EditorCopy", "EditorDelete", "EditorSearchFiles", "EditorTerminal", "EditorBack" };
+        // The operation ICONS were removed on request ("this icons are not needed, search should be opened"): every
+        // operation is in the right-click menu and on a shortcut, and only "back" stays reachable by mouse.
+        var names = new[] { "EditorBack" };
         var buttons = view.GetVisualDescendants().OfType<Button>().Where(b => b.Name is not null).ToList();
         foreach (var n in names)
             Assert.Contains(buttons, b => b.Name == n);
@@ -369,6 +371,150 @@ public sealed class CodeEditorTests(ITestOutputHelper o)
 
         Invoke(win, "CloseCodeEditor");
         Dispatcher.UIThread.RunJobs();
+        win.Close();
+    }
+
+    /// <summary>Clicking a folder's EXPANDER arrow expands and collapses it — one click, one change.</summary>
+    /// <remarks>
+    /// "clicking on arrows in file manager does not collaps tree" (2026-10-18). The row-click handler toggled
+    /// IsExpanded itself, while the TreeView's own chevron (a ToggleButton) had already toggled it on press — two
+    /// toggles, net zero, so the arrow looked dead. The handler now skips the chevron.
+    /// </remarks>
+    [AvaloniaFact]
+    public void The_expander_arrow_expands_and_collapses_with_one_click()
+    {
+        using var sb = new Sandbox();
+        var (win, _) = Start(sb);
+        var dir = Path.Combine(sb.Project, "src");
+        sb.Write("src/a.py", "x = 1\n");
+        var view = Open(win, sb.Project);
+        win.Measure(new Avalonia.Size(1400, 900));
+        win.Arrange(new Avalonia.Rect(0, 0, 1400, 900));
+        Dispatcher.UIThread.RunJobs();
+
+        var tree = Field<TreeView>(view, "_tree");
+        var row = tree.GetVisualDescendants().OfType<TreeViewItem>().First(i => (i.Tag as string) == dir);
+        var chevron = row.GetVisualDescendants().OfType<Avalonia.Controls.Primitives.ToggleButton>()
+            .First(t => t.Name == "PART_ExpandCollapseChevron");
+        o.WriteLine($"before: expanded={row.IsExpanded}");
+
+        ClickAt(win, chevron);
+        Dispatcher.UIThread.RunJobs();
+        o.WriteLine($"after 1 click: expanded={row.IsExpanded}");
+        Assert.True(row.IsExpanded, "one click on the arrow did not expand the folder");
+
+        ClickAt(win, chevron);
+        Dispatcher.UIThread.RunJobs();
+        o.WriteLine($"after 2 clicks: expanded={row.IsExpanded}");
+        Assert.False(row.IsExpanded, "the second click on the arrow did not collapse the folder");
+        win.Close();
+    }
+
+    /// <summary>Each nesting level indents a row by a small, measured amount.</summary>
+    /// <remarks>
+    /// "in file manager tree item hierarchical offsets are too big" (2026-10-18). The indent is the chevron column plus
+    /// the ItemsPresenter margin, and at 20 + 12 that is 32 px per level — a deep tree walks off the 300 px column.
+    /// This measures the real x of three nested rows rather than trusting the style values.
+    /// </remarks>
+    [AvaloniaFact]
+    public void Nested_tree_rows_indent_by_a_small_step()
+    {
+        using var sb = new Sandbox();
+        var (win, _) = Start(sb);
+        sb.Write("a/b/c/deep.py", "x = 1\n");
+        var view = Open(win, sb.Project);
+        win.Measure(new Avalonia.Size(1400, 900));
+        win.Arrange(new Avalonia.Rect(0, 0, 1400, 900));
+        Dispatcher.UIThread.RunJobs();
+
+        var tree = Field<TreeView>(view, "_tree");
+        // expand a -> a/b -> a/b/c so all four rows exist
+        foreach (var name in new[] { "a", "a/b", "a/b/c" })
+        {
+            var dir = Path.Combine(sb.Project, name.Replace('/', Path.DirectorySeparatorChar));
+            var row = tree.GetVisualDescendants().OfType<TreeViewItem>().First(i => (i.Tag as string) == dir);
+            row.IsExpanded = true;
+            Dispatcher.UIThread.RunJobs();
+            win.Measure(new Avalonia.Size(1400, 900)); win.Arrange(new Avalonia.Rect(0, 0, 1400, 900));
+            Dispatcher.UIThread.RunJobs();
+        }
+
+        double X(string rel) => tree.GetVisualDescendants().OfType<TreeViewItem>()
+            .First(i => (i.Tag as string) == Path.Combine(sb.Project, rel.Replace('/', Path.DirectorySeparatorChar)))
+            .TranslatePoint(new Avalonia.Point(0, 0), tree)!.Value.X;
+
+        var x0 = X("a");
+        var x1 = X("a/b");
+        var x2 = X("a/b/c");
+        o.WriteLine($"indent per level: a={x0:0} a/b={x1:0} a/b/c={x2:0}  steps={x1 - x0:0},{x2 - x1:0}");
+        Assert.Equal(x1 - x0, x2 - x1, 1);                       // one consistent step per level
+        Assert.True(x1 - x0 <= 12, $"each level indents {x1 - x0:0} px — too deep for a 300 px column");
+        win.Close();
+    }
+
+    /// <summary>The status bar shows the open file's facts, and the tree never scrolls sideways.</summary>
+    /// <remarks>Asked 2026-10-18: "vertical scroll should be unminimized" (nothing is collapsed by default) and "on
+    /// bottom there should be characters count, create date, owner/group, lines count, access attributes, size".</remarks>
+    [AvaloniaFact]
+    public async Task The_status_bar_reports_the_open_file_and_the_tree_does_not_scroll_sideways()
+    {
+        using var sb = new Sandbox();
+        var (win, _) = Start(sb);
+        var file = sb.Write("facts.txt", "one\ntwo\nthree\n");
+        var view = Open(win, sb.Project);
+        await view.OpenFileAsync(file);
+        Dispatcher.UIThread.RunJobs();
+
+        var facts = Field<TextBlock>(view, "_fileFacts");
+        o.WriteLine("facts: " + facts.Text);
+        foreach (var expect in new[] { "chars", "lines", "B", "created", ":" })
+            Assert.Contains(expect, facts.Text);
+        Assert.Contains("14 chars", facts.Text);          // "one\ntwo\nthree\n"
+        Assert.Contains("3 lines", facts.Text);
+        Assert.Contains("-rw", facts.Text);               // the rwx string from stat
+
+        // The tree must not scroll sideways: its own ScrollViewer is inside the TreeView template, so the check is on
+        // that instance after layout rather than on a property the TreeView does not expose.
+        win.Measure(new Avalonia.Size(1400, 900)); win.Arrange(new Avalonia.Rect(0, 0, 1400, 900));
+        Dispatcher.UIThread.RunJobs();
+        var tree = Field<TreeView>(view, "_tree");
+        var scroller = tree.GetVisualDescendants().OfType<Avalonia.Controls.Primitives.ScrollBar>()
+            .FirstOrDefault(b => b.Orientation == Avalonia.Layout.Orientation.Horizontal);
+        o.WriteLine("horizontal scrollbar present: " + (scroller is not null) + " visible=" + (scroller?.IsVisible));
+        Assert.True(scroller is null || !scroller.IsVisible, "the tree shows a horizontal scrollbar");
+        win.Close();
+    }
+
+    /// <summary>The tree column opens ready to SEARCH, and every operation is reachable without the icon row.</summary>
+    /// <remarks>"this icons are not needed, search should be opened" (2026-10-18). The eight glyphs are gone; the search
+    /// box has the keyboard on open, and the right-click menu still offers every operation they carried.</remarks>
+    [AvaloniaFact]
+    public void The_file_view_opens_on_the_search_box_and_keeps_every_operation_in_the_menu()
+    {
+        using var sb = new Sandbox();
+        var (win, _) = Start(sb);
+        var file = sb.Write("a.py", "x = 1\n");
+        var view = Open(win, sb.Project);
+        win.Measure(new Avalonia.Size(1400, 900));
+        win.Arrange(new Avalonia.Rect(0, 0, 1400, 900));
+        Dispatcher.UIThread.RunJobs();
+
+        var search = Field<TextBox>(view, "_search");
+        o.WriteLine($"search focused={search.IsFocused} watermark='{search.Watermark}'");
+        Assert.True(search.IsFocused, "the search box does not have the keyboard when the file view opens");
+
+        // the operations are still there: right-click a row and look at the menu
+        var tree = Field<TreeView>(view, "_tree");
+        var row = tree.GetVisualDescendants().OfType<TreeViewItem>().First(i => (i.Tag as string) == file);
+        var point = row.TranslatePoint(new Avalonia.Point(20, row.Bounds.Height / 2), win)!.Value;
+        win.MouseMove(point);
+        win.MouseDown(point, Avalonia.Input.MouseButton.Right);
+        win.MouseUp(point, Avalonia.Input.MouseButton.Right);
+        Dispatcher.UIThread.RunJobs();
+        var headers = view.LastContextMenu!.ItemsSource!.Cast<object>().OfType<MenuItem>().Select(m => m.Header as string).ToList();
+        o.WriteLine("menu: " + string.Join(" | ", headers));
+        foreach (var expected in new[] { "New file", "New folder", "Rename", "Copy", "Paste", "Duplicate", "Delete", "Open in terminal" })
+            Assert.Contains(expected, headers);
         win.Close();
     }
 
