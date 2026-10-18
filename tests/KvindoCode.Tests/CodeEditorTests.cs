@@ -4,6 +4,7 @@ using System.Linq;
 using System.Reflection;
 using System.Text.Json.Nodes;
 using System.Threading.Tasks;
+using Avalonia;                          // TranslatePoint returns an Avalonia.Point
 using Avalonia.Controls;
 using Avalonia.Headless.XUnit;
 using Avalonia.Interactivity;
@@ -214,6 +215,129 @@ public sealed class CodeEditorTests(ITestOutputHelper o)
         Assert.Contains(notices, n => n.Contains("cannot be pasted inside itself"));
         Assert.DoesNotContain(notices, n => n.Contains("Could not paste"));
         Assert.Equal(before, Directory.GetDirectories(sb.Project).Length);
+        win.Close();
+    }
+
+    /// <summary>Search in files finds content across the project, and Replace All rewrites every file.</summary>
+    /// <remarks>
+    /// Asked 2026-10-18: "search should be the same as in vs code (there is reach search there where i can also
+    /// replace)". The tree's own box only filters FILE NAMES; this is the content search with a replacement.
+    /// </remarks>
+    [AvaloniaFact]
+    public void Search_in_files_finds_content_and_replaces_it_everywhere()
+    {
+        using var sb = new Sandbox();
+        var (win, _) = Start(sb);
+        sb.Write("a.py", "needle = 1\nother = 2\n");
+        sb.Write("b.py", "x = 0\nneedle = 3\n");
+        sb.Write("c.txt", "nothing here\n");
+        var view = Open(win, sb.Project);
+
+        Invoke(view, "ShowFindInFiles");
+        var query = Field<TextBox>(view, "_searchAll");
+        var replace = Field<TextBox>(view, "_replaceAll");
+        query.Text = "needle";
+        Invoke(view, "RunSearchInFiles");
+
+        var hits = Field<StackPanel>(view, "_searchHits");
+        var summary = Field<TextBlock>(view, "_searchSummary");
+        o.WriteLine($"summary: {summary.Text}, rows: {hits.Children.Count}");
+        Assert.Contains("2 match", summary.Text);
+        Assert.Contains("2 file", summary.Text);
+        // one heading per file plus one clickable row per hit
+        Assert.Equal(4, hits.Children.Count);
+
+        replace.Text = "NEEDLE";
+        Invoke(view, "ReplaceInFiles");
+        o.WriteLine("a.py: " + File.ReadAllText(Path.Combine(sb.Project, "a.py")).Replace("\n", " | "));
+        Assert.Contains("NEEDLE = 1", File.ReadAllText(Path.Combine(sb.Project, "a.py")));
+        Assert.Contains("NEEDLE = 3", File.ReadAllText(Path.Combine(sb.Project, "b.py")));
+        Assert.DoesNotContain("needle", File.ReadAllText(Path.Combine(sb.Project, "b.py")));
+        // a file without the needle is untouched, byte for byte
+        Assert.Equal("nothing here\n", File.ReadAllText(Path.Combine(sb.Project, "c.txt")));
+        win.Close();
+    }
+
+    /// <summary>The in-file find bar finds and replaces within the open file only.</summary>
+    [AvaloniaFact]
+    public async Task The_find_bar_finds_and_replaces_in_the_open_file()
+    {
+        using var sb = new Sandbox();
+        var (win, _) = Start(sb);
+        var file = sb.Write("a.py", "alpha\nbeta\nalpha\n");
+        var view = Open(win, sb.Project);
+        await view.OpenFileAsync(file);
+
+        Invoke(view, "ShowFindBar", "alpha");
+        var find = Field<TextBox>(view, "_findInFile");
+        var repl = Field<TextBox>(view, "_replaceInFile");
+        Invoke(view, "FindNextInFile", false);
+        o.WriteLine("status: " + Field<TextBlock>(view, "_findInFileStatus").Text + " selected=" + view.Editor.SelectedText);
+        Assert.Equal("alpha", view.Editor.SelectedText);
+        Assert.Contains("2 match", Field<TextBlock>(view, "_findInFileStatus").Text);
+
+        repl.Text = "ALPHA";
+        Invoke(view, "ReplaceInFile", true);
+        Assert.True(await Eventually(() => Task.FromResult(File.ReadAllText(file).Contains("ALPHA"))));
+        var text = File.ReadAllText(file);
+        o.WriteLine("file now: " + text.Replace("\n", " | "));
+        Assert.DoesNotContain("alpha", text);
+        Assert.Equal(2, text.Split("ALPHA").Length - 1);
+        win.Close();
+    }
+
+    /// <summary>The bottom terminal panel opens inside the file manager, not instead of it.</summary>
+    /// <remarks>"file manager terminal should be at the bottom like in vs code" (2026-10-18). The editor must stay on
+    /// screen while the terminal is shown — the old behaviour replaced the whole area with the 2x2 grid.
+    /// </remarks>
+    [AvaloniaFact]
+    public void The_terminal_opens_as_a_panel_at_the_bottom_and_the_editor_stays()
+    {
+        using var sb = new Sandbox();
+        var (win, _) = Start(sb);
+        sb.Write("a.py", "x = 1\n");
+        var view = Open(win, sb.Project);
+        Assert.False(view.TerminalVisible);
+
+        Invoke(view, "ToggleTerminal");
+        Dispatcher.UIThread.RunJobs();
+        o.WriteLine($"terminal visible={view.TerminalVisible} editor visible={view.Editor.IsVisible}");
+        Assert.True(view.TerminalVisible);
+        Assert.NotNull(view.TerminalPaneForTest);
+        // the editor is still in the same view — the terminal is a docked panel, not a replacement
+        Assert.Contains(view.Editor, view.GetVisualDescendants().OfType<TextEditor>());
+        // and the panel is docked BELOW the editor: its top edge is past the editor's bottom edge
+        var pane = view.TerminalPaneForTest!;
+        var paneTop = pane.TranslatePoint(new Avalonia.Point(0, 0), view)?.Y ?? 0;
+        var editorTop = view.Editor.TranslatePoint(new Avalonia.Point(0, 0), view)?.Y ?? 0;
+        o.WriteLine($"editor top={editorTop} terminal top={paneTop}");
+        Assert.True(paneTop > editorTop, "the terminal panel is not below the editor");
+
+        Invoke(view, "ToggleTerminal");
+        Dispatcher.UIThread.RunJobs();
+        Assert.False(view.TerminalVisible);
+        win.Close();
+    }
+
+    /// <summary>The session bar is hidden while the file manager or the terminal grid is on screen.</summary>
+    /// <remarks>"when i open terminal or file manager top session bar should not be present since we are not in the
+    /// session" (2026-10-18).</remarks>
+    [AvaloniaFact]
+    public void The_session_top_bar_is_hidden_outside_a_session()
+    {
+        using var sb = new Sandbox();
+        var (win, _) = Start(sb);
+        var topBar = win.FindControl<Border>("TopBar")!;
+        Assert.True(topBar.IsVisible);
+
+        var view = Open(win, sb.Project);
+        o.WriteLine($"file manager: top bar visible={topBar.IsVisible}");
+        Assert.False(topBar.IsVisible);
+
+        Invoke(win, "CloseCodeEditor");
+        Dispatcher.UIThread.RunJobs();
+        o.WriteLine($"back to the session: top bar visible={topBar.IsVisible}");
+        Assert.True(topBar.IsVisible);
         win.Close();
     }
 
