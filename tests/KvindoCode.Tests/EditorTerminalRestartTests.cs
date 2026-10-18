@@ -101,8 +101,19 @@ public sealed class EditorTerminalRestartTests(ITestOutputHelper o)
         Assert.NotNull(pane);
         Assert.True(await Eventually(() => Task.FromResult(pane!.Terminal.IsLive)), "the panel's terminal never started");
 
-        pane!.Terminal.SendInputAsync("echo CLEARME-$((5*5))\r", default);
+        // Through TMUX, not typed into the control: the terminal is still answering its own startup queries (the
+        // screen is full of DA replies), and a keystroke sent during that handshake is swallowed. What is under test is
+        // the RESTART, not the input path.
         var session = pane.SessionName;
+        // C-c FIRST: at this instant the shell still has the terminal's device-attribute replies queued as pending
+        // input, so a command typed now joins that garbage instead of running (measured: the screen showed the replies
+        // echoed at the prompt and no marker at all). Cancelling the line makes the next send a command of its own.
+        foreach (var keys in new[] { new[] { "C-c" }, new[] { "echo CLEARME-$((5*5))", "Enter" } })
+            using (var send = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("tmux")
+            {
+                UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true,
+                ArgumentList = { "-L", Socket, "send-keys", "-t", session, keys[0], keys.Length > 1 ? keys[1] : "" },
+            })!) { send.WaitForExit(10_000); }
         Assert.True(await Eventually(() => Task.FromResult(ScreenOf(session).Contains("CLEARME-25"))),
             "the marker never appeared:\n" + ScreenOf(session));
 
