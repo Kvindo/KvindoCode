@@ -268,6 +268,23 @@ public sealed class TerminalUiTests
         return long.TryParse(text, out var n) ? n : -1;
     }
 
+    /// <summary>Every live session for a project's grid, by EXACT name (no tmux target resolution).</summary>
+    List<string> Sessions(string project, int panes)
+    {
+        var wanted = new TmuxBackend(socketName: _socket).SessionNames(project, panes).ToList();
+        using var p = Process.Start(new ProcessStartInfo("tmux")
+        {
+            UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true,
+            ArgumentList = { "-L", _socket, "list-sessions", "-F", "#{session_name}" },
+        })!;
+        var text = p.StandardOutput.ReadToEnd();
+        p.StandardError.ReadToEnd();
+        p.WaitForExit(10_000);
+        var all = text.Split('\n', StringSplitOptions.RemoveEmptyEntries).Select(x => x.Trim()).ToList();
+        // exact names plus the renamed forms of THIS project's panes (kv-<hash>-<n>-<title>)
+        return all.Where(n => wanted.Any(w => n == w || n.StartsWith(w + "-", StringComparison.Ordinal))).ToList();
+    }
+
     bool HasSession(string session)
     {
         using var p = Process.Start(new ProcessStartInfo("tmux")
@@ -462,7 +479,14 @@ public sealed class TerminalUiTests
         _out.WriteLine("renamed to: " + expected);
         Assert.True(await Eventually(() => Task.FromResult(HasSession(expected))),
             "tmux does not know the new name; sessions: " + string.Join(",", backend.SessionNames(sb.Project, 4).Where(HasSession)));
-        Assert.False(HasSession(session));                 // the old name is gone: it was renamed, not duplicated
+        // The old name is gone as a SESSION of its own: it was renamed, not duplicated. Checked by exact membership —
+        // `has-session -t <plain>` now answers "yes" for the renamed session, because tmux resolves a target by exact
+        // name and then by PREFIX and the two names share one (that prefix match is what lets a restart kill a renamed
+        // pane; see Restarting_a_renamed_pane_really_replaces_its_session).
+        var live = Sessions(sb.Project, 4);
+        _out.WriteLine("live sessions: " + string.Join(", ", live));
+        Assert.DoesNotContain(session, live);
+        Assert.Contains(expected, live);
         // tmux refuses the characters it hates, so the name is derived — never passed through blindly
         Assert.DoesNotContain(".", expected);
         Assert.DoesNotContain(":", expected);
@@ -506,6 +530,136 @@ public sealed class TerminalUiTests
         Assert.True(await Eventually(() => Task.FromResult(sessions.All(HasSession))), "the sessions did not come back");
         Assert.True(await Eventually(() => Task.FromResult(sessions.All(s => SessionPanePid(s) is var now && now > 0 && now != before[s]))),
             "the sessions were not re-created: " + string.Join(", ", sessions.Select(s => $"{s} {before[s]} -> {SessionPanePid(s)}")));
+    }
+
+    /// <summary>
+    /// Restarting a pane CLEARS what it showed — the screen and the scrollback, not only the tmux session.
+    /// </summary>
+    /// <remarks>
+    /// "Restart this terminal doesnt clear it up" (2026-10-18). Two things were left behind: the tmux session was killed
+    /// after the client was stopped (so the relaunch reattached to the same scrollback), and the control keeps its own
+    /// screen model plus up to BufferSize lines that nothing wipes when the process behind them exits. Restart now kills
+    /// the session first and calls ClearScreen, which emits ESC[2J and ESC[3J. This asserts the pane really goes blank:
+    /// a marker printed into pane 3 must be gone from the emulator after the restart.
+    /// </remarks>
+    [AvaloniaFact]
+    public async Task Restarting_a_pane_clears_its_screen_and_scrollback()
+    {
+        if (!new TmuxBackend().IsAvailable) { _out.WriteLine("tmux not available; skipping"); return; }
+        var sb = Shared().Sb;
+        var terminals = OpenGrid();
+        var backend = new TmuxBackend(socketName: _socket);
+        var session = backend.SessionName(sb.Project, 3);
+        Assert.True(await Eventually(() => Task.FromResult(HasSession(session))));
+
+        terminals.SetActive(3);
+        Dispatcher.UIThread.RunJobs();
+        terminals.TypeText("echo CLEAR-ME-$((6*7))\r");
+        Assert.True(await Eventually(() => Task.FromResult(Capture(session).Contains("CLEAR-ME-42"))),
+            "the marker never reached the pane:\n" + Capture(session));
+
+        var pane = terminals.Panes.Single(p => p.Index == 3);
+        var restart = pane.GetVisualDescendants().OfType<Button>().First(b => b.Name == "TerminalRestart3");
+        restart.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+
+        // the emulator's own buffer is what the human sees, so that is what must be clean
+        var cleared = await Eventually(() =>
+        {
+            var text = ScreenOf(pane.Terminal);
+            return Task.FromResult(!text.Contains("CLEAR-ME-42"));
+        });
+        _out.WriteLine("screen after restart: " + ScreenOf(pane.Terminal).Replace("\n", " | "));
+        Assert.True(cleared, "the pane still shows the old output after a restart:\n" + ScreenOf(pane.Terminal));
+    }
+
+    /// <summary>Restarting a RENAMED pane still replaces its session (a new shell, not a reattach).</summary>
+    /// <remarks>
+    /// Renaming appends a title (<c>kv-&lt;hash&gt;-2-renamed-pane</c>), so the question was whether the restart's
+    /// <c>kill-session -t kv-&lt;hash&gt;-2</c> still reaches it. It does: tmux resolves a target by exact name and then
+    /// by prefix. Measured here rather than assumed, because a silent miss would make the restart look like a no-op.
+    /// </remarks>
+    [AvaloniaFact]
+    public async Task Restarting_a_renamed_pane_really_replaces_its_session()
+    {
+        if (!new TmuxBackend().IsAvailable) { _out.WriteLine("tmux not available; skipping"); return; }
+        var sb = Shared().Sb;
+        var terminals = OpenGrid();
+        var backend = new TmuxBackend(socketName: _socket);
+        var plain = backend.SessionName(sb.Project, 2);
+        Assert.True(await Eventually(() => Task.FromResult(HasSession(plain))));
+
+        var renamed = backend.SafeSessionName(sb.Project, 2, "renamed pane")!;
+        backend.RenameSession(sb.Project, 2, "renamed pane");
+        Assert.True(await Eventually(() => Task.FromResult(HasSession(renamed))), "the rename did not reach tmux");
+        var pidBefore = SessionPanePid(renamed);
+        _out.WriteLine($"{renamed} pid before={pidBefore}");
+
+        var pane = terminals.Panes.Single(p => p.Index == 2);
+        pane.GetVisualDescendants().OfType<Button>().First(b => b.Name == "TerminalRestart2")
+            .RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+
+        // The restart ends the renamed session and starts a FRESH one under the plain name (a restart resets the
+        // name as well as the screen), so the proof is: the old one is gone, a live one is there, with a new shell.
+        Assert.True(await Eventually(() => Task.FromResult(!HasSession(renamed) && SessionPanePid(plain) is var p && p > 0 && p != pidBefore)),
+            $"the renamed session was not replaced: renamed={HasSession(renamed)} plain pid {pidBefore} -> {SessionPanePid(plain)}");
+        _out.WriteLine($"after: {plain} pid={SessionPanePid(plain)}");
+    }
+
+    /// <summary>
+    /// A restart must NOT replay the old scrollback — that is the whole point of asking for one.
+    /// </summary>
+    /// <remarks>
+    /// The pane replays <c>tmux capture-pane</c> into the emulator before attaching, so that reopening the app brings a
+    /// session's history back. After a RESTART that behaviour is exactly backwards: it puts back what the user just
+    /// asked to be rid of, and the kill can lose the race (the server may still hold the pane when the relaunch reads
+    /// it). Measured 2026-10-18: without the flag the marker printed before the restart reappears in the emulator.
+    /// </remarks>
+    [AvaloniaFact]
+    public async Task A_restart_does_not_replay_the_old_scrollback()
+    {
+        if (!new TmuxBackend().IsAvailable) { _out.WriteLine("tmux not available; skipping"); return; }
+        var sb = Shared().Sb;
+        var terminals = OpenGrid();
+        var backend = new TmuxBackend(socketName: _socket);
+        var session = backend.SessionName(sb.Project, 1);
+        Assert.True(await Eventually(() => Task.FromResult(HasSession(session))));
+
+        terminals.SetActive(1);
+        Dispatcher.UIThread.RunJobs();
+        terminals.TypeText("echo STAY-AWAY-$((8*8))\r");
+        Assert.True(await Eventually(() => Task.FromResult(Capture(session).Contains("STAY-AWAY-64"))),
+            "the marker never reached the pane:\n" + Capture(session));
+
+        var pane = terminals.Panes.Single(p => p.Index == 1);
+        pane.GetVisualDescendants().OfType<Button>().First(b => b.Name == "TerminalRestart1")
+            .RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+
+        Assert.True(await Eventually(() => Task.FromResult(pane.Terminal.IsLive)), "the pane never came back");
+        // give the emulator the same chance it would get if the history had been replayed
+        for (var i = 0; i < 20; i++) { Dispatcher.UIThread.RunJobs(); await Task.Delay(50); }
+        var screen = ScreenOf(pane.Terminal);
+        _out.WriteLine("screen after restart: " + screen.Replace("\n", " | "));
+        Assert.DoesNotContain("STAY-AWAY-64", screen);
+    }
+
+    /// <summary>The whole visible buffer of a terminal control, as text (the emulator's own screen model).</summary>
+    /// <remarks>Reads through the buffer's line objects rather than a cell indexer: the emulator's own model is what the
+    /// human sees, and tmux's copy is only what the session still holds.</remarks>
+    static string ScreenOf(TerminalControl c)
+    {
+        try
+        {
+            var buffer = c.Terminal.Buffer;
+            var sb = new System.Text.StringBuilder();
+            for (var y = 0; y < buffer.Lines.Length; y++)
+            {
+                var line = buffer.Lines[y];
+                sb.Append(line?.TranslateToString(true) ?? "");
+                sb.Append('\n');
+            }
+            return sb.ToString();
+        }
+        catch (Exception e) { return "<screen unavailable: " + e.GetType().Name + ": " + e.Message + ">"; }
     }
 
     /// <summary>The splitter sizes are remembered per project (they were lost on every switch away).</summary>

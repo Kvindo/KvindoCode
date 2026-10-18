@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Security.Cryptography;
+using System.Collections.Generic;
 using System.Text;
 
 namespace KvindoCode.Core.Terminal;
@@ -103,6 +104,11 @@ public sealed class TmuxBackend
     }
 
     /// <summary>End one pane's session (the pane's ✕). Its process exits, which the terminal control reports.</summary>
+    /// <remarks>
+    /// Targets the plain name, which also matches a RENAMED session: tmux resolves a target by exact name first and then
+    /// by prefix, so <c>kv-&lt;hash&gt;-3</c> reaches <c>kv-&lt;hash&gt;-3-build-logs</c>. Measured 2026-10-18 while
+    /// chasing "restart doesnt clear it up" — the rename was NOT the cause, and an explicit prefix sweep added nothing.
+    /// </remarks>
     public void KillSession(string projectPath, int index) => Run(new[] { "kill-session", "-t", SessionName(projectPath, index) });
 
     /// <summary>End every pane's session (the grid's ✕).</summary>
@@ -133,7 +139,11 @@ public sealed class TmuxBackend
         var s = safe.ToString().Trim('-');
         if (s.Length == 0) s = "pane";
         if (s.Length > 32) s = s[..32];
-        var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(Path.GetFullPath(projectPath))))[..6].ToLowerInvariant();
+        // The SAME 8-character hash as SessionName, deliberately: with a different width the renamed name shares no
+        // prefix with the plain one, so `kill-session -t kv-<hash>-<n>` cannot reach it (tmux resolves by exact name and
+        // then by prefix) and a restart left the renamed session running while creating a second one beside it — which
+        // is what "restart this terminal doesnt clear it up" looked like (measured 2026-10-18).
+        var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(Path.GetFullPath(projectPath))))[..8].ToLowerInvariant();
         return $"kv-{hash}-{index}-{s}";
     }
 

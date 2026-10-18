@@ -663,9 +663,60 @@ public sealed class RightPane : UserControl
     string _agentCwd = "";
     public void SetAgentCwd(string cwd) => _agentCwd = cwd;
 
+    /// <summary>Show a BACKGROUND TASK: its command and the tail of its output, refreshed while it runs.</summary>
+    /// <remarks>
+    /// Asked 2026-10-18: "background tasks are not clickable in ui". The Tasks panel listed them as plain text, so a
+    /// task's output could only be read in the transcript card it happened to write to — and a task that was started
+    /// before the transcript was compacted had no card at all. This is the same panel the subagents get.
+    /// </remarks>
+    public void ShowTask(KvindoCode.Core.Tasks.BackgroundTask task)
+    {
+        _task = task;
+        _title.Text = $"Background #{task.Id} — {task.Description}";
+        var info = Ui.Muted("", 12);
+        var body = new TextBlock
+        {
+            FontFamily = new Avalonia.Media.FontFamily(TerminalsView.MonoFont), FontSize = 11.5,
+            TextWrapping = Avalonia.Media.TextWrapping.NoWrap,
+        };
+        var scroll = new ScrollViewer
+        {
+            Content = new Border { Padding = new Thickness(14, 8), Child = body },
+            VerticalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto,
+            HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto,
+        };
+        void Refresh()
+        {
+            var state = task.Running ? "running" : task.State.ToString().ToLowerInvariant();
+            info.Text = $"{state} · {task.Command}";
+            var tail = task.Tail(400);
+            if (body.Text != tail) { body.Text = tail.Length == 0 ? "(no output yet)" : tail; scroll.ScrollToEnd(); }
+        }
+        Refresh();
+        var head = new StackPanel { Margin = new Thickness(18, 12, 18, 6), Spacing = 2 };
+        head.Children.Add(info);
+        var dock = new DockPanel();
+        DockPanel.SetDock(head, Dock.Top);
+        dock.Children.Add(head);
+        dock.Children.Add(scroll);
+        _body.Content = dock;
+        _active = "task";
+        // a live task keeps appending; the pane follows it until the human switches the pane to something else
+        var timer = new Avalonia.Threading.DispatcherTimer { Interval = TimeSpan.FromMilliseconds(600) };
+        timer.Tick += (_, _) =>
+        {
+            if (_active != "task" || _task != task) { timer.Stop(); return; }
+            Refresh();
+        };
+        timer.Start();
+    }
+
+    KvindoCode.Core.Tasks.BackgroundTask? _task;
+
     void Activate(string kind)
     {
         _active = kind;
+        if (kind != "task") _task = null;
         foreach (var (b, k) in _pills)
         {
             b.Classes.Remove("plan");
