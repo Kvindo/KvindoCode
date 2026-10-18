@@ -702,21 +702,27 @@ public sealed class RightPane : UserControl
         _body.Content = dock;
         _active = "task";
         // a live task keeps appending; the pane follows it until the human switches the pane to something else
-        var timer = new Avalonia.Threading.DispatcherTimer { Interval = TimeSpan.FromMilliseconds(600) };
-        timer.Tick += (_, _) =>
+        // One timer for the pane, stopped whenever the pane shows something else OR the pane leaves the tree. A timer
+        // created per view and only stopped by its own tick outlives the window it belongs to: it keeps firing into a
+        // detached control, which is what made UI tests fail in their CLEANUP ("the calling thread cannot access this
+        // object") on whichever test happened to be running when it fired.
+        _taskTimer?.Stop();
+        _taskTimer = new Avalonia.Threading.DispatcherTimer { Interval = TimeSpan.FromMilliseconds(600) };
+        _taskTimer.Tick += (_, _) =>
         {
-            if (_active != "task" || _task != task) { timer.Stop(); return; }
+            if (_active != "task" || _task != task || TopLevel.GetTopLevel(this) is null) { _taskTimer?.Stop(); return; }
             Refresh();
         };
-        timer.Start();
+        _taskTimer.Start();
     }
 
     KvindoCode.Core.Tasks.BackgroundTask? _task;
+    Avalonia.Threading.DispatcherTimer? _taskTimer;
 
     void Activate(string kind)
     {
         _active = kind;
-        if (kind != "task") _task = null;
+        if (kind != "task") { _task = null; _taskTimer?.Stop(); }
         foreach (var (b, k) in _pills)
         {
             b.Classes.Remove("plan");
