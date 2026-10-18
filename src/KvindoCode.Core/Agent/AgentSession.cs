@@ -1546,11 +1546,15 @@ public sealed class AgentSession : IDisposable
         EnqueueNote($"Background task #{t.Id} \"{t.Description}\" {how}." + (tail.Length > 0 ? $"\nLast output:\n{Clip(tail, 3000)}" : ""), wake: true);
     }
 
-    void EnqueueNote(string text, bool wake)
+    /// <summary>Queue a report for the model and (optionally) wake it. Internal so the subagent manager can use it.</summary>
+    internal void EnqueueNote(string text, bool wake)
     {
         lock (_lock) _notes.Add(text);
         if (wake && !IsRunning && (DateTime.UtcNow - _lastWake).TotalSeconds >= 1) { _lastWake = DateTime.UtcNow; WakeRequested?.Invoke(); }
     }
+
+    /// <summary>The notes queued for the model (tests read this; the app drains them into the conversation).</summary>
+    internal IReadOnlyList<string> TakeNotesForTest() { lock (_lock) return _notes.ToList(); }
 
     /// <summary>Move pending task reports into the conversation as a user-role notification. Returns true if anything was added.</summary>
     bool DrainNotes(bool includeDigest)

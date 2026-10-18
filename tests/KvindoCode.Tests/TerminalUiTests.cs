@@ -511,10 +511,17 @@ public sealed class TerminalUiTests
         _out.WriteLine("muted header text: " + header);
         Assert.DoesNotContain("kv-", header);
 
-        // ...and there is a restart control where the old kill-all ✕ was
-        var restart = terminals.GetVisualDescendants().OfType<Button>().FirstOrDefault(b => b.Name == "TerminalsRestart");
-        Assert.NotNull(restart);
-        Assert.Contains("restart", ToolTip.GetTip(restart)?.ToString() ?? "", StringComparison.OrdinalIgnoreCase);
+        // NO grid-level controls at all (asked 2026-10-18: "also remove those 2 buttons in terminal"). The grid is
+        // four panes and nothing else — the per-pane restart lives in each pane's own header, and the header's terminal
+        // icon closes the grid.
+        var gridButtons = terminals.GetVisualDescendants().OfType<Button>()
+            .Select(b => b.Name ?? "").Where(n => n.StartsWith("Terminals", StringComparison.Ordinal)).ToList();
+        _out.WriteLine("grid-level buttons: " + string.Join(",", gridButtons));
+        Assert.Empty(gridButtons);
+        // the per-pane restart, one per pane: there is no grid-wide button any more, so restart them individually
+        var restarts = terminals.Panes.Select(p => p.GetVisualDescendants().OfType<Button>()
+            .First(b => b.Name == $"TerminalRestart{p.Index}")).ToList();
+        Assert.Equal(4, restarts.Count);
 
         // tmux's creation stamps before the restart: afterwards they must be NEWER, which is proof that the four sessions
         // were ended and made again. (Checking a typed marker was fragile — the shell echoes terminal-protocol replies,
@@ -523,7 +530,7 @@ public sealed class TerminalUiTests
         _out.WriteLine("shell pids before: " + string.Join(", ", before.Select(kv => $"{kv.Key}={kv.Value}")));
         Assert.All(before, kv => Assert.True(kv.Value > 0, $"{kv.Key} has no shell"));
 
-        restart!.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+        foreach (var r in restarts) r.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
         Dispatcher.UIThread.RunJobs();
 
         Assert.NotNull(main.GetVisualDescendants().OfType<TerminalsView>().FirstOrDefault());       // the grid stays up
@@ -640,6 +647,37 @@ public sealed class TerminalUiTests
         var screen = ScreenOf(pane.Terminal);
         _out.WriteLine("screen after restart: " + screen.Replace("\n", " | "));
         Assert.DoesNotContain("STAY-AWAY-64", screen);
+    }
+
+    /// <summary>
+    /// A shell that exits (Ctrl+D / `exit`) comes back by itself — a pane is not a one-shot command runner.
+    /// </summary>
+    /// <remarks>
+    /// "when i press Ctrl+D terminal exists and there is no way it could be restarted (it should restart automatically
+    /// in that case)" (2026-10-18). tmux ends the session with the shell, so the fix is an auto-restart on
+    /// ProcessExited, bounded so a shell that dies instantly does not spin. The proof is a NEW shell PID in a NEW
+    /// session.
+    /// </remarks>
+    [AvaloniaFact]
+    public async Task A_shell_that_exits_comes_back_by_itself()
+    {
+        if (!new TmuxBackend().IsAvailable) { _out.WriteLine("tmux not available; skipping"); return; }
+        var sb = Shared().Sb;
+        var terminals = OpenGrid();
+        var backend = new TmuxBackend(socketName: _socket);
+        var session = backend.SessionName(sb.Project, 3);
+        Assert.True(await Eventually(() => Task.FromResult(HasSession(session))));
+        var pidBefore = SessionPanePid(session);
+
+        terminals.SetActive(3);
+        Dispatcher.UIThread.RunJobs();
+        terminals.TypeText("exit\r");
+        Assert.True(await Eventually(() => Task.FromResult(!HasSession(session))), "the shell did not exit");
+
+        // the pane relaunches by itself: a new session, a new shell
+        Assert.True(await Eventually(() => Task.FromResult(HasSession(session) && SessionPanePid(session) is var p && p > 0 && p != pidBefore)),
+            $"the pane did not come back after the shell exited (session={HasSession(session)} pid={SessionPanePid(session)})");
+        _out.WriteLine($"came back: {session} pid {pidBefore} -> {SessionPanePid(session)}");
     }
 
     /// <summary>The whole visible buffer of a terminal control, as text (the emulator's own screen model).</summary>

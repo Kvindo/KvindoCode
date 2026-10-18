@@ -123,6 +123,16 @@ public sealed class LeakRegisterTests
         using var sb = new Sandbox(); var v = NewVault(sb);
         const string harmless = "build-7f3a9c21d0-xyz";
         var rec = v.ExcludeWithContext(harmless, "token", "local auditor model (second opinion)", "Read", "sess-1", "Piklema acts", "line before\nbuild " + harmless + " done\nline after");
+        // AND NO WRITER MAY PUT IT BACK (2026-10-18: "I marked X as not a secret, but session managed to add it again").
+        // The detector honoured the exclusion; an explicit store did not, so a session could re-create the entry and the
+        // value came back as a marker. The refusal lives in the vault, so it covers every caller — and it says how to
+        // undo the decision, because refusing with no way forward is its own trap.
+        var refusal = Assert.Throws<ArgumentException>(() => v.Create("put-it-back", harmless));
+        Assert.Contains("marked as NOT a secret", refusal.Message);
+        Assert.DoesNotContain(v.List(), r => r.Name == "put-it-back");
+        // a real credential is unaffected
+        v.Create("real-one", "a-real-looking-token-9f2c7b1e");
+        Assert.Contains(v.List(), r => r.Name == "real-one");
 
         Assert.NotNull(rec);
         Assert.True(v.IsExcluded(harmless));                                      // still skipped by the detector

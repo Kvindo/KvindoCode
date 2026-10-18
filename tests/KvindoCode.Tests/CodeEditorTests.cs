@@ -263,6 +263,74 @@ public sealed class CodeEditorTests(ITestOutputHelper o)
         win.Close();
     }
 
+    /// <summary>
+    /// A file that opens must be READABLE: its text has to contrast with the editor's background.
+    /// </summary>
+    /// <remarks>
+    /// "when i click on file i cant view it" (2026-10-18) — and the earlier tests all passed, because they asserted
+    /// that the TEXT WAS THERE, not that anyone could see it. The cause was the highlighting theme: DarkPlus was applied
+    /// unconditionally, so in the app's light theme every token was a light colour on a light background. This is the
+    /// test that would have caught it, so it is written the way the complaint is phrased: open a file by CLICKING it,
+    /// then measure the colour the text is actually drawn in against the colour behind it.
+    /// </remarks>
+    [AvaloniaFact]
+    public async Task A_file_that_is_clicked_is_actually_readable()
+    {
+        using var sb = new Sandbox();
+        var (win, _) = Start(sb);
+        var file = sb.Write("app.py", "def main():\n    return 42\n");
+        var view = Open(win, sb.Project);
+        win.Measure(new Avalonia.Size(1400, 900));
+        win.Arrange(new Avalonia.Rect(0, 0, 1400, 900));
+        Dispatcher.UIThread.RunJobs();
+
+        // open it the way a human does
+        var tree = Field<TreeView>(view, "_tree");
+        var row = tree.GetVisualDescendants().OfType<TreeViewItem>().First(i => (i.Tag as string) == file);
+        ClickAt(win, row);
+        Assert.True(await Eventually(() => Task.FromResult(view.OpenPath == file)), "the click did not open the file");
+        Dispatcher.UIThread.RunJobs();
+
+        var editor = view.Editor;
+        var bg = (editor.Background as Avalonia.Media.ISolidColorBrush)?.Color ?? default;
+        var fg = (editor.Foreground as Avalonia.Media.ISolidColorBrush)?.Color ?? default;
+        // the palette the app itself draws in, which is what the editor must sit on
+        // FindResource on the window returns UnsetValue for a ThemeDictionaries key; the control's own TryFindResource
+        // walks the theme dictionaries properly.
+        Assert.True(view.TryFindResource("KvBg", view.ActualThemeVariant, out var pbg), "KvBg not found");
+        Assert.True(view.TryFindResource("KvText", view.ActualThemeVariant, out var pfg), "KvText not found");
+        var paletteBg = ((Avalonia.Media.ISolidColorBrush)pbg!).Color;
+        var paletteFg = ((Avalonia.Media.ISolidColorBrush)pfg!).Color;
+        o.WriteLine($"theme={view.EditorTheme} background={bg} foreground={fg}");
+        Assert.NotEqual(default, bg);
+        Assert.NotEqual(default, fg);
+
+        // The app's own palette must be behind the text, and the text must contrast with it — measured, not assumed.
+        static double Ratio(Avalonia.Media.Color a, Avalonia.Media.Color b)
+        {
+            static double Ch(byte v) { var s = v / 255.0; return s <= 0.03928 ? s / 12.92 : Math.Pow((s + 0.055) / 1.055, 2.4); }
+            static double Lum(Avalonia.Media.Color c) => 0.2126 * Ch(c.R) + 0.7152 * Ch(c.G) + 0.0722 * Ch(c.B);
+            var (l1, l2) = (Lum(a), Lum(b));
+            return (Math.Max(l1, l2) + 0.05) / (Math.Min(l1, l2) + 0.05);
+        }
+        var ratio = Ratio(fg, bg);
+        o.WriteLine($"contrast ratio: {ratio:0.0}:1");
+        Assert.True(ratio >= 4.5, $"the editor's text colour contrasts {ratio:0.0}:1 with its background — unreadable");
+        Assert.Equal(paletteBg, bg);      // the editor uses the app's own background, not one of its own
+        Assert.Equal(paletteFg, fg);
+
+        // and the highlighting theme follows the app's variant, which is what broke it
+        var variant = Avalonia.Application.Current!.ActualThemeVariant;
+        o.WriteLine($"app variant={variant}");
+        // Read the theme the REGISTRY was built with, not a field that a handler can overwrite: an earlier version of
+        // this test recomputed the expected value and passed with DarkPlus installed.
+        var expectedTheme = variant == Avalonia.Styling.ThemeVariant.Light
+            ? TextMateSharp.Grammars.ThemeName.LightPlus : TextMateSharp.Grammars.ThemeName.DarkPlus;
+        o.WriteLine($"installed registry theme={view.InstalledRegistryTheme} expected={expectedTheme}");
+        Assert.Equal(expectedTheme, view.InstalledRegistryTheme);
+        win.Close();
+    }
+
     /// <summary>Search in files finds content across the project, and Replace All rewrites every file.</summary>
     /// <remarks>
     /// Asked 2026-10-18: "search should be the same as in vs code (there is reach search there where i can also

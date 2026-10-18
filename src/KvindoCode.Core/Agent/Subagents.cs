@@ -211,7 +211,20 @@ public sealed class SubagentManager : IDisposable
             }
             catch (OperationCanceledException) { h.Error = "Subagent stopped."; }
             catch (Exception e) { h.Error = e.Message; }
-            finally { h.Running = false; h.Ended = DateTimeOffset.UtcNow; }
+            finally
+            {
+                h.Running = false; h.Ended = DateTimeOffset.UtcNow;
+                // TELL the parent. A background task wakes the session when it exits; a subagent did not, so a session
+                // that had spawned one sat idle with a finished result nobody was asked about ("looks like session is
+                // not notified on agents finish", 2026-10-18). Same mechanism, same wording as a task: a note the model
+                // reads on the next turn, and a wake when the session is idle so that turn happens now.
+                if (h.Error is null || h.Error.Length == 0 || h.Error == "Subagent stopped.")
+                {
+                    var body = h.Result is { Length: > 0 } r ? "\nResult:\n" + (r.Length > 3000 ? r[..3000] + "…" : r) : "";
+                    _parent.EnqueueNote($"Subagent #{h.Id} \"{h.Description}\" finished.{body}", wake: h.Error != "Subagent stopped.");
+                }
+                else _parent.EnqueueNote($"Subagent #{h.Id} \"{h.Description}\" failed: {h.Error}", wake: true);
+            }
         });
         return h;
     }
