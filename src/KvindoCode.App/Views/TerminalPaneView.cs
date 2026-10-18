@@ -38,6 +38,9 @@ public sealed class TerminalPaneView : UserControl
     bool _started;
 
     public int Index { get; }
+
+    /// <summary>The explicit tmux session this pane drives, or null for the grid's own naming.</summary>
+    readonly string? _session;
     /// <summary>The live terminal control. REPLACED by <see cref="Restart"/>, so it is not readonly.</summary>
     public TerminalControl Terminal { get; private set; }
 
@@ -46,11 +49,14 @@ public sealed class TerminalPaneView : UserControl
 
     public bool IsActive { get; private set; }
 
-    public TerminalPaneView(TmuxBackend backend, string project, int index)
+    /// <param name="session">Attach to THIS tmux session by name instead of the grid's <c>kv-&lt;hash&gt;-&lt;n&gt;</c>.
+    /// Used by the side panel, where the session is created by the Terminal tool and may be any name.</param>
+    public TerminalPaneView(TmuxBackend backend, string project, int index, string? session = null)
     {
         _backend = backend;
         _project = project;
         Index = index;
+        _session = string.IsNullOrWhiteSpace(session) ? null : session;
         Name = $"TerminalPane{index}";
 
         Terminal = BuildTerminal();
@@ -145,11 +151,16 @@ public sealed class TerminalPaneView : UserControl
             VerticalAlignment = VerticalAlignment.Stretch,
         };
         // -A = attach if the session already exists (its scrollback comes back), create it otherwise.
-        t.ProcessArgs = new List<string>(_backend.LaunchArgs(_project, Index));
+        t.ProcessArgs = new List<string>(_session is { } named ? _backend.LaunchArgsFor(named) : _backend.LaunchArgs(_project, Index));
         t.StartingDirectory = _project;
         // A shell that EXITS (Ctrl+D, `exit`, a crash) must come back by itself: the pane is a terminal, not a
         // one-shot command runner ("when i press Ctrl+D terminal exists and there is no way it could be restarted").
-        t.ProcessExited += (_, _) => AutoRestart();
+        //
+        // ONLY the control that is still this pane's terminal may trigger it. Restart REPLACES the control, and the
+        // old one's exit arrives a moment later — which used to restart the NEW control, killing the shell it had just
+        // launched and starting the cycle again (measured: the pane flapped, burned its auto-restart budget and ended
+        // up dead, and it only showed up when a preceding test had restarted that pane).
+        t.ProcessExited += (_, _) => { if (ReferenceEquals(t, Terminal)) AutoRestart(); };
         return t;
     }
 
@@ -225,7 +236,9 @@ public sealed class TerminalPaneView : UserControl
             // session printed would put back exactly what the user asked to be rid of ("restart this terminal doesnt
             // clear it up", 2026-10-18) — and the kill can lose that race, since the server may still hold the pane for
             // a moment when the relaunch reads it.
-            var history = _restarting ? "" : _backend.History(_project, Index);
+            var history = _restarting ? "" : (_session is { } namedSession
+                ? (_backend.HasSessionNamed(namedSession) ? _backend.Capture(namedSession) : "")
+                : _backend.History(_project, Index));
             await Terminal.LaunchProcess();
             if (_stopped) return;
             if (history.Length > 0)
@@ -348,7 +361,7 @@ public sealed class TerminalPaneView : UserControl
         _exits = 0;                // a human asked: start the auto-restart budget over
         // 1. End the tmux SESSION first — the PTY is only the client, and killing the client first leaves the server
         //    holding the pane and its scrollback, which the relaunch then reattaches to (that order was wrong here).
-        try { _backend.KillSession(_project, Index); } catch { /* already gone */ }
+        try { if (_session is { } namedKill) _backend.KillSessionNamed(namedKill); else _backend.KillSession(_project, Index); } catch { /* already gone */ }
         // 2. Throw the CONTROL away. Relaunching the same control is what kept the old screen alive: it owns a screen
         //    model, a scrollback buffer and a PTY, and none of them is reset by a new process on the same instance.
         //    A brand-new control has none of those, so "start over" cannot be half-done.
@@ -387,5 +400,5 @@ public sealed class TerminalPaneView : UserControl
     }
 
     /// <summary>What tmux calls this pane's session (shown in the grid header and usable by `tmux attach`).</summary>
-    public string SessionName => _backend.SessionName(_project, Index);
+    public string SessionName => _session ?? _backend.SessionName(_project, Index);
 }

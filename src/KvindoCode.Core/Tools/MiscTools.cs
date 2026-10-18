@@ -253,6 +253,6 @@ public static class ToolRegistry
         new WebFetchTool(), new TodoWriteTool(), new SkillTool(), new AskUserQuestionTool(), new ExitPlanModeTool(), new EnterPlanModeTool(),
         new MonitorTool(), new SchedulePromptTool(), new TaskOutputTool(), new TaskStopTool(), new TaskListTool(), new BrowserTool(),
         new AgentTool(), new AgentOutputTool(), new AgentListTool(), new AgentStopTool(), new ModelsTool(), new SecretsTool(), new GeneratePasswordTool(), new LeakedCredentialsTool(), new SessionsTool(),
-        new TelegramTool(),
+        new TelegramTool(), new TerminalTool(),
     };
 }

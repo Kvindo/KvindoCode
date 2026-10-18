@@ -197,6 +197,7 @@ public sealed class AgentSession : IDisposable
     {
         Confirm = msg => _ctx.Interaction.ConfirmAsync(msg, "Restart Chrome", CancellationToken.None),
         SessionId = Info.Id,                                  // tabs are owned per session, so the browser must know whose it is
+        KeepBackground = _settings.ChromeKeepBackground,      // do not steal focus when Chrome raises its window
     };
     public bool ModelSupportsVision => ModelLookup?.Invoke(Model)?.Vision ?? true;
     public string Model { get; set; }
@@ -741,6 +742,20 @@ public sealed class AgentSession : IDisposable
     public event Action<AgentEvent>? Event;
     /// <summary>A background task produced something the model should react to while the session is idle.</summary>
     public event Action? WakeRequested;
+
+    /// <summary>
+    /// Raised when the Terminal TOOL wants a terminal shown in the side panel: (tmux session, title, directory).
+    /// </summary>
+    /// <remarks>
+    /// Asked 2026-10-18: "I want session to have tool to spawn terminal ... so it will be shown on sidepanel ... i want
+    /// to get terminal to the server which is already setup and logged in". The tool does the work through tmux (so the
+    /// model can send a command and read the screen without the UI), and this event is what puts the SAME session on
+    /// screen for the human to type into.
+    /// </remarks>
+    public event Action<string, string, string>? TerminalRequested;
+
+    /// <summary>Ask the UI to show the given tmux session as a terminal in the side panel.</summary>
+    public void ShowTerminal(string session, string title, string dir) => TerminalRequested?.Invoke(session, title, dir);
     /// <summary>UI callback: dequeue one message submitted while this turn is running. Called only between model/tool rounds.</summary>
     public Func<QueuedTurn?>? DequeueQueuedTurn { get; set; }
     /// <summary>Asked (without consuming) whether more user messages are waiting; the UI provides it.</summary>

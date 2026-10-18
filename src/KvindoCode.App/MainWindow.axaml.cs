@@ -125,7 +125,8 @@ public partial class MainWindow : Window
             // The ID travels WITH the name (asked 2026-10-18): a name is not unique and cannot be handed to another
             // session or to a command, while the id can. Two lines, so a paste reads as a pair rather than a run-on.
             var id = _current!.Session.Info.Id;
-            var text = string.IsNullOrWhiteSpace(id) ? name : name + "\n" + id;
+            // "name (id)", one line (asked 2026-10-18) — a two-line clip pastes badly into a chat or a command
+            var text = string.IsNullOrWhiteSpace(id) ? name : name + " (" + id + ")";
             try
             {
                 var cb = TopLevel.GetTopLevel(this)?.Clipboard;
@@ -765,6 +766,15 @@ public partial class MainWindow : Window
         };
         session.DequeueQueuedTurnPending = () => sv.SnapshotQueue().Count > 0;
         session.WakeRequested += () => Dispatcher.UIThread.Post(() => { if (_live.ContainsKey(sv.Id) && !sv.Running) Start(sv, null, null); });
+        // The Terminal TOOL opens a real tmux session and asks for it to be SHOWN: put it in the side panel, so the human
+        // can type into the same shell the model is driving (asked 2026-10-18: a terminal to a server that is already
+        // logged in). Only the session on screen opens the pane — a background session must not steal the panel.
+        session.TerminalRequested += (tmuxSession, title, dir) => Dispatcher.UIThread.Post(() =>
+        {
+            if (!_live.ContainsKey(sv.Id) || sv != _current) return;
+            OpenPane();
+            _pane.ShowTerminal(tmuxSession, title, dir);
+        });
 
         if (replay)
         {
@@ -2097,6 +2107,11 @@ public partial class MainWindow : Window
     {
         if (_terminals is { } open && open.Project == project) { CloseTerminals(); return; }   // the icon toggles
         CloseContextMain();
+        // The FILE MANAGER has to go first. OpenCodeEditor closed the grid, but this direction did not, so opening the
+        // grid from the file manager left BOTH views in the main area and they drew over each other (reported
+        // 2026-10-18: "when i click on file manager and then on terminal ui gets overlapped"). Both are inserted at
+        // index 0 of the same panel, so the older one is not hidden — it is simply underneath, still painting.
+        if (_codeEditor is not null) CloseCodeEditor();
         if (_terminals is { } other && other.Project != project) CloseTerminals();              // one grid at a time
         _project = project;
         foreach (var tv in Host.Children.OfType<TranscriptView>().ToList()) Host.Children.Remove(tv);

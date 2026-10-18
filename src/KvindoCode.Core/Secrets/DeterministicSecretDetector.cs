@@ -303,7 +303,11 @@ public static partial class DeterministicSecretDetector
         if (v.Contains('=') && !v.EndsWith("=", StringComparison.Ordinal))
         {
             var rhs = v[(v.LastIndexOf('=') + 1)..];
-            if (Guid.TryParse(rhs, out _) || IsUlid(rhs) || Regex.IsMatch(rhs, @"^[0-9a-fA-F]{16,}$")) return false;
+            // 7, not 16: a git ABBREVIATION is 7-40 hex characters and is what a deployment log is full of
+            // ("staging=29274bc7f4", reported 2026-10-18). The whole-value hex rule below already uses git's own
+            // minimum of 7; this one only allowed 16+, so the same id was refused on its own and offered as a value
+            // when a key name was attached to it.
+            if (Guid.TryParse(rhs, out _) || IsUlid(rhs) || Regex.IsMatch(rhs, @"^[0-9a-fA-F]{7,40}$")) return false;
         }
         if (v.Contains('/') && !v.Contains('=') && !v.Contains('+')) return false;                         // a slash path / namespace
         // an identifier with no digit and no symbol is a NAME, whatever its case ("SshKeys", "secret_key")

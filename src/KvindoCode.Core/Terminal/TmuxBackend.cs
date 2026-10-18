@@ -45,6 +45,79 @@ public sealed class TmuxBackend
         return args;
     }
 
+    /// <summary>Attach-or-create arguments for a session addressed BY NAME (the Terminal tool's panes).</summary>
+    public IReadOnlyList<string> LaunchArgsFor(string session)
+    {
+        var args = new List<string>();
+        if (Socket is not null) { args.Add("-L"); args.Add(Socket); }
+        args.AddRange(new[] { "new-session", "-A", "-s", session });
+        return args;
+    }
+
+    /// <summary>
+    /// A tmux-legal session name for the Terminal tool: <c>kv-tool-&lt;slug&gt;</c>.
+    /// </summary>
+    /// <remarks>Derived from a human-given name so `tmux attach -t kv-tool-db` works, and kept under the same 32-character
+    /// segment cap the pane renames use. A name that is empty after slugging falls back to a hash of itself, so two
+    /// different names can never collide on one session.</remarks>
+    public static string ToolSessionName(string name)
+    {
+        var slug = new StringBuilder();
+        foreach (var c in (name ?? "").Trim())
+            slug.Append(char.IsLetterOrDigit(c) || c is '-' or '_' ? char.ToLowerInvariant(c) : '-');
+        var s = slug.ToString().Trim('-');
+        while (s.Contains("--")) s = s.Replace("--", "-");
+        if (s.Length == 0) s = "term";
+        if (s.Length > 32) s = s[..32];
+        return "kv-tool-" + s;
+    }
+
+    /// <summary>End a session addressed by name (the Terminal tool's `close`).</summary>
+    public void KillSessionNamed(string session) => Run(new[] { "kill-session", "-t", session });
+
+    /// <summary>Does a session with this exact name exist?</summary>
+    public bool HasSessionNamed(string session) => Run(new[] { "has-session", "-t", session }).Code == 0;
+
+    /// <summary>Create the session in <paramref name="dir"/> if it does not exist yet (detached: no client needed).</summary>
+    public bool EnsureSession(string session, string dir)
+    {
+        if (HasSessionNamed(session)) return true;
+        var r = Run(new[] { "new-session", "-d", "-s", session, "-c", dir });
+        return r.Code == 0 || HasSessionNamed(session);
+    }
+
+    /// <summary>Type text into a session, as the human at that terminal would. <paramref name="enter"/> presses Return.</summary>
+    public bool SendText(string session, string text, bool enter = true)
+    {
+        if (!HasSessionNamed(session)) return false;
+        // -l = literal, so a $ or a quote in the text is not interpreted by tmux
+        if (text.Length > 0 && Run(new[] { "send-keys", "-t", session, "-l", text }).Code != 0) return false;
+        return !enter || Run(new[] { "send-keys", "-t", session, "Enter" }).Code == 0;
+    }
+
+    /// <summary>The session's visible screen plus its last <paramref name="lines"/> lines of scrollback, as text.</summary>
+    public string Capture(string session, int lines = 200)
+    {
+        if (!HasSessionNamed(session)) return "";
+        var r = Run(new[] { "capture-pane", "-p", "-J", "-t", session, "-S", "-" + Math.Max(1, lines) });
+        return r.Code == 0 ? r.Output : "";
+    }
+
+    /// <summary>Every session this app created for the Terminal tool, by exact name.</summary>
+    public List<string> ToolSessions()
+    {
+        var list = new List<string>();
+        if (!IsAvailable) return list;
+        var r = Run(new[] { "list-sessions", "-F", "#{session_name}" });
+        if (r.Code != 0) return list;
+        foreach (var line in r.Output.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var n = line.Trim();
+            if (n.StartsWith("kv-tool-", StringComparison.Ordinal)) list.Add(n);
+        }
+        return list;
+    }
+
     /// <summary>
     /// The session for one pane: <c>kv-&lt;8 hex of sha256(path)&gt;-&lt;index&gt;</c>. Stable across runs, one per
     /// project per pane, so each of the four terminals keeps its own history.
