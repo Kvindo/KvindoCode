@@ -671,6 +671,18 @@ public sealed class TerminalUiTests
 
         terminals.SetActive(3);
         Dispatcher.UIThread.RunJobs();
+        // A pane that a PREVIOUS test already restarted has a spent budget: the limiter is per pane and the class shares
+        // one window. Waiting out the window would make the test 30 s; asking the pane to start over is what a human
+        // does, and it resets the budget the same way.
+        var pane3 = terminals.Panes.Single(p => p.Index == 3);
+        typeof(TerminalPaneView).GetMethod("Restart", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public)!
+            .Invoke(pane3, null);
+        // the pane must actually be LIVE before it can exit: a pane whose PTY was stopped by an earlier test reports
+        // ProcessExited for a process that never started, which is not the case under test.
+        Assert.True(await Eventually(() => Task.FromResult(pane3.Terminal.IsLive)),
+            "the pane never came back live: " + PaneDiag(pane3));
+        Assert.True(await Eventually(() => Task.FromResult(HasSession(session) && SessionPanePid(session) is var rp && rp > 0)));
+        pidBefore = SessionPanePid(session);
         terminals.TypeText("exit\r");
         Assert.True(await Eventually(() => Task.FromResult(!HasSession(session))), "the shell did not exit");
 

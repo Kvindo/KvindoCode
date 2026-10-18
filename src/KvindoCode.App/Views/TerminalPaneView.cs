@@ -312,9 +312,13 @@ public sealed class TerminalPaneView : UserControl
     {
         if (_stopped) return;
         var now = DateTime.UtcNow;
-        if (now - _lastExit > TimeSpan.FromSeconds(10)) _exits = 0;
+        // The window is short on purpose, but it must survive a SLOW start: a shell that comes back and is then exited
+        // by the next test is a normal second exit, not a crash loop. Measured 2026-10-18: with a 10-second window the
+        // counter accumulated across a UI test run (a shared pane restarted by several tests) and the fifth exit gave
+        // up for good.
+        if (now - _lastExit > TimeSpan.FromSeconds(30)) _exits = 0;
         _lastExit = now;
-        if (++_exits > MaxAutoRestarts) { SetState("exited — restart the pane"); return; }
+        if (++_exits > MaxAutoRestarts) { _exits = 0; SetState("exited — restart it with the ↺ button"); return; }
         SetState("restarting…");
         Dispatcher.UIThread.Post(() =>
         {
@@ -329,6 +333,7 @@ public sealed class TerminalPaneView : UserControl
     public void Restart()
     {
         _restarting = true;
+        _exits = 0;                // a human asked: start the auto-restart budget over
         // Kill the SESSION first: the PTY is the tmux client, so stopping the client leaves the server (and the pane,
         // and its scrollback) alive and the next launch reattaches to all of it — which is why "restart this terminal
         // doesnt clear it up" (reported 2026-10-18).
