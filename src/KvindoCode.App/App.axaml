@@ -319,6 +319,8 @@
       <StreamGeometry x:Key="IconTerminal">M4 4h16v16H4zM7.5 9.5l2.5 2.5-2.5 2.5M12.5 15h4</StreamGeometry>
       <StreamGeometry x:Key="IconAttach">M21 11l-8.5 8.5a5 5 0 0 1-7-7L14 4a3.5 3.5 0 0 1 5 5l-8.5 8.5a2 2 0 0 1-3-3L15 7</StreamGeometry>
       <StreamGeometry x:Key="IconTrash">M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13</StreamGeometry>
+      <!-- Copy: two sheets, the back one peeking out behind the front one. -->
+      <StreamGeometry x:Key="IconCopy">M9 9h11v11H9zM15 9V4H4v11h5</StreamGeometry>
       <StreamGeometry x:Key="IconKey">M14 4l3 3-8 8H6v-3zM17 3l4 4M5 19l-2 2</StreamGeometry>
       <StreamGeometry x:Key="IconUser">M12 11a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7zM5 20c0-3.3 3.1-5.5 7-5.5s7 2.2 7 5.5</StreamGeometry>
       <StreamGeometry x:Key="IconClipboard">M9 3h6v3H9zM7 5H4v16h16V5h-3</StreamGeometry>

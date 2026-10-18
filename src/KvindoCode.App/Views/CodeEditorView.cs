@@ -129,6 +129,7 @@ public sealed class CodeEditorView : UserControl
         actions.Children.Add(Icon("IconPlus", "New file in the selected folder", () => _ = NewEntryAsync(false), "EditorNewFile"));
         actions.Children.Add(Icon("IconFolder", "New folder", () => _ = NewEntryAsync(true), "EditorNewFolder"));
         actions.Children.Add(Icon("IconPencil", "Rename the selected entry", () => _ = RenameAsync(), "EditorRename"));
+        actions.Children.Add(Icon("IconCopy", "Copy the selected entry (Ctrl+C), then Ctrl+V to paste it into another folder", CopySelected, "EditorCopy"));
         actions.Children.Add(Icon("IconTrash", "Delete the selected entry (asks first)", () => _ = DeleteAsync(), "EditorDelete"));
         actions.Children.Add(Icon("IconTerminal", "Open a terminal in the selected folder", () => OpenTerminal(), "EditorTerminal"));
 
@@ -147,6 +148,19 @@ public sealed class CodeEditorView : UserControl
         _search.TextChanged += (_, _) => ApplyFilter();
         _tree.SelectionChanged += (_, _) => { if (SelectedPath() is { } p && File.Exists(p)) _ = OpenFileAsync(p); };
         _tree.DoubleTapped += (_, _) => { if (SelectedPath() is { } p && Directory.Exists(p)) _ = OpenFileAsync(p); };
+        // Ctrl+C / Ctrl+V on the TREE, and only on the tree: the editor's own Ctrl+C is text copy and must keep working.
+        // Tunnel, so the TreeView's own handling does not swallow the key first.
+        _tree.AddHandler(KeyDownEvent, (object? _, KeyEventArgs e) =>
+        {
+            var ctrl = (e.KeyModifiers & KeyModifiers.Control) != 0;
+            switch (e.Key)
+            {
+                case Key.C when ctrl: CopySelected(); e.Handled = true; break;
+                case Key.V when ctrl: Paste(); e.Handled = true; break;
+                case Key.F2: _ = RenameAsync(); e.Handled = true; break;
+                case Key.Delete: _ = DeleteAsync(); e.Handled = true; break;
+            }
+        }, RoutingStrategies.Tunnel);
         var sp = new DockPanel { Margin = new Thickness(10, 0, 0, 0) };
         DockPanel.SetDock(_search, Dock.Top);
         sp.Children.Add(_search);
@@ -298,6 +312,24 @@ public sealed class CodeEditorView : UserControl
     internal string? CreateForTest(string name, bool folder) => Create(name, folder);
     internal string? RenameForTest(string path, string newName) => Rename(path, newName);
 
+    /// <summary>Copy <paramref name="path"/> and paste it into <paramref name="into"/>, as Ctrl+C then Ctrl+V does.</summary>
+    /// <remarks>Takes the paths explicitly so the test does not have to drive tree selection, which is a hit-testing
+    /// question rather than a copy one. Both go through the same methods the shortcuts call.</remarks>
+    internal string? CopyPasteForTest(string path, string into)
+    {
+        _copied = path;
+        _pasteTarget = into;
+        _lastPasteTarget = null;          // a REFUSED paste must report null, not the previous one's target
+        try { Paste(); return _lastPasteTarget; }
+        finally { _pasteTarget = null; }
+    }
+
+    /// <summary>The selected folder, overridden for <see cref="CopyPasteForTest"/>.</summary>
+    string? _pasteTarget;
+
+    /// <summary>Where the last successful paste landed, for the test to inspect.</summary>
+    string? _lastPasteTarget;
+
     async Task RenameAsync()
     {
         var path = SelectedPath();
@@ -341,6 +373,85 @@ public sealed class CodeEditorView : UserControl
     {
         var dir = SelectedPath() is { } p ? (Directory.Exists(p) ? p : Path.GetDirectoryName(p)!) : _root;
         _openTerminalHere(dir);
+    }
+
+    /// <summary>The entry last copied with Ctrl+C (a path, not a clip; the OS clipboard stays untouched).</summary>
+    string? _copied;
+
+    /// <summary>Copy the selected entry so it can be pasted somewhere else in the tree.</summary>
+    void CopySelected()
+    {
+        var path = SelectedPath();
+        if (path is null || path == _root) { _onNotice("Select a file or folder to copy."); return; }
+        _copied = path;
+        _onNotice("Copied " + Path.GetFileName(path) + " — Ctrl+V pastes it into the selected folder.");
+    }
+
+    /// <summary>
+    /// Paste the copied entry into the selected folder, under a free name.
+    /// </summary>
+    /// <remarks>
+    /// The destination is the selected FOLDER, or the folder holding the selected file — which is what a file manager
+    /// does and what makes Ctrl+C, click a folder, Ctrl+V work without a separate "paste into" step. A name already in
+    /// use becomes "name (2).ext" rather than failing or overwriting: a paste that silently replaced a file would be
+    /// data loss, and one that always errored on a repeat copy would be useless.
+    /// </remarks>
+    void Paste()
+    {
+        if (_copied is null) { _onNotice("Nothing to paste — copy a file or folder first (Ctrl+C)."); return; }
+        if (!File.Exists(_copied) && !Directory.Exists(_copied)) { _onNotice("The copied entry no longer exists."); _copied = null; return; }
+        var destDir = _pasteTarget ?? (SelectedPath() is { } p ? (Directory.Exists(p) ? p : Path.GetDirectoryName(p)!) : _root);
+        // pasting a folder into itself (or into its own child) would recurse forever. Full paths, because "a" and "a/"
+        // are the same folder and a plain string comparison would miss it.
+        if (Directory.Exists(_copied))
+        {
+            var from = Path.GetFullPath(_copied).TrimEnd(Path.DirectorySeparatorChar);
+            var into = Path.GetFullPath(destDir).TrimEnd(Path.DirectorySeparatorChar);
+            if (into == from || into.StartsWith(from + Path.DirectorySeparatorChar, StringComparison.Ordinal))
+            {
+                _onNotice("A folder cannot be pasted inside itself.");
+                return;
+            }
+        }
+        try
+        {
+            var name = Path.GetFileName(_copied.TrimEnd('/'));
+            var target = FreeName(destDir, name);
+            if (Directory.Exists(_copied)) CopyDirectory(_copied, target); else File.Copy(_copied, target);
+            _lastPasteTarget = target;
+            LoadTree();
+            _onNotice("Pasted " + Path.GetFileName(target));
+        }
+        catch (Exception e) { _onNotice("Could not paste: " + e.Message); }
+    }
+
+    /// <summary>name, or "base (2).ext", "base (3).ext"… — the first that does not exist in <paramref name="dir"/>.</summary>
+    static string FreeName(string dir, string name)
+    {
+        var target = Path.Combine(dir, name);
+        if (!File.Exists(target) && !Directory.Exists(target)) return target;
+        var stem = Path.GetFileNameWithoutExtension(name);
+        var ext = Path.GetExtension(name);
+        for (var i = 2; i < 1000; i++)
+        {
+            target = Path.Combine(dir, $"{stem} ({i}){ext}");
+            if (!File.Exists(target) && !Directory.Exists(target)) return target;
+        }
+        return Path.Combine(dir, $"{stem} ({DateTime.Now:HHmmss}){ext}");
+    }
+
+    /// <summary>Recursive copy that skips build output and VCS metadata, the same way the tree does.</summary>
+    static void CopyDirectory(string from, string to)
+    {
+        Directory.CreateDirectory(to);
+        foreach (var f in Directory.EnumerateFiles(from))
+            File.Copy(f, Path.Combine(to, Path.GetFileName(f)));
+        foreach (var d in Directory.EnumerateDirectories(from))
+        {
+            var n = Path.GetFileName(d);
+            if (n is "bin" or "obj" or "node_modules" or ".git" or ".venv" or "target") continue;
+            CopyDirectory(d, Path.Combine(to, n));
+        }
     }
 
     /// <summary>A tiny inline prompt (the app has no reusable text-input dialog).</summary>
