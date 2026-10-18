@@ -141,6 +141,82 @@ public sealed class CodeEditorTests(ITestOutputHelper o)
         win.Close();
     }
 
+    /// <summary>Copy then paste a file: it lands beside the original under a free name, and nothing is overwritten.</summary>
+    /// <remarks>
+    /// The first paste into the SAME folder must already be "a (2).txt" — "a.txt" is the source and is not free — and
+    /// the second must be "a (3).txt". A copy that reused the name would either overwrite the first copy or fail, and
+    /// both are wrong.
+    /// </remarks>
+    [AvaloniaFact]
+    public void A_file_can_be_copied_and_pasted_under_a_free_name()
+    {
+        using var sb = new Sandbox();
+        var (win, _) = Start(sb);
+        sb.Write("a.txt", "hello\n");
+        var view = Open(win, sb.Project);
+        var src = Path.Combine(sb.Project, "a.txt");
+        var copy = typeof(CodeEditorView).GetMethod("CopyPasteForTest", BindingFlags.Instance | BindingFlags.NonPublic)!;
+
+        var first = (string)copy.Invoke(view, new object[] { src, sb.Project })!;
+        o.WriteLine("first paste: " + first);
+        Assert.NotEqual(src, first);
+        Assert.Equal("a (2).txt", Path.GetFileName(first));
+        Assert.Equal("hello\n", File.ReadAllText(first));
+
+        var second = (string)copy.Invoke(view, new object[] { src, sb.Project })!;
+        o.WriteLine("second paste: " + second);
+        Assert.NotEqual(first, second);
+        Assert.Equal("a (3).txt", Path.GetFileName(second));
+        // the original is untouched and still says what it said
+        Assert.Equal("hello\n", File.ReadAllText(src));
+
+        // into a SUBFOLDER the name IS free, so the copy keeps its own name
+        Directory.CreateDirectory(Path.Combine(sb.Project, "sub"));
+        var intoSub = (string)copy.Invoke(view, new object[] { src, Path.Combine(sb.Project, "sub") })!;
+        o.WriteLine("into sub/: " + intoSub);
+        Assert.Equal("a.txt", Path.GetFileName(intoSub));
+        win.Close();
+    }
+
+    /// <summary>A folder pastes recursively, and a folder cannot be pasted inside itself.</summary>
+    /// <remarks>
+    /// The self-paste case must be REFUSED BY THE GUARD, not merely fail. Without the guard the copy recurses into the
+    /// directory it is writing and dies of an IO error — which also returns null, so an assertion on the return value
+    /// alone passes either way (measured: removing the guard left this test green). The notice is what distinguishes
+    /// them: "A folder cannot be pasted inside itself", not "Could not paste: …".
+    /// </remarks>
+    [AvaloniaFact]
+    public void A_folder_can_be_copied_and_cannot_be_pasted_inside_itself()
+    {
+        using var sb = new Sandbox();
+        var (win, _) = Start(sb);
+        sb.Write("pkg/inner/mod.py", "x = 1\n");
+        sb.Write("pkg/build.out", "y\n");
+        var view = Open(win, sb.Project);
+        var notices = new List<string>();
+        // the view reports through its notice callback; capture it by swapping the field
+        typeof(CodeEditorView).GetField("_onNotice", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(view, (Action<string>)notices.Add);
+        var src = Path.Combine(sb.Project, "pkg");
+        var copy = typeof(CodeEditorView).GetMethod("CopyPasteForTest", BindingFlags.Instance | BindingFlags.NonPublic)!;
+
+        var made = (string)copy.Invoke(view, new object[] { src, sb.Project })!;
+        o.WriteLine("folder paste: " + made);
+        Assert.True(File.Exists(Path.Combine(made, "inner", "mod.py")), "the recursive copy lost a nested file");
+        Assert.True(File.Exists(Path.Combine(made, "build.out")));
+
+        // into itself: refused by the guard, and nothing new appears
+        notices.Clear();
+        var before = Directory.GetDirectories(sb.Project).Length;
+        var refused = copy.Invoke(view, new object[] { src, src });
+        o.WriteLine("into itself -> " + (refused ?? "null") + " notice: " + string.Join(" | ", notices));
+        Assert.Null(refused);
+        Assert.Contains(notices, n => n.Contains("cannot be pasted inside itself"));
+        Assert.DoesNotContain(notices, n => n.Contains("Could not paste"));
+        Assert.Equal(before, Directory.GetDirectories(sb.Project).Length);
+        win.Close();
+    }
+
     static async Task<bool> Eventually(Func<Task<bool>> cond, int ms = 6000)
     {
         var sw = System.Diagnostics.Stopwatch.StartNew();
