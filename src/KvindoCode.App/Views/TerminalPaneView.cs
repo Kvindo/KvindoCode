@@ -204,7 +204,12 @@ public sealed class TerminalPaneView : UserControl
             // The history FIRST: attaching to an existing tmux session repaints only the visible screen, so without this
             // a restarted app showed an empty terminal. Bounded inside the backend, and only when the session already
             // exists, so it can never hold up the launch.
-            var history = _backend.History(_project, Index);
+            //
+            // NOT after a RESTART, though: restarting a pane is a request to start over, so replaying what the old
+            // session printed would put back exactly what the user asked to be rid of ("restart this terminal doesnt
+            // clear it up", 2026-10-18) — and the kill can lose that race, since the server may still hold the pane for
+            // a moment when the relaunch reads it.
+            var history = _restarting ? "" : _backend.History(_project, Index);
             await Terminal.LaunchProcess();
             if (_stopped) return;
             if (history.Length > 0)
@@ -212,7 +217,7 @@ public sealed class TerminalPaneView : UserControl
                 Terminal.Terminal.Write(history.TrimEnd((char)10) + "\r\n");
                 Terminal.Terminal.ScrollToBottom();
             }
-            if (Terminal.IsLive) { SetState(""); return; }
+            if (Terminal.IsLive) { _restarting = false; SetState(""); return; }
             if (tries == 3) SetState("starting…");
             Retry(tries);
         }
@@ -282,10 +287,21 @@ public sealed class TerminalPaneView : UserControl
     /// </summary>
     /// <remarks>The terminal control can launch again once its process has exited, so "restart the terminals" is a stop
     /// plus a launch — no new control, no lost layout.</remarks>
+    /// <summary>Set by <see cref="Restart"/>: the next launch must not replay the old scrollback.</summary>
+    bool _restarting;
+
     public void Restart()
     {
+        _restarting = true;
+        // Kill the SESSION first: the PTY is the tmux client, so stopping the client leaves the server (and the pane,
+        // and its scrollback) alive and the next launch reattaches to all of it — which is why "restart this terminal
+        // doesnt clear it up" (reported 2026-10-18).
         Stop();
         try { _backend.KillSession(_project, Index); } catch { /* already gone */ }
+        // ...and wipe the EMULATOR too. The tmux session is only half of what is on screen: the control keeps its own
+        // screen model plus up to BufferSize lines of scrollback, and neither notices that the process behind them is
+        // gone. ClearScreen erases both (ESC[2J and ESC[3J), so the pane really is blank before the new shell starts.
+        try { Terminal.ClearScreen(); } catch { /* not realised yet: nothing to wipe */ }
         // recreated on the next frame, once the old process has really exited (the control launches only then)
         Dispatcher.UIThread.Post(() =>
         {

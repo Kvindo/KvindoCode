@@ -43,7 +43,13 @@ public sealed class CodeEditorView : UserControl
     readonly Action<string> _openTerminalHere;
 
     readonly TextBox _search = new() { Watermark = "Search files…", FontSize = 12, Margin = new Thickness(0, 0, 0, 6) };
-    readonly TreeView _tree = new() { Background = Brushes.Transparent };
+    /// <remarks>
+    /// <c>Focusable = true</c> is load-bearing, not tidiness: Avalonia's TreeView is NOT focusable by default (focus goes
+    /// to its items), so the tree never received a key event and the Ctrl+C / Ctrl+V bound to it could not fire at all —
+    /// the actual reason for "CtrlC + CtrlV doesnt work on tree items" (2026-10-18). Measured: Focusable was false and
+    /// <c>_tree.Focus()</c> returned false, so the shortcuts were unreachable however the handler was written.
+    /// </remarks>
+    readonly TreeView _tree = new() { Background = Brushes.Transparent, Focusable = true };
     readonly TextBlock _path = new() { Classes = { "muted" }, FontSize = 11.5, VerticalAlignment = VerticalAlignment.Center, TextTrimming = TextTrimming.CharacterEllipsis };
     readonly TextBlock _status = new() { Classes = { "muted" }, FontSize = 11.5, VerticalAlignment = VerticalAlignment.Center };
     readonly TextEditor _editor = new()
@@ -192,11 +198,15 @@ public sealed class CodeEditorView : UserControl
         {
             if (e.InitialPressMouseButton != MouseButton.Left) return;
             if (ItemAt(e.GetPosition(_tree)) is not { } item) return;
-            _tree.Focus();                                     // so Ctrl+C / Ctrl+V below reach the TREE, not the editor
+            // POSTED, not called here: the TreeView's own pointer handling runs after this handler and takes the focus
+            // away again (measured: Focus() at press time left NOTHING focused, while the same call a frame later
+            // succeeds). Without it the tree never holds the keyboard, so Ctrl+C / Ctrl+V — bound on the tree — cannot
+            // fire at all, which is the reported "CtrlC + CtrlV doesnt work on tree items".
+            Dispatcher.UIThread.Post(() => _tree.Focus(), DispatcherPriority.Input);
             if (item.Tag as string is not { } path) return;
             _tree.SelectedItem = item;
             if (Directory.Exists(path)) { item.IsExpanded = !item.IsExpanded; return; }
-            _ = OpenFileAsync(path);
+            _ = OpenFileAsync(path, focus: false);
         }, RoutingStrategies.Tunnel);
         // right-click: the context menu a file manager is expected to have ("when i do right click on tree view there
         // is no context menu", 2026-10-18). One menu for the whole tree, opened on the item under the pointer, so a
@@ -255,17 +265,29 @@ public sealed class CodeEditorView : UserControl
     }
 
     /// <summary>The tree row under a point in the tree's coordinates, or null.</summary>
+    /// <remarks>
+    /// The SMALLEST match wins, not the first. A <see cref="TreeViewItem"/> contains its children, so the root item's
+    /// bounds cover every row below it — returning the first match meant every click resolved to the project root and no
+    /// file could be opened by clicking it (measured 2026-10-18: root 0,0,290x62 over first.py at y=22, so a click at
+    /// y=32 hit the root). The deepest item containing the point is the one the human pointed at.
+    /// </remarks>
     TreeViewItem? ItemAt(Point p)
     {
+        TreeViewItem? best = null;
+        var bestArea = double.MaxValue;
         foreach (var item in _tree.GetVisualDescendants().OfType<TreeViewItem>())
         {
             if (!item.IsVisible) continue;
             var b = item.Bounds;
             var origin = item.TranslatePoint(new Point(0, 0), _tree);
             if (origin is not { } o) continue;
-            if (p.X >= o.X && p.X <= o.X + b.Width && p.Y >= o.Y && p.Y <= o.Y + b.Height) return item;
+            if (p.X < o.X || p.X > o.X + b.Width || p.Y < o.Y || p.Y > o.Y + b.Height) continue;
+            var area = b.Width * b.Height;
+            if (area >= bestArea) continue;
+            best = item;
+            bestArea = area;
         }
-        return null;
+        return best;
     }
 
     /// <summary>The right-click menu: the operations a file manager offers, on the item that was right-clicked.</summary>
@@ -303,8 +325,12 @@ public sealed class CodeEditorView : UserControl
                 Mi("Copy path", () => _ = CopyPathAsync(path), path is not null),
             },
         };
+        LastContextMenu = menu;          // a seam for the test: the popup itself is not inspectable headlessly
         menu.Open(item);
     }
+
+    /// <summary>The context menu last opened (tests read this; a popup is not reachable through the visual tree).</summary>
+    internal ContextMenu? LastContextMenu { get; private set; }
 
     async Task CopyPathAsync(string? path)
     {
@@ -746,7 +772,11 @@ public sealed class CodeEditorView : UserControl
 
     // ---------------------------------------------------------------- editor
 
-    public Task OpenFileAsync(string path)
+    /// <param name="focus">Put the keyboard in the editor. FALSE when the file was opened by clicking the TREE: the
+    /// tree keeps the keyboard, which is what makes Ctrl+C / Ctrl+V there act on files rather than on text — the reason
+    /// "CtrlC + CtrlV doesnt work on tree items" (2026-10-18). Opening the file must not move focus back, or the very
+    /// next keystroke goes to the editor and copies nothing.</param>
+    public Task OpenFileAsync(string path, bool focus = true)
     {
         Save();                                             // never lose the previous file's edits
         try
@@ -764,7 +794,7 @@ public sealed class CodeEditorView : UserControl
             var scope = _registry.GetScopeByExtension(ext);
             _textMate.SetGrammar(scope);
             _status.Text = "saved";
-            _editor.Focus();
+            if (focus) _editor.Focus();
         }
         catch (Exception e) { _onNotice("Could not open " + path + ": " + e.Message); }
         return Task.CompletedTask;

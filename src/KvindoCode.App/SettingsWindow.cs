@@ -128,6 +128,9 @@ public sealed class SettingsWindow : Window
         // §3 prompt prefix / suffix
         var promptPrefix = new TextBox { Text = s.PromptPrefix, Watermark = "(nothing)", AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, Classes = { "plain" }, FontSize = 12.5, MinHeight = 70 };
         var promptSuffix = new TextBox { Text = s.PromptSuffix, Watermark = "(nothing)", AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, Classes = { "plain" }, FontSize = 12.5, MinHeight = 70 };
+        // §3b the two prompts the app sends on its own behalf, editable (asked 2026-10-18)
+        var resumePrompt = new TextBox { Text = s.ResumePrompt, Watermark = AppSettings.ResumeAfterRestartText, AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, Classes = { "plain" }, FontSize = 12.5, MinHeight = 70 };
+        var mergePrompt = new TextBox { Text = s.MergePrompt, Watermark = AppSettings.MergePromptDefault, AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, Classes = { "plain" }, FontSize = 12.5, MinHeight = 100 };
 
         // VPN bypass
         var bypass = new CheckBox { Content = "Bypass VPN for API traffic", IsChecked = s.BypassVpn, FontSize = 13 };
@@ -222,6 +225,8 @@ public sealed class SettingsWindow : Window
             s.NotificationDesktopCommand = (desktopCommand.Text ?? "").Trim();
             s.PromptPrefix = promptPrefix.Text ?? "";
             s.PromptSuffix = promptSuffix.Text ?? "";
+            s.ResumePrompt = resumePrompt.Text ?? "";
+            s.MergePrompt = mergePrompt.Text ?? "";
             s.TelegramApiIdSecret = (tgApiId.Text ?? "").Trim();
             s.TelegramApiHashSecret = (tgApiHash.Text ?? "").Trim();
             s.TelegramDefaultChat = (tgChat.Text ?? "").Trim();
@@ -296,7 +301,12 @@ public sealed class SettingsWindow : Window
                 new StackPanel { Orientation = Orientation.Horizontal, Spacing = 10, Children = { desktopTest, desktopStatus } },
                 H("Prompt"),
                 Field("Text before every prompt", promptPrefix),
-                Field("Text after every prompt", promptSuffix, "Both are added to what the model receives, not to what is shown or saved in the transcript.")) },
+                Field("Text after every prompt", promptSuffix, "Both are added to what the model receives, not to what is shown or saved in the transcript."),
+                H("The app's own messages"),
+                Field("Continue-after-restart message", resumePrompt,
+                    "Sent to a session you choose to continue after a restart. Empty = the built-in wording."),
+                Field("Merge-and-push prompt", mergePrompt,
+                    "What the header's merge button sends. {branch} is replaced with this session's branch name. Empty = the built-in wording.")) },
         });
         tabs.Items.Add(new TabItem
         {

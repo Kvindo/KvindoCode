@@ -71,17 +71,11 @@ public sealed class TerminalsView : UserControl
         AddSplitter(vertical: false, track: 1);
         AddSplitter(vertical: false, track: 3);
 
-        var title = new TextBlock
-        {
-            Text = $"Terminals — {Path.GetFileName(project.TrimEnd('/'))}",
-            FontSize = 15,
-            FontWeight = FontWeight.Medium,
-            VerticalAlignment = VerticalAlignment.Center,
-        };
-        ToolTip.SetTip(title, project + "\n\nEach pane is its own tmux session, so the scrollback survives a restart. " +
-            "From a real terminal: " + string.Join(" | ", backend.SessionNames(project, PaneCount).Select(s => "tmux attach -t " + s)));
-
-        var back = new Button { Name = "TerminalsBack", Classes = { "outline" }, Content = "Back to session", VerticalAlignment = VerticalAlignment.Center };
+        // NO TITLE ROW ("this line is not needed, it consumes space", 2026-10-18). The title only repeated the project
+        // name that is already in the sidebar and the project header, and a full-width row of chrome above four
+        // terminals is a whole line of screen doing nothing. The two controls it carried float over the top-right
+        // corner instead, as a terminal panel's own controls do — the grid keeps the height.
+        var back = new Button { Name = "TerminalsBack", Classes = { "outline" }, Content = "Back to session", VerticalAlignment = VerticalAlignment.Center, Opacity = 0.85 };
         back.Click += (_, _) => _close();
         // RESTART, not "kill everything": it ends the four sessions, starts four fresh ones and leaves the grid alone. That
         // is what the ✕ was being asked for — a way out of a broken terminal without losing the view (asked 2026-10-17).
@@ -89,25 +83,37 @@ public sealed class TerminalsView : UserControl
         ToolTip.SetTip(restart, "Restart the terminals: end the four tmux sessions and start fresh shells (the panes stay; scrollback and any running program are discarded)");
         restart.Click += (_, _) => Restart();
 
-        // No session-name line: it was a wall of ids that nobody reads, and the names are in each pane's tooltip.
-        var head = new Grid { ColumnDefinitions = new ColumnDefinitions("Auto,*,Auto,Auto"), Margin = new Thickness(2, 2, 2, 6) };
-        head.Children.Add(title);
-        Grid.SetColumn(restart, 2); head.Children.Add(restart);
-        Grid.SetColumn(back, 3); back.Margin = new Thickness(8, 0, 0, 0); head.Children.Add(back);
+        // Floating controls, top-right, over the grid. They stay a few pixels inside the pane's rounded frame so they
+        // never cover the first column of text, and they carry a background so a busy screen behind them cannot make
+        // them unreadable.
+        back.Margin = new Thickness(0, 0, 6, 0);
+        var tools = new StackPanel
+        {
+            Orientation = Orientation.Horizontal, Spacing = 4,
+            HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Top,
+            Margin = new Thickness(0, 6, 10, 0),
+        };
+        tools.Children.Add(restart);
+        tools.Children.Add(back);
+        ToolTip.SetTip(tools, project + "\n\nEach pane is its own tmux session, so the scrollback survives a restart. " +
+            "From a real terminal: " + string.Join(" | ", backend.SessionNames(project, PaneCount).Select(s => "tmux attach -t " + s)));
 
         if (!_backend.IsAvailable)
         {
             // A missing tmux must explain itself: an empty grid would read as a broken feature
             _grid.IsVisible = false;
             var message = new TextBlock { Text = _backend.UnavailableReason, Classes = { "muted" }, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(2, 12, 2, 4), FontSize = 13 };
-            Content = new Border { Padding = new Thickness(16), Child = new StackPanel { Children = { head, message } } };
+            Content = new Border { Padding = new Thickness(16), Child = new StackPanel { Children = { tools, message } } };
             return;
         }
 
         HorizontalAlignment = HorizontalAlignment.Stretch;
         VerticalAlignment = VerticalAlignment.Stretch;
-        Content = new DockPanel { Children = { head, _grid } };
-        DockPanel.SetDock(head, Dock.Top);
+        // the tools sit ON TOP of the grid (same cell), so they cost no layout height at all
+        var layered = new Grid();
+        layered.Children.Add(_grid);
+        layered.Children.Add(tools);
+        Content = layered;
 
         RestoreLayout();
         AttachedToVisualTree += (_, _) => StartPanes();

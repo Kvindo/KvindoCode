@@ -119,6 +119,33 @@ public sealed class ResumeAfterRestartTests
             AppSettings.ResumeAfterRestartText);
     }
 
+    /// <summary>The continue-after-restart text is a Settings field, falling back to the built-in wording.</summary>
+    /// <remarks>Asked 2026-10-18: "I want message … configurable in settings".</remarks>
+    [Fact]
+    public void The_resume_message_can_be_overridden_in_settings()
+    {
+        var s = new AppSettings();
+        Assert.Equal(AppSettings.ResumeAfterRestartText, s.ResumeText);       // empty setting = the built-in text
+        s.ResumePrompt = "   ";
+        Assert.Equal(AppSettings.ResumeAfterRestartText, s.ResumeText);       // whitespace is not an override either
+        s.ResumePrompt = "  pick up where you stopped, and say what is left.  ";
+        Assert.Equal("pick up where you stopped, and say what is left.", s.ResumeText);
+    }
+
+    /// <summary>The merge-and-push prompt is a Settings field with the branch substituted.</summary>
+    [Fact]
+    public void The_merge_prompt_can_be_overridden_and_names_the_branch()
+    {
+        var s = new AppSettings();
+        Assert.Equal(AppSettings.MergePromptDefault, s.MergePrompt.Length == 0 ? AppSettings.MergePromptDefault : s.MergePrompt);
+        s.MergePrompt = "Merge {branch} into master and push.";
+        var sent = s.MergePrompt.Replace("{branch}", "kv/abc123", StringComparison.Ordinal);
+        Assert.Equal("Merge kv/abc123 into master and push.", sent);
+        // the built-in text still carries the target and the test instruction
+        Assert.Contains("dev", AppSettings.MergePromptDefault);
+        Assert.Contains("test", AppSettings.MergePromptDefault);
+    }
+
     [Fact]
     public async Task Continuing_sends_the_resume_message_to_the_session_as_a_normal_user_turn()
     {

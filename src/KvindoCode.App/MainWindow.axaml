@@ -177,7 +177,15 @@
           </Border>
           <Border x:Name="TasksPanel" Classes="card" IsVisible="False" Padding="14,10">
             <StackPanel Spacing="6">
-              <TextBlock x:Name="TasksTitle" FontWeight="SemiBold" FontSize="13"/>
+              <!-- Collapsible (asked 2026-10-18): the header is the toggle, as it is for the task list above. -->
+              <Button x:Name="TasksToggle" Classes="ghost" Padding="0" HorizontalAlignment="Stretch"
+                      HorizontalContentAlignment="Left" Background="Transparent"
+                      ToolTip.Tip="Show or hide the background tasks">
+                <StackPanel Orientation="Horizontal" Spacing="6">
+                  <ContentControl x:Name="TasksChevron" VerticalAlignment="Center"/>
+                  <TextBlock x:Name="TasksTitle" FontWeight="SemiBold" FontSize="13" VerticalAlignment="Center"/>
+                </StackPanel>
+              </Button>
               <StackPanel x:Name="TasksList" Spacing="4"/>
             </StackPanel>
           </Border>

@@ -160,10 +160,35 @@ public sealed class AppSettings
     /// <summary>How far before the last-alive time a session's newest message may be and still count as "was active".</summary>
     public static readonly TimeSpan ResumeActivityWindow = TimeSpan.FromMinutes(15);
 
-    /// <summary>The text sent to a session the user chose to continue after a restart.</summary>
+    /// <summary>The DEFAULT text sent to a session the user chose to continue after a restart.</summary>
+    /// <remarks>Editable since 2026-10-18 (<see cref="ResumePrompt"/>): the wording is a matter of taste, and the
+    /// reminder about background tasks is not always what the user wants said.</remarks>
     public const string ResumeAfterRestartText =
         "The app was restarted, please continue where you left off. " +
         "Note that background tasks and loops will not be autocontinued, so you have to restore them yourself.";
+
+    /// <summary>
+    /// The text actually sent when a session is continued after a restart. Empty = <see cref="ResumeAfterRestartText"/>.
+    /// </summary>
+    public string ResumePrompt { get; set; } = "";
+    public string ResumeText => string.IsNullOrWhiteSpace(ResumePrompt) ? ResumeAfterRestartText : ResumePrompt.Trim();
+
+    /// <summary>
+    /// The prompt the header's merge button sends. Empty = the built-in one (<see cref="MergePromptDefault"/>).
+    /// </summary>
+    /// <remarks>Asked for 2026-10-18: the instruction to run the tests and to say what could not be merged is a
+    /// policy decision, so it belongs in Settings rather than in the button. The built-in text names the branch and the
+    /// target, so an override that wants those has to spell them out itself — the placeholders are not interpolated,
+    /// which keeps the setting a plain string the user can read.</remarks>
+    public string MergePrompt { get; set; } = "";
+
+    public const string MergePromptDefault =
+        "Merge this session's work and push it.\n\n" +
+        "This session worked in its own git worktree(s) on branch `{branch}`; the workspace chip in the header " +
+        "shows the exact merge command(s) for each repository it touched. Merge that branch into the repository's " +
+        "`dev` branch — or its mainline branch when there is no `dev` (KvindoCode itself uses `master`) — in the " +
+        "project checkout, then push. Run the test suite before pushing and fix anything it breaks. Report exactly " +
+        "what you merged and pushed, and say plainly if something could not be merged.";
 
     /// <summary>
     /// Was a session active when the app was last alive? True when its newest message is no older than

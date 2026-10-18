@@ -42,6 +42,7 @@ public partial class MainWindow : Window
     ContextMainView? _contextMain;
     bool _suppressEffort;
     bool _todosCollapsed;
+    bool _tasksCollapsed;
     string? _loading;
 
     // search
@@ -199,6 +200,9 @@ public partial class MainWindow : Window
             catch (Exception e) { ShowError("Could not use the clipboard: " + e.Message); }
         };
         TodoHeader.Click += (_, _) => { _todosCollapsed = !_todosCollapsed; UpdateTodos(); };
+        // The background-tasks section collapses the same way the task list above it does (asked 2026-10-18). The
+        // chevron is a character, not an icon: it has to read as "open/closed" at 13 px next to a title.
+        TasksToggle.Click += (_, _) => { _tasksCollapsed = !_tasksCollapsed; _tasksUiSig = ""; UpdateTasks(); };
         TodoClose.Click += (_, _) => { if (_current != null) { _current.TodosDismissed = true; UpdateTodos(); } };
         EffortBox.SelectionChanged += OnEffortChanged;
         Input.TextChanged += (_, _) => { if (_current != null) _current.Draft = Input.Text ?? ""; UpdateSendButton(); RefreshSkillPicker(); };
@@ -409,7 +413,9 @@ public partial class MainWindow : Window
 
     async Task CheckInterruptedTurns()
     {
-        const string ResumeText = AppSettings.ResumeAfterRestartText;
+        // Editable in Settings (asked 2026-10-18). Read once per check, so a change applies from the next restart —
+        // which is the only moment this text is ever sent.
+        var ResumeText = _settings.ResumeText;
 
         if (_lastAlive is not null)
         {
@@ -1271,13 +1277,10 @@ public partial class MainWindow : Window
         var s = sv.Session;
         var shortId = s.Info.Id.Length > 8 ? s.Info.Id[..8] : s.Info.Id;
         var branch = s.Workspace?.Branch is { Length: > 0 } b ? b : "kv/" + shortId;
-        SendSessionPrompt(sv,
-            "Merge this session's work and push it.\n\n" +
-            $"This session worked in its own git worktree(s) on branch `{branch}`; the workspace chip in the header " +
-            "shows the exact merge command(s) for each repository it touched. Merge that branch into the repository's " +
-            "`dev` branch — or its mainline branch when there is no `dev` (KvindoCode itself uses `master`) — in the " +
-            "project checkout, then push. Run the test suite before pushing and fix anything it breaks. Report exactly " +
-            "what you merged and pushed, and say plainly if something could not be merged.");
+        // The prompt is a Settings field (asked 2026-10-18). `{branch}` is substituted so an override still gets the
+        // one fact the button knows and the human should not have to retype.
+        var template = string.IsNullOrWhiteSpace(_settings.MergePrompt) ? AppSettings.MergePromptDefault : _settings.MergePrompt.Trim();
+        SendSessionPrompt(sv, template.Replace("{branch}", branch, StringComparison.Ordinal));
     }
 
     /// <summary>Send a prompt as if the human had typed it (used by the buttons that act ON the session).</summary>
@@ -1695,7 +1698,11 @@ public partial class MainWindow : Window
         if (tasks.Count == 0 && loops.Count == 0 && agents.Count == 0) return;
         int runningCount = tasks.Count + loops.Count + agents.Count(a => a.Running);
         int doneCount = agents.Count(a => !a.Running);
+        TasksChevron.Content = new TextBlock { Text = _tasksCollapsed ? "▸" : "▾", FontSize = 12, Classes = { "muted" } };
         TasksTitle.Text = runningCount > 0 ? $"Background tasks · {runningCount} running" + (doneCount > 0 ? $" · {doneCount} finished" : "") : $"Subagents · {doneCount} finished";
+        TasksList.IsVisible = !_tasksCollapsed;
+        // collapsed: the rows are hidden, so do not build them (this runs on a 4 s timer)
+        if (_tasksCollapsed) return;
         foreach (var agent in agents)
         {
             var g = new Grid { ColumnDefinitions = new ColumnDefinitions("Auto,*,Auto") };
@@ -1741,8 +1748,18 @@ public partial class MainWindow : Window
             var dot = new Border { Width = 8, Height = 8, CornerRadius = new CornerRadius(4), VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 10, 0) };
             Ui.BindBrush(dot, Border.BackgroundProperty, "KvOk"); Ui.Pulse(dot);
             g.Children.Add(dot);
-            var name = new TextBlock { Text = $"#{t.Id}  {t.Description}", FontSize = 13, TextTrimming = TextTrimming.CharacterEllipsis, VerticalAlignment = VerticalAlignment.Center };
-            ToolTip.SetTip(name, t.Command);
+            // CLICKABLE (asked 2026-10-18: "background tasks are not clickable in ui"): opens the task's command and
+            // output in the side panel, the same place a subagent opens.
+            var name = new Button
+            {
+                Name = "TaskRow" + t.Id,
+                Content = $"#{t.Id}  {t.Description}",
+                Classes = { "ghost" }, Padding = new Thickness(0), FontSize = 13,
+                HorizontalAlignment = HorizontalAlignment.Stretch, HorizontalContentAlignment = HorizontalAlignment.Left,
+                VerticalAlignment = VerticalAlignment.Center,
+            };
+            ToolTip.SetTip(name, t.Command + "\n\nClick to see its output in the side panel.");
+            name.Click += (_, _) => { OpenPane(); _pane.ShowTask(t); };
             Grid.SetColumn(name, 1); g.Children.Add(name);
             var el = Ui.Muted(t.Elapsed.TotalHours >= 1 ? t.Elapsed.ToString(@"h\:mm\:ss") : t.Elapsed.ToString(@"m\:ss"), 12); el.Margin = new Thickness(10, 0); el.VerticalAlignment = VerticalAlignment.Center;
             Grid.SetColumn(el, 2); g.Children.Add(el);
