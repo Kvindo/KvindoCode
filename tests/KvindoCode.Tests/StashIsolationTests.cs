@@ -53,6 +53,18 @@ public sealed class StashIsolationTests
         Assert.DoesNotContain("refs/stash is repo-wide", r.Output);
     }
 
+    /// <summary>Merely MENTIONING the command must not be refused — a release note did, and it blocked real work.</summary>
+    [Theory]
+    [InlineData("echo 'use git stash create instead'")]
+    [InlineData("git log --grep=stash")]
+    [InlineData("git diff --stat")]
+    public async Task A_mention_is_not_a_use(string command)
+    {
+        using var sb = new Sandbox();
+        var r = await new BashTool().RunAsync(new JsonObject { ["command"] = command }, Ctx(sb, isolated: true), default);
+        Assert.DoesNotContain("refs/stash is repo-wide", r.Output);
+    }
+
     /// <summary>A session that shares the project checkout (not isolated) is unaffected.</summary>
     [Fact]
     public async Task A_shared_tree_session_is_not_restricted()
