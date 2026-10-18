@@ -331,6 +331,47 @@ public sealed class CodeEditorTests(ITestOutputHelper o)
         win.Close();
     }
 
+    /// <summary>
+    /// The file manager and the terminal grid may never be on screen together — in EITHER order.
+    /// </summary>
+    /// <remarks>
+    /// Reported 2026-10-18: "when i click on file manager and then on terminal ui gets overlapped". Opening the editor
+    /// closed the grid, but opening the GRID never closed the editor, and both are inserted at index 0 of the same
+    /// host panel — so the first one stayed underneath, still painting, and the two drew over each other.
+    /// </remarks>
+    [AvaloniaFact]
+    public void The_file_manager_and_the_terminal_grid_never_share_the_main_area()
+    {
+        using var sb = new Sandbox();
+        var (win, _) = Start(sb);
+        sb.Write("a.py", "x = 1\n");
+        var host = win.FindControl<Grid>("Host")!;
+
+        // editor first, then the grid (the reported order)
+        Invoke(win, "OpenCodeEditor", sb.Project);
+        Dispatcher.UIThread.RunJobs();
+        Assert.Single(host.Children.OfType<CodeEditorView>());
+        Invoke(win, "OpenTerminals", sb.Project);
+        Dispatcher.UIThread.RunJobs();
+        o.WriteLine("after editor -> grid: " + string.Join(", ", host.Children.Select(c => c.GetType().Name)));
+        Assert.Empty(host.Children.OfType<CodeEditorView>());
+        Assert.Single(host.Children.OfType<TerminalsView>());
+        // exactly ONE main view: the empty-state block may live here too, but never a second view underneath
+        Assert.Single(host.Children.Where(c => c is CodeEditorView or TerminalsView or TranscriptView));
+
+        // ...and the reverse order
+        Invoke(win, "OpenCodeEditor", sb.Project);
+        Dispatcher.UIThread.RunJobs();
+        o.WriteLine("after grid -> editor: " + string.Join(", ", host.Children.Select(c => c.GetType().Name)));
+        Assert.Empty(host.Children.OfType<TerminalsView>());
+        Assert.Single(host.Children.OfType<CodeEditorView>());
+        Assert.Single(host.Children.Where(c => c is CodeEditorView or TerminalsView or TranscriptView));
+
+        Invoke(win, "CloseCodeEditor");
+        Dispatcher.UIThread.RunJobs();
+        win.Close();
+    }
+
     /// <summary>Search in files finds content across the project, and Replace All rewrites every file.</summary>
     /// <remarks>
     /// Asked 2026-10-18: "search should be the same as in vs code (there is reach search there where i can also

@@ -2097,6 +2097,11 @@ public partial class MainWindow : Window
     {
         if (_terminals is { } open && open.Project == project) { CloseTerminals(); return; }   // the icon toggles
         CloseContextMain();
+        // The FILE MANAGER has to go first. OpenCodeEditor closed the grid, but this direction did not, so opening the
+        // grid from the file manager left BOTH views in the main area and they drew over each other (reported
+        // 2026-10-18: "when i click on file manager and then on terminal ui gets overlapped"). Both are inserted at
+        // index 0 of the same panel, so the older one is not hidden — it is simply underneath, still painting.
+        if (_codeEditor is not null) CloseCodeEditor();
         if (_terminals is { } other && other.Project != project) CloseTerminals();              // one grid at a time
         _project = project;
         foreach (var tv in Host.Children.OfType<TranscriptView>().ToList()) Host.Children.Remove(tv);
