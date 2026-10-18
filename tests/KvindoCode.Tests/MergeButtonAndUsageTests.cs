@@ -41,23 +41,36 @@ public sealed class MergeButtonAndUsageTests(ITestOutputHelper o)
         typeof(MainWindow).GetMethod("UpdateUsage", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(app.Window, null);
         Dispatcher.UIThread.RunJobs();
 
-        var text = app.Window.FindControl<TextBlock>("UsageText")!;
-        var lines = (text.Text ?? "").Split('\n');
-        o.WriteLine("line1: " + (lines.Length > 0 ? lines[0] : ""));
-        o.WriteLine("line2: " + (lines.Length > 1 ? lines[1] : "<none>"));
+        // TWO CELLS PER LINE, so the columns line up (asked 2026-10-18: "align columns"): the figures are no longer one
+        // string with a newline, and each one has its own TextBlock.
+        var context = app.Window.FindControl<TextBlock>("UsageText")!;
+        var cache = app.Window.FindControl<TextBlock>("UsageCache")!;
+        var speed = app.Window.FindControl<TextBlock>("UsageText2")!;
+        var cost = app.Window.FindControl<TextBlock>("UsageCost")!;
+        var line2 = app.Window.FindControl<Grid>("UsageLine2")!;
+        var sep = app.Window.FindControl<TextBlock>("UsageSep")!;
+        o.WriteLine($"line1: '{context.Text}' | '{cache.Text}'   sep visible={sep.IsVisible}");
+        o.WriteLine($"line2: '{speed.Text}' | '{cost.Text}'   visible={line2.IsVisible}");
 
-        Assert.Equal(2, lines.Length);                             // the split is the whole point
-        Assert.Contains("774.2k / 1M", lines[0]);                  // context used
-        Assert.Contains("(77%)", lines[0]);
-        Assert.Contains("80% avg", lines[0]);                      // the session cache average
-        Assert.Contains("tok/s avg5m", lines[1]);                  // speed on the second line
-        Assert.Contains("₽", lines[1]);                            // ...with the cost
-        Assert.DoesNotContain("tok/s", lines[0]);                  // and NOT crammed onto the first
+        Assert.Contains("774.2k / 1M", context.Text);              // context used
+        Assert.Contains("(77%)", context.Text);
+        Assert.Contains("80% avg", cache.Text);                    // the session cache average
+        Assert.Contains("tok/s avg5m", speed.Text);                // speed on the second line
+        Assert.Contains("₽", cost.Text);                           // ...with the cost
+        Assert.True(line2.IsVisible);                              // both lines are on screen
+        Assert.True(sep.IsVisible);                                // and the first line really has two columns
 
-        // The cell's WIDTH is not asserted here: headless font metrics are a stub (every line is 0.8 × FontSize), so
-        // a headless width says nothing about the real one — that trap cost a previous session a rewrite. The split
-        // itself is what the change is, and the lines above pin it.
-        o.WriteLine($"cell width (headless, metrics are a stub): {text.Bounds.Width}");
+        // ALIGNED means "in the same grid columns", which is checkable without font metrics: both lines use the same
+        // three-column template, so the separators sit at the same x. (Headless font metrics are a stub — every line is
+        // 0.8 × FontSize — so a measured WIDTH says nothing; a shared template says everything.)
+        var line1Grid = (Grid)context.Parent!;
+        var line2Grid = (Grid)speed.Parent!;
+        var l1 = line1Grid.ColumnDefinitions.Select(c => c.Width.ToString()).ToList();
+        var l2 = line2Grid.ColumnDefinitions.Select(c => c.Width.ToString()).ToList();
+        o.WriteLine("line1 columns: " + string.Join(",", l1));
+        o.WriteLine("line2 columns: " + string.Join(",", l2));
+        Assert.Equal(l1, l2);
+        Assert.Equal(Grid.GetColumn(sep), Grid.GetColumn(app.Window.FindControl<TextBlock>("UsageSep2")!));
     }
 
     /// <summary>With no cost and no speed yet, it stays ONE line rather than leaving an empty second one.</summary>
@@ -72,9 +85,12 @@ public sealed class MergeButtonAndUsageTests(ITestOutputHelper o)
         typeof(MainWindow).GetMethod("UpdateUsage", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(app.Window, null);
         Dispatcher.UIThread.RunJobs();
 
-        var text = app.Window.FindControl<TextBlock>("UsageText")!;
-        o.WriteLine($"text: '{text.Text}'");
-        Assert.DoesNotContain("\n", text.Text ?? "");
+        var context = app.Window.FindControl<TextBlock>("UsageText")!;
+        var line2 = app.Window.FindControl<Grid>("UsageLine2")!;
+        var sep = app.Window.FindControl<TextBlock>("UsageSep")!;
+        o.WriteLine($"line1: '{context.Text}' line2 visible={line2.IsVisible} sep visible={sep.IsVisible}");
+        Assert.False(line2.IsVisible);                       // nothing for the second line, so it is not there
+        Assert.False(sep.IsVisible);                         // and no dangling separator on the first
     }
 
     // ---------------------------------------------------------------- the merge button

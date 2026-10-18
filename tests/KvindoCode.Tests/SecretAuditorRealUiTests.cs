@@ -3033,15 +3033,17 @@ public sealed class SecretAuditorRealUiTests
         });
         app.TypeAndSend("hello");
         await app.WaitForTurnAsync();
-        TextBlock textBlock = app.Window.GetVisualDescendants().OfType<TextBlock>().First((TextBlock t) => t.Name == "UsageText");
-        string actualString = textBlock.Text ?? "";
+        // the cache average lives in its OWN cell since 2026-10-18 ("align columns"), the tooltip on the panel
+        TextBlock cacheCell = app.Window.GetVisualDescendants().OfType<TextBlock>().First((TextBlock t) => t.Name == "UsageCache");
+        string actualString = cacheCell.Text ?? "";
         Assert.Contains("% avg", actualString);
         // ONLY the average is shown now: a single request is either a full hit or a miss, so the per-request figure
         // swung between 0% and ~99% and was removed on 2026-10-10. The tooltip keeps the whole-session counts.
         Assert.DoesNotContain("% cached", actualString);
         Assert.DoesNotContain("% cache ", actualString + " ");
-        Assert.Contains("whole session", ToolTip.GetTip(textBlock).ToString());
-        Assert.DoesNotContain("last request:", ToolTip.GetTip(textBlock).ToString());
+        var panel = app.Window.GetVisualDescendants().OfType<StackPanel>().First(p => p.Name == "UsagePanel");
+        Assert.Contains("whole session", ToolTip.GetTip(panel).ToString());
+        Assert.DoesNotContain("last request:", ToolTip.GetTip(panel).ToString());
     }
 
     [AvaloniaFact]
