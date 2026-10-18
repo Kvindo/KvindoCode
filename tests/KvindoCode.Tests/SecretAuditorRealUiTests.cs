@@ -3041,7 +3041,7 @@ public sealed class SecretAuditorRealUiTests
         // swung between 0% and ~99% and was removed on 2026-10-10. The tooltip keeps the whole-session counts.
         Assert.DoesNotContain("% cached", actualString);
         Assert.DoesNotContain("% cache ", actualString + " ");
-        var panel = app.Window.GetVisualDescendants().OfType<StackPanel>().First(p => p.Name == "UsagePanel");
+        var panel = app.Window.GetVisualDescendants().OfType<Grid>().First(p => p.Name == "UsagePanel");
         Assert.Contains("whole session", ToolTip.GetTip(panel).ToString());
         Assert.DoesNotContain("last request:", ToolTip.GetTip(panel).ToString());
     }
