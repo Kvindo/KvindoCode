@@ -151,8 +151,11 @@ public sealed class TerminalPaneView : UserControl
         if (_started) return;
         _started = true;
         _stopped = false;
-        Attempt(0);
+        _ = AttemptAsync(0);
     }
+
+    /// <summary>How many launch attempts this pane has made.</summary>
+    internal int LaunchAttempts { get; private set; }
 
     /// <summary>Set by <see cref="Stop"/>, so a retry that is already queued does not relaunch a stopped pane.</summary>
     bool _stopped;
@@ -165,16 +168,27 @@ public sealed class TerminalPaneView : UserControl
     /// and a control that has not been measured yet has no template. That happens whenever the window's layout is stale
     /// (a resize, a hidden tab, the long shared-window run the UI tests use), and the old code gave up after 40 frames
     /// and left a pane that looked alive with no process behind it — the grid then showed nothing and no tmux server was
-    /// ever created ("terminal grid comes up empty", 2026-10-17). So: retry until it works or the pane leaves the tree,
-    /// and after a few seconds SAY so instead of staying silent.
+    /// ever created ("terminal grid comes up empty", 2026-10-17).
+    ///
+    /// <para>The launch is AWAITED because <c>LaunchProcess()</c> is <c>async</c>: it starts the spawn and returns. Not
+    /// awaiting leaves an unobserved task and a retry that may begin while the previous spawn is still running, which
+    /// <c>LaunchProcess</c> resolves by cleaning up (cancelling) the connection it is replacing. Measured on this machine
+    /// the spawn completes synchronously, so the race does not show up here; awaiting costs nothing and removes it.</para>
+    ///
+    /// <para>The reason every terminal test failed in a full run — four controls, no tmux server, "could not start" —
+    /// was NOT this retry loop at all. The control's theme was missing from every <see cref="Avalonia.Application"/>
+    /// created after the first one (the package adds it once per PROCESS, from a static constructor), so the panes had no
+    /// template and <c>LaunchProcess</c> threw "TerminalControl template has not been applied yet". The fix is the
+    /// explicit <c>StyleInclude</c> in App.axaml; see the comment there.</para>
     /// </remarks>
-    void Attempt(int tries)
+    async Task AttemptAsync(int tries)
     {
         // NOT "if (VisualRoot is null) return": a pane inside a view that has just been attached can have no visual root
         // for a frame, and _started is already true — so bailing here left the pane dead for ever, with four controls on
         // screen and no tmux server (exactly what a full test run showed while the class alone passed). Only Stop() ends
         // the retries.
         if (_stopped) return;
+        LaunchAttempts++;
         try
         {
             Terminal.ApplyTemplate();
@@ -191,30 +205,32 @@ public sealed class TerminalPaneView : UserControl
             // a restarted app showed an empty terminal. Bounded inside the backend, and only when the session already
             // exists, so it can never hold up the launch.
             var history = _backend.History(_project, Index);
-            Terminal.LaunchProcess();
+            await Terminal.LaunchProcess();
+            if (_stopped) return;
             if (history.Length > 0)
             {
                 Terminal.Terminal.Write(history.TrimEnd((char)10) + "\r\n");
                 Terminal.Terminal.ScrollToBottom();
             }
             if (Terminal.IsLive) { SetState(""); return; }
-            if (tries == 30) SetState("starting…");
+            if (tries == 3) SetState("starting…");
             Retry(tries);
         }
         catch (Exception e)
         {
-            if (tries == 30) { SetState("could not start"); ToolTip.SetTip(_state, e.Message); }
+            if (tries == 3) { SetState("could not start"); ToolTip.SetTip(_state, e.Message); }
             Retry(tries);
         }
 
         // BOUNDED. "Retry until it works" is an infinite chain of posted callbacks, and a headless test that pumps the
         // dispatcher (Dispatcher.UIThread.RunJobs) never returns from it — the terminal suites hung for 15 minutes with
-        // no test completing. 150 frames is several seconds of real time, far longer than a layout pass needs, and a
-        // pane that still has no process then says so instead of spinning.
+        // no test completing. Each attempt now really spawns (and waits for) a process, so the count is small: 20 is
+        // several seconds of real time, far longer than a layout pass needs, and a pane that still has no process then
+        // says so instead of spinning.
         void Retry(int n)
         {
-            if (n >= 150) { SetState("could not start"); return; }
-            Avalonia.Threading.Dispatcher.UIThread.Post(() => Attempt(n + 1),
+            if (n >= 20) { SetState("could not start"); return; }
+            Avalonia.Threading.Dispatcher.UIThread.Post(() => _ = AttemptAsync(n + 1),
                 n < 5 ? Avalonia.Threading.DispatcherPriority.Loaded : Avalonia.Threading.DispatcherPriority.Background);
         }
     }

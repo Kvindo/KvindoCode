@@ -125,8 +125,11 @@ public sealed class MergeButtonAndUsageTests(ITestOutputHelper o)
 
         var btn = app.Window.FindControl<Button>("MergeBtn")!;
         btn.RaiseEvent(new Avalonia.Interactivity.RoutedEventArgs(Button.ClickEvent));
-        Dispatcher.UIThread.RunJobs();
-
+        // NO RunJobs() before the snapshot. The click handler decides synchronously ("running -> enqueue"), so the item
+        // is in the queue the moment RaiseEvent returns. Pumping the dispatcher first let the scripted turn that
+        // TypeAndSend started FINISH, and the end-of-turn path drains the queue into the next turn
+        // (MainWindow.RunAsync -> sv.Dequeue()) — so the assertion then raced the mock model and failed with
+        // "queued: 0" whenever the turn happened to complete inside that pump (observed intermittently, 2026-10-18).
         var queued = app.Session.SnapshotQueue();
         o.WriteLine($"queued: {queued.Count}");
         Assert.Single(queued);
