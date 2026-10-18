@@ -688,12 +688,14 @@ public sealed class TerminalUiTests
         // vanishes after a restart). What is under test here is the pane's RESPONSE to the shell ending, not the input
         // path — Typing_reaches_the_active_pane_only covers that.
         SendKeys(session, "exit", "Enter");
-        Assert.True(await Eventually(() => Task.FromResult(!HasSession(session))),
-            "the shell did not exit:\n" + Capture(session));
 
-        // the pane relaunches by itself: a new session, a new shell
-        Assert.True(await Eventually(() => Task.FromResult(HasSession(session) && SessionPanePid(session) is var p && p > 0 && p != pidBefore)),
-            $"the pane did not come back after the shell exited (session={HasSession(session)} pid={SessionPanePid(session)})");
+        // ONE assertion, on the thing that matters: a DIFFERENT shell ends up running in this pane. There used to be an
+        // intermediate "!HasSession" check, and it raced the feature it was testing — the auto-restart recreates the
+        // session within milliseconds, so a sample taken after the exit often found it alive again and reported "the
+        // shell did not exit" while the behaviour was exactly right (the full-run-only flake, 2026-10-18).
+        var back = await Eventually(() => Task.FromResult(SessionPanePid(session) is var p && p > 0 && p != pidBefore), 25000);
+        Assert.True(back,
+            $"the pane did not come back with a new shell (session={HasSession(session)} pid={SessionPanePid(session)} was {pidBefore})");
         _out.WriteLine($"came back: {session} pid {pidBefore} -> {SessionPanePid(session)}");
     }
 

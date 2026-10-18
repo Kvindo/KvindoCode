@@ -155,7 +155,12 @@ public sealed class TerminalPaneView : UserControl
         t.StartingDirectory = _project;
         // A shell that EXITS (Ctrl+D, `exit`, a crash) must come back by itself: the pane is a terminal, not a
         // one-shot command runner ("when i press Ctrl+D terminal exists and there is no way it could be restarted").
-        t.ProcessExited += (_, _) => AutoRestart();
+        //
+        // ONLY the control that is still this pane's terminal may trigger it. Restart REPLACES the control, and the
+        // old one's exit arrives a moment later — which used to restart the NEW control, killing the shell it had just
+        // launched and starting the cycle again (measured: the pane flapped, burned its auto-restart budget and ended
+        // up dead, and it only showed up when a preceding test had restarted that pane).
+        t.ProcessExited += (_, _) => { if (ReferenceEquals(t, Terminal)) AutoRestart(); };
         return t;
     }
 
