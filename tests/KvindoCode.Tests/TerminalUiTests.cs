@@ -55,11 +55,55 @@ public sealed class TerminalUiTests
     /// not loaded (Ui.GeometryFor throws "Value cannot be null (control)"). So it is built on first use, inside a test.
     /// </remarks>
     static readonly string Socket = "kvuitest" + Environment.ProcessId;
-    static (Sandbox Sb, MainWindow Win, SessionView Session)? _shared;
+    static (Sandbox Sb, MainWindow Win, SessionView Session, object App)? _shared;
 
-    static (Sandbox Sb, MainWindow Win, SessionView Session) Shared()
+    /// <summary>Every window rebuild, in order — printed by the tests that need to know why a pane never launched.</summary>
+    static readonly List<string> Lifecycle = new();
+
+    static void Note(string line)
     {
-        if (_shared is { } ready) return ready;
+        lock (Lifecycle) Lifecycle.Add($"{DateTime.Now:HH:mm:ss.fff} {line}");
+    }
+
+    static string Life => string.Join("\n", Lifecycle.ToArray());
+
+    /// <summary>The control's PID, or an honest note when it never launched (the <c>Pid</c> getter throws on a null PTY).</summary>
+    static string PidOf(TerminalControl c)
+    {
+        try { return c.IsLive ? c.Pid.ToString() : "not-live"; }
+        catch (Exception e) { return "throws:" + e.GetType().Name; }
+    }
+
+    /// <summary>Why a pane did not launch: its own start flags, its header text, and the failure it recorded.</summary>
+    static string PaneDiag(TerminalPaneView p)
+    {
+        object? F(string n) => typeof(TerminalPaneView).GetField(n, BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(p);
+        var state = F("_state") as TextBlock;
+        return $"#{p.Index} started={F("_started")} stopped={F("_stopped")} live={p.Terminal.IsLive} pid={PidOf(p.Terminal)}" +
+               $" state='{state?.Text}' tip='{ToolTip.GetTip(state)}' bounds={p.Bounds.Width}x{p.Bounds.Height}" +
+               $" term={p.Terminal.Bounds.Width}x{p.Terminal.Bounds.Height}";
+    }
+
+    /// <summary>
+    /// The shared window, rebuilt when the Avalonia APPLICATION it was created under is no longer the current one.
+    /// </summary>
+    /// <remarks>
+    /// The headless harness gives a test class its own <see cref="Application"/> instance. A static window therefore
+    /// outlives the application it was built with as soon as another class has run in between, and a window from a
+    /// disposed application looks fine — it has four terminal controls — but nothing inside it launches a process. That
+    /// is precisely the observed symptom: the class passes alone and every terminal test fails in a full run, with four
+    /// controls on screen and no tmux server. Comparing the application identity is the cheap, honest check.
+    /// </remarks>
+    static (Sandbox Sb, MainWindow Win, SessionView Session, object App) Shared()
+    {
+        if (_shared is { } ready && ReferenceEquals(ready.App, Avalonia.Application.Current)) return ready;
+        Note($"Shared(): app={Avalonia.Application.Current?.GetHashCode()} shared={( _shared is { } s0 ? s0.App.GetHashCode().ToString() : "none")} -> {( _shared is null ? "create" : "REBUILD")}");
+        if (_shared is { } stale)
+        {
+            try { Invoke(stale.Win, "CloseTerminals"); } catch { }
+            try { stale.Win.Close(); } catch { }
+            _shared = null;
+        }
         Environment.SetEnvironmentVariable("KVINDOCODE_TMUX_SOCKET", Socket);
 
         var sb = new Sandbox();
@@ -87,8 +131,9 @@ public sealed class TerminalUiTests
         Invoke(win, "OpenProject", sb.Project);
         Dispatcher.UIThread.RunJobs();
 
-        var built = (sb, win, Field<SessionView>(win, "_current"));
+        var built = (sb, win, Field<SessionView>(win, "_current"), (object)Avalonia.Application.Current!);
         _shared = built;
+        Note($"Shared(): built win={win.GetHashCode()} project={sb.Project}");
         return built;
     }
 
@@ -132,7 +177,7 @@ public sealed class TerminalUiTests
     /// </remarks>
     TerminalsView OpenGrid()
     {
-        var (sb, main, _) = Shared();
+        var (sb, main, _, _) = Shared();
         if (main.GetVisualDescendants().OfType<TerminalsView>().FirstOrDefault() is not null)
         {
             Invoke(main, "CloseTerminals");
@@ -149,7 +194,7 @@ public sealed class TerminalUiTests
     public void The_project_header_icon_opens_real_terminals()
     {
         if (!new TmuxBackend().IsAvailable) { _out.WriteLine("tmux not available; skipping"); return; }
-        var (sb, main, _) = Shared();
+        var (sb, main, _, _) = Shared();
         if (main.GetVisualDescendants().OfType<TerminalsView>().FirstOrDefault() is not null) Invoke(main, "CloseTerminals");
         // the project's group is collapsed by default, and a collapsed group renders no header at all
         var settings = Field<AppSettings>(main, "_settings");
@@ -277,7 +322,9 @@ public sealed class TerminalUiTests
             })!;
             _out.WriteLine("tmux ls: " + ls.StandardOutput.ReadToEnd() + " | err: " + ls.StandardError.ReadToEnd());
             ls.WaitForExit(5000);
-            _out.WriteLine("controls live: " + string.Join(",", controls.Select(c => $"{c.Name}={c.IsLive}/{c.Pid}")));
+            _out.WriteLine("controls live: " + string.Join(",", controls.Select(c => $"{c.Name}={c.IsLive}/{PidOf(c)}")));
+            _out.WriteLine("pane state:\n  " + string.Join("\n  ", terminals.Panes.Select(PaneDiag)));
+            _out.WriteLine("lifecycle:\n" + Life);
         }
         Assert.True(ok, "not all four sessions exist: " + string.Join(",", expected.Select(s => $"{s}={HasSession(s)}")));
         Assert.Equal(4, expected.Distinct().Count());
@@ -298,7 +345,8 @@ public sealed class TerminalUiTests
         {
             _out.WriteLine("SOCKET=" + _socket + " env=" + Environment.GetEnvironmentVariable("KVINDOCODE_TMUX_SOCKET"));
             foreach (var p2 in terminals.Panes)
-                _out.WriteLine($"  pane {p2.Index}: session={p2.SessionName} live={p2.Terminal.IsLive} pid={p2.Terminal.Pid} present={HasSession(p2.SessionName)}");
+                _out.WriteLine($"  pane {p2.Index}: session={p2.SessionName} live={p2.Terminal.IsLive} pid={PidOf(p2.Terminal)} present={HasSession(p2.SessionName)}");
+            _out.WriteLine("lifecycle:\n" + Life);
             using var ls = Process.Start(new ProcessStartInfo("tmux")
             { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, ArgumentList = { "-L", _socket, "ls" } })!;
             _out.WriteLine("tmux ls: " + ls.StandardOutput.ReadToEnd() + " | " + ls.StandardError.ReadToEnd());
@@ -427,7 +475,7 @@ public sealed class TerminalUiTests
     public async Task The_restart_button_replaces_the_sessions_and_the_header_has_no_session_ids()
     {
         if (!new TmuxBackend().IsAvailable) { _out.WriteLine("tmux not available; skipping"); return; }
-        var (sb, main, _) = Shared();
+        var (sb, main, _, _) = Shared();
         var terminals = OpenGrid();
         var backend = new TmuxBackend(socketName: _socket);
         var sessions = backend.SessionNames(sb.Project, 4).ToList();
@@ -464,7 +512,7 @@ public sealed class TerminalUiTests
     [AvaloniaFact]
     public void The_splitter_sizes_are_remembered_per_project()
     {
-        var (sb, main, _) = Shared();
+        var (sb, main, _, _) = Shared();
         var settings = Field<AppSettings>(main, "_settings");
         // A REAL backend: with tmux missing the view takes the "explain yourself" path and builds no grid at all. The
         // panes only start when the view is attached, which this test never does.

@@ -5,6 +5,18 @@
   <Application.Styles>
     <FluentTheme />
     <StyleInclude Source="avares://Avalonia.Controls.DataGrid/Themes/Fluent.xaml"/>
+    <!-- The terminal control's default theme, included HERE rather than left to the package's static constructor.
+         That constructor adds this include to Application.Current.Styles exactly once per PROCESS (a static
+         `_stylesLoaded` flag) and never again, so any Application created later — every headless test case gets its
+         own, one per test — has a TerminalControl with no ControlTheme, hence no template, hence
+         "TerminalControl template has not been applied yet" and a pane that shows nothing. Declaring it here makes
+         the app own its styles: they are loaded whenever this App initialises, however many times that happens.
+         The package detects the include and skips its own insert, so there is no duplicate.
+         No dedicated unit test guards this line: a single test process only ever creates the FIRST Application under
+         the static constructor's watch, so such a test passes with or without it. The guard is the terminal suite —
+         TerminalUiTests fails on five tests when this include is removed (revert-checked 2026-10-18), because a full
+         run gives every test case its own Application. -->
+    <StyleInclude Source="avares://Iciclecreek.Avalonia.Terminal/Themes/Generic.axaml"/>
 
     <!-- ============ surfaces ============ -->
     <Style Selector="Window"><Setter Property="Background" Value="{DynamicResource KvBg}"/></Style>
