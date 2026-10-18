@@ -220,6 +220,49 @@ public sealed class CodeEditorTests(ITestOutputHelper o)
         win.Close();
     }
 
+    /// <summary>The file view has no full-width header row: the operations live in the tree column.</summary>
+    /// <remarks>
+    /// "This line should not be present in file view, it consumes space" (2026-10-18). The row held a title that only
+    /// repeated the project name plus the buttons; it is gone, and the buttons are a compact icon row at the top of the
+    /// tree column, so the editor gets the full height. This asserts both halves: nothing is docked above the body, and
+    /// every operation is still reachable.
+    /// </remarks>
+    [AvaloniaFact]
+    public void The_file_view_has_no_header_row_and_keeps_its_operations()
+    {
+        using var sb = new Sandbox();
+        var (win, _) = Start(sb);
+        var view = Open(win, sb.Project);
+        win.Measure(new Avalonia.Size(1400, 900));
+        win.Arrange(new Avalonia.Rect(0, 0, 1400, 900));
+        Dispatcher.UIThread.RunJobs();
+
+        // no "Files — <project>" title anywhere
+        var texts = view.GetVisualDescendants().OfType<TextBlock>().Select(t => t.Text ?? "").ToList();
+        o.WriteLine("texts: " + string.Join(" | ", texts.Where(t => t.Length > 0).Take(8)));
+        Assert.DoesNotContain(texts, t => t.StartsWith("Files —", StringComparison.Ordinal));
+
+        // ...and the operations are all still there, inside the tree column (left of the editor)
+        var names = new[] { "EditorNewFile", "EditorNewFolder", "EditorRename", "EditorCopy", "EditorDelete", "EditorSearchFiles", "EditorTerminal", "EditorBack" };
+        var buttons = view.GetVisualDescendants().OfType<Button>().Where(b => b.Name is not null).ToList();
+        foreach (var n in names)
+            Assert.Contains(buttons, b => b.Name == n);
+        var editorX = view.Editor.TranslatePoint(new Avalonia.Point(0, 0), view)!.Value.X;
+        foreach (var n in names)
+        {
+            var b = buttons.First(x => x.Name == n);
+            var x = b.TranslatePoint(new Avalonia.Point(0, 0), view)!.Value.X;
+            o.WriteLine($"{n} at x={x:0} (editor starts at {editorX:0})");
+            Assert.True(x < editorX, $"{n} is not in the tree column");
+        }
+
+        // the editor starts at the very top of the view: nothing is docked above it any more
+        var editorY = view.Editor.TranslatePoint(new Avalonia.Point(0, 0), view)!.Value.Y;
+        o.WriteLine($"editor top={editorY:0} of {view.Bounds.Height:0}");
+        Assert.True(editorY < 12, "the editor is pushed down by a header row");
+        win.Close();
+    }
+
     /// <summary>Search in files finds content across the project, and Replace All rewrites every file.</summary>
     /// <remarks>
     /// Asked 2026-10-18: "search should be the same as in vs code (there is reach search there where i can also
