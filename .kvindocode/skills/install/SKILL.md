@@ -101,6 +101,11 @@ open handles to the files it started with; replacing the directory out from unde
 (2026-10-04). The install therefore swaps **per file** — `mv -f` over each path is a rename, so the running process
 keeps its own inodes and only picks the new build up when it is restarted.
 
+**Installing over a running instance is allowed, and is the normal case** (the user, 2026-10-18: *"I allow you to
+always install on running version"*). Do not stop and ask whether the app is running, and do not require it to be
+closed — the per-file swap makes it safe. Report the app's pid before and after, and say plainly that the new build is
+**not live until the user restarts** (the restart is theirs; background tasks and loops do not survive it).
+
 Two related traps, both already handled in `install.sh` — keep them that way:
 
 * The "remove files the new build no longer has" step must compare against a **snapshot of the incoming file list
