@@ -17,6 +17,13 @@
          TerminalUiTests fails on five tests when this include is removed (revert-checked 2026-10-18), because a full
          run gives every test case its own Application. -->
     <StyleInclude Source="avares://Iciclecreek.Avalonia.Terminal/Themes/Generic.axaml"/>
+    <!-- AvaloniaEdit's own theme. WITHOUT THIS the file editor has NO TEMPLATE AT ALL: the control gets a size, the
+         document holds the text, and nothing is ever drawn inside it — measured 2026-10-18 with a real rendered frame:
+         editor.Template was NULL, TextArea bounds 0x0, and the whole editor area was one flat colour. That is the
+         "when i click on file i cant view it" / "files are still non viewable" the user reported twice; every earlier
+         test passed because it asserted the editor's TEXT, which was always set. Base.xaml carries the styles the
+         Simple theme builds on. -->
+    <StyleInclude Source="avares://AvaloniaEdit/Themes/Simple/AvaloniaEdit.xaml"/>
 
     <!-- ============ surfaces ============ -->
     <Style Selector="Window"><Setter Property="Background" Value="{DynamicResource KvBg}"/></Style>
@@ -307,6 +314,20 @@
 
   <Application.Resources>
     <ResourceDictionary>
+      <!-- AvaloniaEdit's BASE resources (fonts, brushes, the sizes its Simple theme references). It is a
+           ResourceDictionary, not a style, so it is merged here; the style itself is in Application.Styles. -->
+      <ResourceDictionary.MergedDictionaries>
+        <ResourceInclude Source="avares://AvaloniaEdit/Themes/Base.xaml"/>
+      </ResourceDictionary.MergedDictionaries>
+      <!-- The font-size and spacing tokens AvaloniaEdit's Simple theme references by StaticResource. They live in
+           FluentTheme, which is a STYLE, and a StaticResource inside one StyleInclude cannot see another's resources —
+           so the file editor threw "Static resource 'FontSizeNormal' not found" while MEASURING, i.e. it never
+           rendered. Declaring them here puts them in the application's own resource dictionary, which every style
+           can see. -->
+      <x:Double x:Key="FontSizeNormal">14</x:Double>
+      <x:Double x:Key="FontSizeSmall">12</x:Double>
+      <x:Double x:Key="FontSizeLarge">16</x:Double>
+      <Thickness x:Key="ControlContentThemePadding">6,4,6,4</Thickness>
       <Color x:Key="SystemAccentColor">#D97757</Color>
       <Color x:Key="SystemAccentColorLight1">#E58868</Color>
       <Color x:Key="SystemAccentColorLight2">#EC9B80</Color>

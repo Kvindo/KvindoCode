@@ -10,7 +10,12 @@ public static class TestAppBuilder
 {
     public static AppBuilder BuildAvaloniaApp() =>
         AppBuilder.Configure<KvindoCode.App.App>()
-            .UseHeadless(new AvaloniaHeadlessPlatformOptions { UseHeadlessDrawing = true });
+            // REAL drawing, not the headless stub: with UseHeadlessDrawing = true no frame is ever produced, so
+            // CaptureRenderedFrame() returns null and a test cannot tell "the file is open" from "the file is invisible" —
+            // which is exactly the class of bug that reached the user twice ("when i click on file i cant view it").
+            // Real drawing also means real font metrics.
+            .UseSkia()
+            .UseHeadless(new AvaloniaHeadlessPlatformOptions { UseHeadlessDrawing = false });
 }
 
 /// <summary>
