@@ -6,7 +6,7 @@ using System.Text.RegularExpressions;
 
 namespace KvindoCode.Core.Tools;
 
-public sealed class BashTool : Tool
+public sealed partial class BashTool : Tool
 {
     public override string Name => "Bash";
     public override string Description =>
@@ -26,6 +26,18 @@ public sealed class BashTool : Tool
       "run_in_background":{"type":"boolean","description":"Run as a background task and return immediately (servers, long builds). You are woken when it exits; read output with TaskOutput. For streaming/timer-style output use Monitor."}},
      "required":["command"]}
     """)!;
+
+    /// <summary>`git stash` in any spelling: "git stash", "git -c x=y stash", "git stash pop", "GIT stash".</summary>
+    /// <remarks>Matched on the command text rather than by parsing the shell: a false positive costs one clear message,
+    /// and the message names the safe alternatives. A leading `!` or a quoted mention does not match because the verb
+    /// must follow "git" directly.</remarks>
+    [System.Text.RegularExpressions.GeneratedRegex(@"\bgit\b[^;&|\n]*?\bstash\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase)]
+    private static partial System.Text.RegularExpressions.Regex StashCommandRx();
+
+    /// <summary>`git stash create` is the one stash form that does NOT touch refs/stash — it prints a commit id — so it
+    /// is exactly what the refusal recommends, and refusing it would make the advice unusable.</summary>
+    [System.Text.RegularExpressions.GeneratedRegex(@"\bstash\s+create\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase)]
+    private static partial System.Text.RegularExpressions.Regex SafeStashRx();
 
     public override bool AllowedInPlan(JsonObject input, ToolContext ctx) => ReadOnlyCommand.IsSafe(Str(input, "command"));
 
@@ -57,6 +69,19 @@ public sealed class BashTool : Tool
                 ? $"Refused: `cd {outsideTarget}` is outside this project, and this session works in its own copy at {ctx.WorkDir}. " +
                   "Paths inside the project work directly (absolute or relative); anything outside it does not."
                 : $"Refused: `cd {outsideTarget}` leaves this session's work tree ({ctx.WorkDir}). Work inside it."));
+        // `git stash` is REPO-WIDE, not per worktree: refs/stash is shared by every worktree of a repository, so a
+        // session that stashes can pop ANOTHER session's entry into its own tree — and the reverse, its own entry
+        // landing in someone else's (reported 2026-10-18: "my git stash for the baseline check popped another session's
+        // stash into my worktree ... the stack is repo-wide"). Git has no per-worktree stash stack, so this cannot be
+        // isolated; it can only be kept out of reach. Refused with the alternative that does not touch the ref.
+        if ((ctx.Isolated || mirror is not null) && StashCommandRx().IsMatch(command) && !SafeStashRx().IsMatch(command))
+            return Task.FromResult(ToolResult.Err(
+                "Refused: `git stash` is shared by every worktree of this repository (refs/stash is repo-wide), so it " +
+                "would mix this session's changes with other sessions'. Use one of these instead:\n" +
+                "  git stash create                     — makes a stash COMMIT without touching refs/stash\n" +
+                "  git diff > /tmp/mine-$(date +%s).patch   — a patch file, then `git apply` it back\n" +
+                "  git commit -m wip                    — a commit on this session's own branch is never shared"));
+
         if (mirror is not null) EnsureReposForCommand(command, ctx, mirror, ct);
         // The model only ever sees vault values as markers. Expand them here, immediately before the shell runs the text; the
         // transcript keeps the marker, and anything the command prints is masked again by the tool-output audit.

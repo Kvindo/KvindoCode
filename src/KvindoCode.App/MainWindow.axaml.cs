@@ -93,7 +93,7 @@ public partial class MainWindow : Window
         {
             // each piece has its own column, so hiding is only about clutter, not collisions
             SetVisible(ProjectText, e.NewSize.Width >= 980);
-            SetVisible(UsageText, e.NewSize.Width >= 760);
+            SetVisible(UsagePanel, e.NewSize.Width >= 760);
             SetVisible(FindBtn, e.NewSize.Width >= 700);
             // Text can be null on a freshly created TextBlock, and the `!` here threw a NullReferenceException out of
             // ArrangeCore -> SizeChanged (errors.log 2026-10-06/07), i.e. inside the layout pass it was reacting to.
@@ -2914,7 +2914,7 @@ public partial class MainWindow : Window
     {
         if (_current is null || _current.PromptTokens <= 0)
         {
-            if (!string.IsNullOrEmpty(UsageText.Text)) UsageText.Text = "";   // the top bar re-lays out on every change
+            if (!string.IsNullOrEmpty(UsageText.Text)) SetUsage("", "", "", "");   // the top bar re-lays out on every change
             return;
         }
         var w = Math.Max(1, _current.ContextWindow);
@@ -2925,22 +2925,44 @@ public partial class MainWindow : Window
         // TWO LINES, not one long row (asked 2026-10-16: "lets do this parts in 2 lines to occupy less space"). The row
         // is in an Auto column of the top bar, so every extra figure made the session title narrower; splitting at the
         // context/cache boundary halves the width and costs one line of height in a bar that is already 52px.
-        var line1 = $"{Ui.Tokens(_current.PromptTokens)} / {Ui.Tokens(w)}  ({pct}%)";
+        var context = $"{Ui.Tokens(_current.PromptTokens)} / {Ui.Tokens(w)}  ({pct}%)";
         // ONLY the session average is shown (asked 2026-10-10). A single request is either a full hit or a miss, so the
         // last-request figure swings between 0% and ~99% and says nothing; the average is the honest number.
-        if (life > 0) line1 += $"  ·  ↓{lifePct}% avg";
+        var cache = life > 0 ? $"↓{lifePct}% avg" : "";
         // Generation speed right beside the cache figure (asked 2026-10-11): a 5-minute weighted average over the
         // session's completed calls, so it says what the provider is actually delivering now, not what one call did.
         var speed = CurrentSpeed();
-        var line2 = speed > 0 ? $"{speed:0.#} tok/s avg5m" : "";
-        if (_current.CostRub > 0) line2 += (line2.Length > 0 ? "  ·  " : "") + $"₽{_current.CostRub:0.00}";
-        var text = line2.Length > 0 ? line1 + "\n" + line2 : line1;
-        if (UsageText.Text != text) UsageText.Text = text;          // ditto: only when the figure really changed
+        var speedText = speed > 0 ? $"{speed:0.#} tok/s avg5m" : "";
+        var cost = _current.CostRub > 0 ? $"₽{_current.CostRub:0.00}" : "";
+        SetUsage(context, cache, speedText, cost);
         var tip = $"Context used by the last request (older messages are summarised automatically at {KvindoCode.Core.Agent.AgentSession.CompactionThreshold * 100:0}%) · session cost reported by the gateway";
         if (life > 0) tip += $"\nPrompt cache, whole session: {Ui.Tokens(_current.LifetimeCachedTokens)} of {Ui.Tokens(life)} tokens ({lifePct}%). A single request is either a full hit or a miss, so the per-request figure jumps — the session average is the one to watch.";
         if (speed > 0) tip += $"\nGeneration speed: {speed:0.#} completion tokens/second, weighted over the calls of the last 5 minutes (measured from the first streamed chunk, so queueing and prompt prefill are not counted as generation).";
-        ToolTip.SetTip(UsageText, tip);
-        SetClass(UsageText, "err", pct >= KvindoCode.Core.Agent.AgentSession.CompactionThreshold * 100);   // the warning colour matches the real threshold
+        ToolTip.SetTip(UsagePanel, tip);
+        // the warning colour matches the real threshold; every cell takes it, or half a row turns red
+        var over = pct >= KvindoCode.Core.Agent.AgentSession.CompactionThreshold * 100;
+        foreach (var cell in new Control[] { UsageText, UsageCache, UsageText2, UsageCost })
+            SetClass(cell, "err", over);
+    }
+
+    /// <summary>
+    /// Put the four figures into their cells, and hide the separators of a column that has nothing to separate.
+    /// </summary>
+    /// <remarks>
+    /// Each figure has its own cell so the two lines LINE UP (asked 2026-10-18: "align columns"). A separator is shown
+    /// only when both of its neighbours exist, which is what keeps "12k / 200k (6%)" from ending in a dangling "·", and
+    /// the whole second line disappears when it has neither speed nor cost — the behaviour the single-TextBlock version
+    /// had by building one string.
+    /// </remarks>
+    void SetUsage(string context, string cache, string speed, string cost)
+    {
+        if (UsageText.Text != context) UsageText.Text = context;
+        if (UsageCache.Text != cache) UsageCache.Text = cache;
+        if (UsageText2.Text != speed) UsageText2.Text = speed;
+        if (UsageCost.Text != cost) UsageCost.Text = cost;
+        SetVisible(UsageSep, cache.Length > 0);
+        SetVisible(UsageSep2, cost.Length > 0);
+        SetVisible(UsageLine2, speed.Length > 0 || cost.Length > 0);
     }
 
     void UpdateTodos()

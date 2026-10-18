@@ -62,7 +62,7 @@ public sealed class CodeEditorView : UserControl
         VerticalAlignment = VerticalAlignment.Stretch,
     };
     readonly TextMate.Installation _textMate;
-    readonly RegistryOptions _registry;
+    RegistryOptions _registry;
     readonly DispatcherTimer _save;
     string? _openPath;
     string _lastSaved = "";
@@ -95,9 +95,27 @@ public sealed class CodeEditorView : UserControl
         _onNotice = onNotice;
         _openTerminalHere = openTerminalHere;
 
-        _registry = new RegistryOptions(ThemeName.DarkPlus);
+        // The TextMate theme must MATCH the app's variant. It used to be DarkPlus unconditionally, so in the app's
+        // light theme every highlighted token was painted a light colour on the editor's light background — a file
+        // opened and looked empty ("when i click on file i cant view it", 2026-10-18). The background and foreground are
+        // set from the app's own palette for the same reason: a theme's token colours are only half the contrast.
+        EditorTheme = CurrentTextMateTheme();
+        _registryTheme = EditorTheme;
+        _registry = new RegistryOptions(EditorTheme);
         _textMate = TextMate.InstallTextMate(_editor, _registry, true);
         _textMate.SetTheme(_registry.GetDefaultTheme());
+        ApplyEditorColors();
+        // ...and follow the variant if the human flips it while the view is open
+        ActualThemeVariantChanged += (_, _) =>
+        {
+            // The REGISTRY has to be rebuilt, not just re-asked: GetDefaultTheme() answers with the ThemeName the
+            // registry was CONSTRUCTED with, so calling SetTheme on the old one re-applies the old theme.
+            EditorTheme = CurrentTextMateTheme();
+            _registryTheme = EditorTheme;
+            _registry = new RegistryOptions(EditorTheme);
+            try { _textMate.SetTheme(_registry.GetDefaultTheme()); } catch { }
+            ApplyEditorColors();
+        };
 
         _save = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(700) };
         _save.Tick += (_, _) => Save();
@@ -112,7 +130,7 @@ public sealed class CodeEditorView : UserControl
 
         _findBar = BuildFindBar();
         _searchPanel = BuildSearchPanel();
-        var head = BuildHeader();
+        _tools = BuildTools();
         var body = new Grid { ColumnDefinitions = new ColumnDefinitions("300,6,*") };
         body.Children.Add(BuildTreeColumn());
         var splitter = new GridSplitter { ResizeDirection = GridResizeDirection.Columns, Background = Brushes.Transparent, Width = 6 };
@@ -139,8 +157,6 @@ public sealed class CodeEditorView : UserControl
         _terminalHost.IsVisible = false;
 
         var dock = new DockPanel();
-        DockPanel.SetDock(head, Dock.Top);
-        dock.Children.Add(head);
         dock.Children.Add(_terminalHost);
         dock.Children.Add(body);
         Content = dock;
@@ -149,42 +165,85 @@ public sealed class CodeEditorView : UserControl
         _editor.Focus();
     }
 
-    Control BuildHeader()
+    /// <summary>The file operations and "back to session", as one compact icon row in the TREE column.</summary>
+    /// <remarks>
+    /// There used to be a full-width header row — "Files — 40-KVINDO" plus the icons plus a Back button — and it was a
+    /// whole line of the main area doing nothing ("this line should not be present in file view, it consumes space",
+    /// 2026-10-18). The title only repeated the project name that the sidebar and the project header already show, so
+    /// it is gone; the controls moved into the top of the tree column, which has the width to hold them as icons and
+    /// costs no height in the editor. "Back to session" is a left chevron for the same reason — a text button would not
+    /// fit beside seven icons in a 300 px column.
+    /// </remarks>
+    Control BuildTools()
     {
-        var title = new TextBlock
-        {
-            Text = "Files — " + (Path.GetFileName(_root.TrimEnd('/')) is { Length: > 0 } n ? n : _root),
-            FontSize = 15, FontWeight = FontWeight.Medium, VerticalAlignment = VerticalAlignment.Center,
-        };
-        ToolTip.SetTip(title, _root);
-
         Button Icon(string key, string tip, Action onClick, string name)
         {
-            var b = new Button { Name = name, Classes = { "ghost" }, Content = Ui.Icon(key, "KvMuted", 14), Padding = new Thickness(6), VerticalAlignment = VerticalAlignment.Center };
+            var b = new Button
+            {
+                Name = name, Classes = { "ghost" }, Content = Ui.Icon(key, "KvMuted", 14),
+                Padding = new Thickness(5), MinWidth = 0, VerticalAlignment = VerticalAlignment.Center,
+            };
             ToolTip.SetTip(b, tip);
             b.Click += (_, _) => onClick();
             return b;
         }
 
-        var actions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 2, VerticalAlignment = VerticalAlignment.Center };
-        actions.Children.Add(Icon("IconPlus", "New file in the selected folder", () => _ = NewEntryAsync(false), "EditorNewFile"));
-        actions.Children.Add(Icon("IconFolder", "New folder", () => _ = NewEntryAsync(true), "EditorNewFolder"));
-        actions.Children.Add(Icon("IconPencil", "Rename the selected entry", () => _ = RenameAsync(), "EditorRename"));
-        actions.Children.Add(Icon("IconCopy", "Copy the selected entry (Ctrl+C), then Ctrl+V to paste it into another folder", CopySelected, "EditorCopy"));
-        actions.Children.Add(Icon("IconTrash", "Delete the selected entry (asks first)", () => _ = DeleteAsync(), "EditorDelete"));
-        actions.Children.Add(Icon("IconSearch", "Search in files, with replace (Ctrl+Shift+F)", ShowFindInFiles, "EditorSearchFiles"));
-        actions.Children.Add(Icon("IconTerminal", "Terminal panel at the bottom (F4), in the selected folder", () => ShowTerminalAt(
+        var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 1, Margin = new Thickness(0, 0, 0, 4) };
+        row.Children.Add(Icon("IconPlus", "New file in the selected folder", () => _ = NewEntryAsync(false), "EditorNewFile"));
+        row.Children.Add(Icon("IconFolder", "New folder", () => _ = NewEntryAsync(true), "EditorNewFolder"));
+        row.Children.Add(Icon("IconPencil", "Rename the selected entry (F2)", () => _ = RenameAsync(), "EditorRename"));
+        row.Children.Add(Icon("IconCopy", "Copy the selected entry (Ctrl+C), then Ctrl+V to paste it into another folder", CopySelected, "EditorCopy"));
+        row.Children.Add(Icon("IconTrash", "Delete the selected entry (Del, asks first)", () => _ = DeleteAsync(), "EditorDelete"));
+        row.Children.Add(Icon("IconSearch", "Search in files, with replace (Ctrl+Shift+F)", ShowFindInFiles, "EditorSearchFiles"));
+        row.Children.Add(Icon("IconTerminal", "Terminal panel at the bottom (F4), in the selected folder", () => ShowTerminalAt(
             SelectedPath() is { } sp0 ? (Directory.Exists(sp0) ? sp0 : Path.GetDirectoryName(sp0)!) : _root), "EditorTerminal"));
 
-        var back = new Button { Name = "EditorBack", Classes = { "outline" }, Content = "Back to session", VerticalAlignment = VerticalAlignment.Center };
+        // "Back to session" as a left-pointing chevron: the same shape as the tree's own expander, mirrored.
+        var back = new Button
+        {
+            Name = "EditorBack", Classes = { "ghost" }, Padding = new Thickness(5), MinWidth = 0,
+            VerticalAlignment = VerticalAlignment.Center,
+            Content = Ui.Icon("IconChevronRight", "KvMuted", 14),
+        };
+        if (back.Content is Avalonia.Controls.Shapes.Path arrow)
+            arrow.RenderTransform = new Avalonia.Media.RotateTransform(180);
+        ToolTip.SetTip(back, "Back to the session");
         back.Click += (_, _) => _close();
-        Grid.SetColumn(back, 3);
-        var head = new Grid { ColumnDefinitions = new ColumnDefinitions("Auto,*,Auto,Auto"), Margin = new Thickness(14, 8, 14, 8) };
-        head.Children.Add(title);
-        Grid.SetColumn(actions, 2); actions.Margin = new Thickness(12, 0); head.Children.Add(actions);
-        head.Children.Add(back);
-        return head;
+        row.Children.Add(back);
+        return row;
     }
+
+    /// <summary>Dark Plus in a dark app, Light Plus in a light one — the theme the app is actually rendering in.</summary>
+    ThemeName CurrentTextMateTheme()
+    {
+        var variant = ActualThemeVariant ?? Avalonia.Application.Current?.RequestedThemeVariant;
+        return variant == Avalonia.Styling.ThemeVariant.Light ? ThemeName.LightPlus : ThemeName.DarkPlus;
+    }
+
+    /// <summary>Give the editor the app's own background and text colour, so token colours sit on the right base.</summary>
+    void ApplyEditorColors()
+    {
+        if (this.TryFindResource("KvBg", ActualThemeVariant, out var bg) && bg is Avalonia.Media.IBrush b) _editor.Background = b;
+        if (this.TryFindResource("KvText", ActualThemeVariant, out var fg) && fg is Avalonia.Media.IBrush f) _editor.Foreground = f;
+    }
+
+    /// <summary>
+    /// The TextMate theme actually INSTALLED on this editor.
+    /// </summary>
+    /// <remarks>A test must read this rather than recompute <see cref="CurrentTextMateTheme"/>: recomputing is how the
+    /// first version of the readability test passed with DarkPlus installed in a light app — it asserted its own
+    /// arithmetic instead of the editor's state.</remarks>
+    internal ThemeName EditorTheme { get; private set; }
+    ThemeName _registryTheme;
+
+    /// <summary>The theme the highlighting REGISTRY was built with — the one actually installed, not a recomputation.</summary>
+    internal ThemeName InstalledRegistryTheme => _registryTheme;
+
+    /// <summary>The editor's own background, so a test can prove the text is not drawn in its own colour.</summary>
+    internal Avalonia.Media.IBrush? EditorBackgroundForTest => _editor.Background;
+
+    /// <summary>The icon row, kept so <see cref="BuildTreeColumn"/> can dock it above the search box.</summary>
+    Control? _tools;
 
     Control BuildTreeColumn()
     {
@@ -254,8 +313,11 @@ public sealed class CodeEditorView : UserControl
                 e.Handled = true;
             }
         };
+        // the file-operation icons sit above everything in this column, so the main area needs no header row at all
+        if (_tools is { } tools) { DockPanel.SetDock(tools, Dock.Top); }
         // the find-in-files panel sits above the tree, in the sidebar column, exactly where VS Code puts its search
         var sp = new DockPanel { Margin = new Thickness(10, 0, 0, 0) };
+        if (_tools is { } t) sp.Children.Add(t);
         DockPanel.SetDock(_searchPanel, Dock.Top);
         sp.Children.Add(_searchPanel);
         DockPanel.SetDock(_search, Dock.Top);

@@ -67,7 +67,11 @@ public sealed class TerminalPaneView : UserControl
         // -A = attach if the session already exists (its scrollback comes back), create it otherwise.
         Terminal.ProcessArgs = new List<string>(backend.LaunchArgs(project, index));
         Terminal.StartingDirectory = project;
-        Terminal.ProcessExited += (_, _) => SetState("exited");
+        // A shell that EXITS (Ctrl+D, `exit`, a crash) must come back by itself: the pane is a terminal, not a
+        // one-shot command runner, and a dead pane with no way to restart it was the report "when i press Ctrl+D
+        // terminal exists and there is no way it could be restarted (it should restart automatically in that case)"
+        // (2026-10-18). The restart is bounded — a shell that dies instantly every time would otherwise spin.
+        Terminal.ProcessExited += (_, _) => AutoRestart();
 
         _name = new TextBox
         {
@@ -290,9 +294,46 @@ public sealed class TerminalPaneView : UserControl
     /// <summary>Set by <see cref="Restart"/>: the next launch must not replay the old scrollback.</summary>
     bool _restarting;
 
+    /// <summary>Exits seen in the current burst, and when the last one happened — the auto-restart's own limiter.</summary>
+    int _exits;
+    DateTime _lastExit = DateTime.MinValue;
+    internal const int MaxAutoRestarts = 5;
+
+    /// <summary>
+    /// Bring the shell back after it exited, unless the pane is being stopped or it keeps dying immediately.
+    /// </summary>
+    /// <remarks>
+    /// Ctrl+D, <c>exit</c> or a crash ends the PTY; tmux then ends the session too, so relaunching creates a fresh one.
+    /// The old output is cleared first (the emulator keeps it, and the shell that wrote it is gone), and the history
+    /// replay is skipped for the same reason a manual restart skips it. A shell that exits five times inside ten
+    /// seconds is not going to work — the pane says so instead of spinning.
+    /// </remarks>
+    void AutoRestart()
+    {
+        if (_stopped) return;
+        var now = DateTime.UtcNow;
+        // The window is short on purpose, but it must survive a SLOW start: a shell that comes back and is then exited
+        // by the next test is a normal second exit, not a crash loop. Measured 2026-10-18: with a 10-second window the
+        // counter accumulated across a UI test run (a shared pane restarted by several tests) and the fifth exit gave
+        // up for good.
+        if (now - _lastExit > TimeSpan.FromSeconds(30)) _exits = 0;
+        _lastExit = now;
+        if (++_exits > MaxAutoRestarts) { _exits = 0; SetState("exited — restart it with the ↺ button"); return; }
+        SetState("restarting…");
+        Dispatcher.UIThread.Post(() =>
+        {
+            if (_stopped) return;
+            _started = false;
+            _restarting = true;                    // do not replay what the dead shell printed
+            try { Terminal.ClearScreen(); } catch { /* not realised yet */ }
+            Start();
+        }, DispatcherPriority.Background);
+    }
+
     public void Restart()
     {
         _restarting = true;
+        _exits = 0;                // a human asked: start the auto-restart budget over
         // Kill the SESSION first: the PTY is the tmux client, so stopping the client leaves the server (and the pane,
         // and its scrollback) alive and the next launch reattaches to all of it — which is why "restart this terminal
         // doesnt clear it up" (reported 2026-10-18).

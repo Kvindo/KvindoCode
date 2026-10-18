@@ -308,6 +308,38 @@ public static partial class DeterministicSecretDetector
         if (v.Contains('/') && !v.Contains('=') && !v.Contains('+')) return false;                         // a slash path / namespace
         // an identifier with no digit and no symbol is a NAME, whatever its case ("SshKeys", "secret_key")
         if (IdentifierRx().IsMatch(v) && !v.Any(char.IsDigit) && !v.Any(char.IsPunctuation)) return false;
+
+        // A TABLE ROW from psql or any tabular output. Measured 2026-10-18 against the user's own 1361 confirmed
+        // non-secrets: 292 of the 582 values that still passed every rule above contained a pipe — by far the largest
+        // single bucket ("...| 999 | xxxx-xxxx"). A pipe-separated row is structure, not material, and a credential
+        // containing a pipe is vanishingly rare while a psql row is constant in this workflow.
+        if (v.Contains('|')) return false;
+
+        // A TIME or a clock-like column: "14:52:07", "12:07:33.123", and the same with a trailing marker. 44 of the
+        // flagged non-secrets carried a colon and this is what nearly all of them were; a secret is not HH:MM:SS.
+        if (Regex.IsMatch(v, @"^\d{1,2}:\d{2}(:\d{2})?([.,]\d+)?([A-Z]{1,3})?$")) return false;
+
+        // A MODEL/PRODUCT NAME with digits in it: every segment is a lower-case word and at least one ends in a digit
+        // ("qwen3.5-2b", "text-embedding-3-large", "gpt-4o-mini", "claude-3-5-sonnet"). Measured 2026-10-18: 83 of the
+        // remaining 290 confirmed non-secrets were hyphenated, and this is what nearly all of them were. A credential
+        // is not a dictionary word with a version number attached, and the entropy rules never see it as a name.
+        // ...but NEVER a marker or one of our own generated names: "audited-token-11526c0ebcb2" is shaped exactly like a
+        // model name ("letters-dash-letters-dash-hex") and a rule that ate markers would break the masking machinery.
+        if (!SecretPlaceholders.Contains(v) && !v.StartsWith("audited-", StringComparison.OrdinalIgnoreCase)
+            && !v.Contains("audited-") && IsModelOrVersionName(v)) return false;
+
+        // A user@host or user:password fragment that also carries a TIME ("xxx999:99x9xxxx9999"): a log line, not a
+        // value. Cheap, and it was 26 more of the same bucket.
+        if (Regex.IsMatch(v, @"^[a-z]+\d{2,}:\d{1,2}[a-z0-9]+$")) return false;
+
+        // KEY=value where the right-hand side is short and has NO entropy: "level=info1", "mode=fast2". The existing
+        // assignment rule only refuses ids; this refuses the "looks like a config line" tail.
+        if (v.Contains('=') && !v.Contains('/') && !v.Contains('+'))
+        {
+            var rhs = v[(v.LastIndexOf('=') + 1)..];
+            // an EMPTY right-hand side is base64 padding ("AbCdEf12GhIj="), which is a value, not a config line
+            if (rhs.Length is > 0 and <= 12 && !rhs.Any(char.IsUpper) && rhs.Count(char.IsDigit) <= 2) return false;
+        }
         return true;
     }
 
@@ -319,6 +351,47 @@ public static partial class DeterministicSecretDetector
         => !v.Any(char.IsDigit)
            && !(v.Any(char.IsUpper) && v.Any(char.IsLower))
            && !v.Any(c => "!@#$%^&*()_+=[]{}|;:'\",.<>/?~`\\-".Contains(c));
+
+    /// <summary>
+    /// A model or product name with a version in it — dictionary words joined by hyphens, at least one carrying digits.
+    /// </summary>
+    /// <remarks>
+    /// "qwen3.5-2b", "gpt-4o-mini", "claude-3-5-sonnet", "text-embedding-3-large": every segment is letters with an
+    /// optional number, and every segment is short. A credential of that shape is possible in principle but vanishingly
+    /// rare, and the false positives are constant in a session that talks about models. Requires at least one hyphen so
+    /// a single word with a digit ("password1") is unaffected, and caps each segment at 12 characters so a long random
+    /// token joined by hyphens does not qualify.
+    /// </remarks>
+    internal static bool IsModelOrVersionName(string v)
+    {
+        if (!v.Contains('-') || v.Length > 40) return false;
+        // Model and product names are lower-case by convention ("qwen3.5-2b", "gpt-4o-mini"), and that is the cheapest
+        // way to tell them from a licence key, which is what a real secret of the same shape looks like
+        // ("'Hq72-Lm9x-Pw40-Zr31'" — measured: an earlier version of this rule refused exactly that, a live value in the
+        // user's vault, and the leak-register tests caught it).
+        if (v.Any(char.IsUpper)) return false;
+        var segs = v.Split('-');
+        if (segs.Length < 2) return false;
+        foreach (var seg in segs)
+        {
+            if (seg.Length is 0 or > 12) return false;
+            foreach (var c in seg)
+                if (!char.IsLetter(c) && !char.IsDigit(c) && c != '.') return false;   // "qwen3.5" carries a dot
+        }
+        // ...and the giveaway is a VERSION TOKEN, not merely a number: "2b", "4o" (a letter and a digit in a very short
+        // segment), a bare one-or-two-digit "3", or a dotted version "v4.1". A plain "789" tail is NOT one — that shape
+        // is exactly a plausible secret ("innocent-identifier-789" is the value the leak-register test relies on, and an
+        // earlier, looser version of this rule silently refused it).
+        foreach (var seg in segs)
+        {
+            var hasLetter = seg.Any(char.IsLetter);
+            var hasDigit = seg.Any(char.IsDigit);
+            if (seg.Length <= 4 && hasLetter && hasDigit) return true;
+            if (seg.Length <= 2 && hasDigit && !hasLetter) return true;
+            if (Regex.IsMatch(seg, @"^v?\d+(\.\d+)+$")) return true;
+        }
+        return false;
+    }
 
     /// <summary>True for a ULID: 26 Crockford-base32 characters whose first 48 bits are a plausible millisecond time.</summary>
     /// <remarks>

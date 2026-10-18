@@ -639,13 +639,23 @@ public sealed class SecretVault
             ?? _data.Secrets.FirstOrDefault(s => string.Equals(s.Name, nameOrId, StringComparison.OrdinalIgnoreCase));
     }
 
-    /// <summary>Add a secret. Throws when the name is already taken.</summary>
+    /// <summary>Add a secret. Throws when the name is already taken, or when the value is one the human excluded.</summary>
+    /// <remarks>
+    /// The exclusion list is the human's decision that a value is NOT a secret, and it must hold against every writer:
+    /// the detector checked it, but an explicit store did not — so a session that stored the value again put the marker
+    /// back and the user saw a value they had dismissed reappear ("I marked it as not a secret, but session managed to
+    /// add it again", 2026-10-18). Refusing here is the only place that covers every caller, and the way out is the
+    /// deliberate one: remove the decision in the Secrets window (Not secret → Remove), then store it.
+    /// </remarks>
     public SecretRecord Create(string name, string value, string? description = null, IEnumerable<string>? tags = null, bool redact = true)
     {
         if (string.IsNullOrWhiteSpace(name)) throw new ArgumentException("A secret needs a name.");
         if (SecretPlaceholders.Contains(name)) throw new ArgumentException("A secret name cannot be a placeholder.");
         if (SecretPlaceholders.Contains(value)) throw new ArgumentException("A placeholder cannot be stored as a secret value; resolve it first.");
         if (value.Length == 0) throw new ArgumentException("A secret needs a non-empty value.");
+        if (IsExcluded(value))
+            throw new ArgumentException("This value was marked as NOT a secret. Remove that decision first " +
+                                        "(Secrets window → Not secret → Remove) if it really is a credential.");
         lock (_lock)
         {
             if (Find(name) is not null) throw new InvalidOperationException($"A secret named '{name}' already exists.");

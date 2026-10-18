@@ -68,7 +68,8 @@ public sealed class ReportedUiIssuesUiTests
         Dispatcher.UIThread.RunJobs();
 
         var project = app.Window.FindControl<TextBlock>("ProjectText")!;
-        var usage = app.Window.FindControl<TextBlock>("UsageText")!;
+        // the usage block is a panel of cells since 2026-10-18 ("align columns"); it is what gets shown or hidden
+        var usage = app.Window.FindControl<StackPanel>("UsagePanel")!;
         var box = app.Window.FindControl<TextBox>("AskSearchBox");
         Assert.NotNull(usage);
         Assert.True(box is null || box.IsVisible || true);
@@ -84,7 +85,8 @@ public sealed class ReportedUiIssuesUiTests
         }
 
         Assert.Equal(state, (project.IsVisible, usage.IsVisible, box?.IsVisible ?? false));
-        Assert.True(string.IsNullOrEmpty(usage.Text));   // nothing is rendered before the first usage event
+        var usageCell = app.Window.FindControl<TextBlock>("UsageText")!;
+        Assert.True(string.IsNullOrEmpty(usageCell.Text));   // nothing is rendered before the first usage event
     }
 
     [AvaloniaFact]
