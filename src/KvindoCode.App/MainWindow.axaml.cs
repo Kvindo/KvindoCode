@@ -122,11 +122,15 @@ public partial class MainWindow : Window
         {
             var name = _current?.Session.Info.Title;
             if (string.IsNullOrWhiteSpace(name)) { ShowInfo("No session is open."); return; }
+            // The ID travels WITH the name (asked 2026-10-18): a name is not unique and cannot be handed to another
+            // session or to a command, while the id can. Two lines, so a paste reads as a pair rather than a run-on.
+            var id = _current!.Session.Info.Id;
+            var text = string.IsNullOrWhiteSpace(id) ? name : name + "\n" + id;
             try
             {
                 var cb = TopLevel.GetTopLevel(this)?.Clipboard;
-                if (cb != null) await cb.SetTextAsync(name);
-                ShowInfo($"Session name on the clipboard: {name}");
+                if (cb != null) await cb.SetTextAsync(text);
+                ShowInfo($"Session name and id on the clipboard: {name} · {id}");
             }
             catch (Exception e) { ShowError("Could not use the clipboard: " + e.Message); }
         };
@@ -1013,6 +1017,10 @@ public partial class MainWindow : Window
                 sv.WaitingForUser = true;
                 if (cur) UpdateSendButton();
                 _ = w;
+                // A SUBAGENT's transcript is not one of the human's sessions: it is not in the sidebar and nobody can
+                // act on "it is waiting". It got into Needs attention because a child runs as a real AgentSession
+                // (reported 2026-10-18: a child session appeared in the block).
+                if (!CanNeedAttention(sv.Session.Info)) break;
                 // The turn is still running (it is parked on the human), so TurnEndEvent never fires for this case.
                 // Flag it as needing attention exactly like a finished turn, or a background session that asked a
                 // question sat there with no blue light (reported 2026-10-04).
@@ -1026,6 +1034,7 @@ public partial class MainWindow : Window
                 else MarkPendingAttention(sv.Id);       // parked on you while you watch it: the entry waits for you to leave
                 break;
             case TurnEndEvent:
+                if (!CanNeedAttention(sv.Session.Info)) break;   // a child is not a session you can answer
                 // a session you are looking at is on screen already: only other sessions wait for you
                 if (sv != _current)
                 {
@@ -2960,9 +2969,13 @@ public partial class MainWindow : Window
         if (UsageCache.Text != cache) UsageCache.Text = cache;
         if (UsageText2.Text != speed) UsageText2.Text = speed;
         if (UsageCost.Text != cost) UsageCost.Text = cost;
+        // A separator needs BOTH of its neighbours: a lone cost used to leave a dangling "·" at the start of line 2.
         SetVisible(UsageSep, cache.Length > 0);
-        SetVisible(UsageSep2, cost.Length > 0);
-        SetVisible(UsageLine2, speed.Length > 0 || cost.Length > 0);
+        SetVisible(UsageSep2, speed.Length > 0 && cost.Length > 0);
+        // the second ROW disappears when it has nothing; the grid keeps the column widths, so this costs no alignment
+        SetVisible(UsageText2, speed.Length > 0);
+        SetVisible(UsageCost, cost.Length > 0);
+        if (UsageText2.Parent is Grid grid) grid.RowDefinitions[1].Height = speed.Length > 0 || cost.Length > 0 ? GridLength.Auto : new GridLength(0);
     }
 
     void UpdateTodos()
@@ -3292,6 +3305,14 @@ public partial class MainWindow : Window
     /// </summary>
     /// <remarks>It must NOT rebuild the sidebar itself: it runs at the top of the rebuild, and re-entering there is how
     /// a recursive rebuild would start.</remarks>
+    /// <summary>
+    /// Whether a session may appear in "Needs attention". A SUBAGENT transcript may not: it is not one of the human's
+    /// sessions, it is not in the sidebar, and "it is waiting for you" is not something they can act on — a child runs
+    /// as a real <c>AgentSession</c>, so its turn ends exactly like a main one's and it reached the block that way
+    /// (reported 2026-10-18: a child session appeared there).
+    /// </summary>
+    internal static bool CanNeedAttention(SessionInfo info) => !info.Subagent;
+
     void PromotePendingAttention()
     {
         if (_settings.AttentionPending.Count == 0) return;
@@ -3299,6 +3320,9 @@ public partial class MainWindow : Window
         foreach (var id in _settings.AttentionPending.ToList())
         {
             if (_current != null && id == _current.Id) continue;       // still on screen: it stays deferred
+            // a SUBAGENT transcript is not a session the human can act on, so it never enters the block — and an entry
+            // left over from a build that did not know that is dropped here rather than promoted
+            if (_all.FirstOrDefault(i => i.Id == id) is { } info && !CanNeedAttention(info)) { _settings.AttentionPending.Remove(id); moved = true; continue; }
             _settings.AttentionPending.Remove(id);
             if (!_settings.AttentionSessions.Contains(id)) _settings.AttentionSessions.Add(id);
             moved = true;

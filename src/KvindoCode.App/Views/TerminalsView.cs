@@ -75,13 +75,12 @@ public sealed class TerminalsView : UserControl
         // terminal icon toggles the grid closed and each pane restarts itself from its own header, so a floating
         // "Back to session" and a grid-wide restart were duplicates sitting on top of the terminal text.
         //
-        // NO TITLE ROW AND NO FLOATING BUTTONS (2026-10-18: "this line is not needed, it consumes space" and then
-        // "also remove those 2 buttons in terminal"). The row only repeated the project name, and the two buttons it
-        // carried were redundant: the project header's terminal icon TOGGLES this grid closed, and every pane has its
-        // own restart button in its own header. So the grid is four panes and nothing else, and the project/hint text
-        // that used to hang off those controls is on the grid's tooltip instead.
-        ToolTip.SetTip(_grid, project + "\n\nEach pane is its own tmux session, so the scrollback survives a restart. " +
-            "From a real terminal: " + string.Join(" | ", backend.SessionNames(project, PaneCount).Select(s => "tmux attach -t " + s)));
+        // NO TITLE ROW, NO FLOATING BUTTONS AND NO TOOLTIP (2026-10-18: "this line is not needed, it consumes space",
+        // then "also remove those 2 buttons in terminal", then "this tooltip should be removed"). The row only repeated
+        // the project name; the buttons were redundant (the project header's terminal icon TOGGLES this grid closed and
+        // every pane restarts itself from its own header); and the hint that had been moved onto the grid's tooltip
+        // popped up over the terminal text on every hover, which is worse than not having it — the session names it
+        // listed are already in each pane's own tooltip.
 
         if (!_backend.IsAvailable)
         {

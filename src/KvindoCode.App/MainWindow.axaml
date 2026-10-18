@@ -111,7 +111,7 @@
               <!-- These act ON the session, so they belong beside its name, not in the row of view toggles on the
                    right (asked 2026-10-07). Copy name is first: it needs no session state to be useful. -->
               <StackPanel Grid.Column="1" x:Name="SessionIconBar" Orientation="Horizontal" Margin="6,0,0,0" VerticalAlignment="Center">
-                <Button x:Name="CopyNameBtn" Classes="ghost" Padding="6" ToolTip.Tip="Copy the session name to the clipboard"/>
+                <Button x:Name="CopyNameBtn" Classes="ghost" Padding="6" ToolTip.Tip="Copy the session name AND its id to the clipboard (the id is what another session or a command can use)"/>
                 <Button x:Name="RenameBtn" Classes="ghost" Padding="6" ToolTip.Tip="Rename session"/>
                 <Button x:Name="RegenBtn" Classes="ghost" Padding="6" ToolTip.Tip="Regenerate the title with AI"/>
                 <Button x:Name="PinBtn" Classes="ghost" Padding="6" ToolTip.Tip="Pin / unpin session"/>
@@ -140,23 +140,25 @@
               <Button x:Name="WorkspaceBtn" Classes="ghost" Padding="6,3" IsVisible="False" FontSize="12" ToolTip.Tip="This session works in its own git worktree. Click to copy the merge command."/>
             </StackPanel>
           </Grid>
-          <!-- Two right-aligned lines: the context/cache figures, then the speed and cost.
-               A GRID of two columns, not one TextBlock with a newline (asked 2026-10-18: "align columns"). The figures
-               in the two lines have different widths, so a right-aligned text block left the separator dots and the
-               "avg" suffixes in ragged positions; here every figure has its own cell and the separators line up.
-               Each cell keeps the old name for tests: UsageText (line 1) and UsageText2 (line 2). -->
-          <StackPanel Grid.Column="1" x:Name="UsagePanel" Classes="muted" Margin="0,0,10,0" VerticalAlignment="Center">
-            <Grid ColumnDefinitions="Auto,Auto,Auto">
-              <TextBlock x:Name="UsageText" FontSize="12" TextAlignment="Right" TextWrapping="NoWrap" HorizontalAlignment="Right"/>
-              <TextBlock Grid.Column="1" x:Name="UsageSep" FontSize="12" Text="  ·  " TextWrapping="NoWrap" VerticalAlignment="Center"/>
-              <TextBlock Grid.Column="2" x:Name="UsageCache" FontSize="12" TextWrapping="NoWrap" VerticalAlignment="Center"/>
-            </Grid>
-            <Grid x:Name="UsageLine2" ColumnDefinitions="Auto,Auto,Auto">
-              <TextBlock x:Name="UsageText2" FontSize="12" TextWrapping="NoWrap"/>
-              <TextBlock Grid.Column="1" x:Name="UsageSep2" FontSize="12" Text="  ·  " TextWrapping="NoWrap" VerticalAlignment="Center"/>
-              <TextBlock Grid.Column="2" x:Name="UsageCost" FontSize="12" TextWrapping="NoWrap"/>
-            </Grid>
-          </StackPanel>
+          <!-- A 2x2 GRID, one cell per figure (asked 2026-10-18: "align columns", then "those items should be aligned
+               as a 2x2 grid"). It used to be one TextBlock with a newline, so the figures on the two lines had
+               unrelated widths; then two separate grids, which aligned each line with itself but not with the other.
+               ONE grid with two rows and three columns shares the column widths between the rows, which is the only way
+               a figure on line 2 sits under a figure on line 1. Column 1 holds the separator, so it is shown only when
+               both of its neighbours exist — otherwise a lone cost left a dangling dot at the start of the line. -->
+          <Grid Grid.Column="1" x:Name="UsagePanel" Classes="muted" Margin="0,0,10,0" VerticalAlignment="Center"
+                RowDefinitions="Auto,Auto" ColumnDefinitions="Auto,Auto,Auto">
+            <TextBlock Grid.Row="0" Grid.Column="0" x:Name="UsageText" FontSize="12" TextAlignment="Right"
+                       TextWrapping="NoWrap" HorizontalAlignment="Right"/>
+            <TextBlock Grid.Row="0" Grid.Column="1" x:Name="UsageSep" FontSize="12" Text="  ·  "
+                       TextWrapping="NoWrap" VerticalAlignment="Center"/>
+            <TextBlock Grid.Row="0" Grid.Column="2" x:Name="UsageCache" FontSize="12" TextWrapping="NoWrap" VerticalAlignment="Center"/>
+            <TextBlock Grid.Row="1" Grid.Column="0" x:Name="UsageText2" FontSize="12" TextAlignment="Right"
+                       TextWrapping="NoWrap" HorizontalAlignment="Right"/>
+            <TextBlock Grid.Row="1" Grid.Column="1" x:Name="UsageSep2" FontSize="12" Text="  ·  "
+                       TextWrapping="NoWrap" VerticalAlignment="Center"/>
+            <TextBlock Grid.Row="1" Grid.Column="2" x:Name="UsageCost" FontSize="12" TextWrapping="NoWrap" VerticalAlignment="Center"/>
+          </Grid>
           <Button Grid.Column="2" x:Name="BrowserBtn" Classes="ghost" ToolTip.Tip="Chrome connection for the Browser tool">
             <StackPanel Orientation="Horizontal" Spacing="7" x:Name="BrowserContent"/>
           </Button>

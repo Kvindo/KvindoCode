@@ -38,7 +38,8 @@ public sealed class TerminalPaneView : UserControl
     bool _started;
 
     public int Index { get; }
-    public TerminalControl Terminal { get; }
+    /// <summary>The live terminal control. REPLACED by <see cref="Restart"/>, so it is not readonly.</summary>
+    public TerminalControl Terminal { get; private set; }
 
     /// <summary>Fired when this pane is clicked, so the grid can make it the one that receives the keyboard.</summary>
     public event Action<TerminalPaneView>? FocusRequested;
@@ -52,26 +53,7 @@ public sealed class TerminalPaneView : UserControl
         Index = index;
         Name = $"TerminalPane{index}";
 
-        Terminal = new TerminalControl
-        {
-            Name = $"Terminal{index}",
-            Process = "tmux",
-            BufferSize = 5000,                 // scrollback lines the emulator keeps, on top of tmux's own
-            CursorBlink = true,
-            AutoScrollToBottom = true,
-            FontFamily = new FontFamily(TerminalsView.MonoFont),
-            FontSize = 12.5,
-            HorizontalAlignment = HorizontalAlignment.Stretch,
-            VerticalAlignment = VerticalAlignment.Stretch,
-        };
-        // -A = attach if the session already exists (its scrollback comes back), create it otherwise.
-        Terminal.ProcessArgs = new List<string>(backend.LaunchArgs(project, index));
-        Terminal.StartingDirectory = project;
-        // A shell that EXITS (Ctrl+D, `exit`, a crash) must come back by itself: the pane is a terminal, not a
-        // one-shot command runner, and a dead pane with no way to restart it was the report "when i press Ctrl+D
-        // terminal exists and there is no way it could be restarted (it should restart automatically in that case)"
-        // (2026-10-18). The restart is bounded — a shell that dies instantly every time would otherwise spin.
-        Terminal.ProcessExited += (_, _) => AutoRestart();
+        Terminal = BuildTerminal();
 
         _name = new TextBox
         {
@@ -139,6 +121,36 @@ public sealed class TerminalPaneView : UserControl
             if (e.Source is Visual v && (v == _name || v.GetVisualAncestors().Contains(_name))) return;
             FocusRequested?.Invoke(this);
         }, RoutingStrategies.Tunnel);
+    }
+
+    /// <summary>A fresh terminal control for this pane, wired to a new PTY running the pane's tmux session.</summary>
+    /// <remarks>
+    /// A control is never REUSED after a restart. The library's own documentation warns that relaunching replaces the
+    /// process behind an existing control, and every symptom reported for this button ("restart this terminal doesnt
+    /// clear it up") is consistent with a relaunch that keeps the old screen model, its scrollback or its dead PTY. A
+    /// new control has no screen, no scrollback and no connection, so "start over" cannot be half-done.
+    /// </remarks>
+    TerminalControl BuildTerminal()
+    {
+        var t = new TerminalControl
+        {
+            Name = $"Terminal{Index}",
+            Process = "tmux",
+            BufferSize = 5000,                 // scrollback lines the emulator keeps, on top of tmux's own
+            CursorBlink = true,
+            AutoScrollToBottom = true,
+            FontFamily = new FontFamily(TerminalsView.MonoFont),
+            FontSize = 12.5,
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            VerticalAlignment = VerticalAlignment.Stretch,
+        };
+        // -A = attach if the session already exists (its scrollback comes back), create it otherwise.
+        t.ProcessArgs = new List<string>(_backend.LaunchArgs(_project, Index));
+        t.StartingDirectory = _project;
+        // A shell that EXITS (Ctrl+D, `exit`, a crash) must come back by itself: the pane is a terminal, not a
+        // one-shot command runner ("when i press Ctrl+D terminal exists and there is no way it could be restarted").
+        t.ProcessExited += (_, _) => AutoRestart();
+        return t;
     }
 
     /// <summary>
@@ -334,19 +346,26 @@ public sealed class TerminalPaneView : UserControl
     {
         _restarting = true;
         _exits = 0;                // a human asked: start the auto-restart budget over
-        // Kill the SESSION first: the PTY is the tmux client, so stopping the client leaves the server (and the pane,
-        // and its scrollback) alive and the next launch reattaches to all of it — which is why "restart this terminal
-        // doesnt clear it up" (reported 2026-10-18).
-        Stop();
+        // 1. End the tmux SESSION first — the PTY is only the client, and killing the client first leaves the server
+        //    holding the pane and its scrollback, which the relaunch then reattaches to (that order was wrong here).
         try { _backend.KillSession(_project, Index); } catch { /* already gone */ }
-        // ...and wipe the EMULATOR too. The tmux session is only half of what is on screen: the control keeps its own
-        // screen model plus up to BufferSize lines of scrollback, and neither notices that the process behind them is
-        // gone. ClearScreen erases both (ESC[2J and ESC[3J), so the pane really is blank before the new shell starts.
-        try { Terminal.ClearScreen(); } catch { /* not realised yet: nothing to wipe */ }
-        // recreated on the next frame, once the old process has really exited (the control launches only then)
+        // 2. Throw the CONTROL away. Relaunching the same control is what kept the old screen alive: it owns a screen
+        //    model, a scrollback buffer and a PTY, and none of them is reset by a new process on the same instance.
+        //    A brand-new control has none of those, so "start over" cannot be half-done.
+        _started = false;
+        _stopped = true;                       // the OLD control's exit must not trigger AutoRestart
+        var old = Terminal;
+        try { old.Kill(); } catch { /* already gone */ }
+        Terminal = BuildTerminal();
+        if (_frame.Child is DockPanel dock)
+        {
+            dock.Children.Remove(old);
+            dock.Children.Add(Terminal);
+        }
+        // 3. Launch on the next layout pass, when the new control has been measured. NOT gated on VisualRoot: a pane
+        //    that is not attached yet still restarts, and bailing there was a silent no-op.
         Dispatcher.UIThread.Post(() =>
         {
-            if (VisualRoot is null) return;
             _started = false;
             _stopped = false;
             Start();

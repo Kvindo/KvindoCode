@@ -69,7 +69,7 @@ public sealed class ReportedUiIssuesUiTests
 
         var project = app.Window.FindControl<TextBlock>("ProjectText")!;
         // the usage block is a panel of cells since 2026-10-18 ("align columns"); it is what gets shown or hidden
-        var usage = app.Window.FindControl<StackPanel>("UsagePanel")!;
+        var usage = app.Window.FindControl<Grid>("UsagePanel")!;
         var box = app.Window.FindControl<TextBox>("AskSearchBox");
         Assert.NotNull(usage);
         Assert.True(box is null || box.IsVisible || true);
