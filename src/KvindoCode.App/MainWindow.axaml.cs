@@ -122,11 +122,15 @@ public partial class MainWindow : Window
         {
             var name = _current?.Session.Info.Title;
             if (string.IsNullOrWhiteSpace(name)) { ShowInfo("No session is open."); return; }
+            // The ID travels WITH the name (asked 2026-10-18): a name is not unique and cannot be handed to another
+            // session or to a command, while the id can. Two lines, so a paste reads as a pair rather than a run-on.
+            var id = _current!.Session.Info.Id;
+            var text = string.IsNullOrWhiteSpace(id) ? name : name + "\n" + id;
             try
             {
                 var cb = TopLevel.GetTopLevel(this)?.Clipboard;
-                if (cb != null) await cb.SetTextAsync(name);
-                ShowInfo($"Session name on the clipboard: {name}");
+                if (cb != null) await cb.SetTextAsync(text);
+                ShowInfo($"Session name and id on the clipboard: {name} · {id}");
             }
             catch (Exception e) { ShowError("Could not use the clipboard: " + e.Message); }
         };
@@ -2965,9 +2969,13 @@ public partial class MainWindow : Window
         if (UsageCache.Text != cache) UsageCache.Text = cache;
         if (UsageText2.Text != speed) UsageText2.Text = speed;
         if (UsageCost.Text != cost) UsageCost.Text = cost;
+        // A separator needs BOTH of its neighbours: a lone cost used to leave a dangling "·" at the start of line 2.
         SetVisible(UsageSep, cache.Length > 0);
-        SetVisible(UsageSep2, cost.Length > 0);
-        SetVisible(UsageLine2, speed.Length > 0 || cost.Length > 0);
+        SetVisible(UsageSep2, speed.Length > 0 && cost.Length > 0);
+        // the second ROW disappears when it has nothing; the grid keeps the column widths, so this costs no alignment
+        SetVisible(UsageText2, speed.Length > 0);
+        SetVisible(UsageCost, cost.Length > 0);
+        if (UsageText2.Parent is Grid grid) grid.RowDefinitions[1].Height = speed.Length > 0 || cost.Length > 0 ? GridLength.Auto : new GridLength(0);
     }
 
     void UpdateTodos()

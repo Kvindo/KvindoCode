@@ -47,30 +47,36 @@ public sealed class MergeButtonAndUsageTests(ITestOutputHelper o)
         var cache = app.Window.FindControl<TextBlock>("UsageCache")!;
         var speed = app.Window.FindControl<TextBlock>("UsageText2")!;
         var cost = app.Window.FindControl<TextBlock>("UsageCost")!;
-        var line2 = app.Window.FindControl<Grid>("UsageLine2")!;
+        var panel = app.Window.FindControl<Grid>("UsagePanel")!;
         var sep = app.Window.FindControl<TextBlock>("UsageSep")!;
+        var sep2 = app.Window.FindControl<TextBlock>("UsageSep2")!;
         o.WriteLine($"line1: '{context.Text}' | '{cache.Text}'   sep visible={sep.IsVisible}");
-        o.WriteLine($"line2: '{speed.Text}' | '{cost.Text}'   visible={line2.IsVisible}");
+        o.WriteLine($"line2: '{speed.Text}' | '{cost.Text}'   visible={speed.IsVisible}");
 
         Assert.Contains("774.2k / 1M", context.Text);              // context used
         Assert.Contains("(77%)", context.Text);
         Assert.Contains("80% avg", cache.Text);                    // the session cache average
         Assert.Contains("tok/s avg5m", speed.Text);                // speed on the second line
         Assert.Contains("₽", cost.Text);                           // ...with the cost
-        Assert.True(line2.IsVisible);                              // both lines are on screen
-        Assert.True(sep.IsVisible);                                // and the first line really has two columns
+        Assert.True(speed.IsVisible && cost.IsVisible);             // both cells of the second row are filled
+        Assert.True(sep.IsVisible);                                // and the first row really has two columns
+        Assert.True(sep2.IsVisible);                               // ...as does the second
 
-        // ALIGNED means "in the same grid columns", which is checkable without font metrics: both lines use the same
-        // three-column template, so the separators sit at the same x. (Headless font metrics are a stub — every line is
-        // 0.8 × FontSize — so a measured WIDTH says nothing; a shared template says everything.)
-        var line1Grid = (Grid)context.Parent!;
-        var line2Grid = (Grid)speed.Parent!;
-        var l1 = line1Grid.ColumnDefinitions.Select(c => c.Width.ToString()).ToList();
-        var l2 = line2Grid.ColumnDefinitions.Select(c => c.Width.ToString()).ToList();
-        o.WriteLine("line1 columns: " + string.Join(",", l1));
-        o.WriteLine("line2 columns: " + string.Join(",", l2));
-        Assert.Equal(l1, l2);
-        Assert.Equal(Grid.GetColumn(sep), Grid.GetColumn(app.Window.FindControl<TextBlock>("UsageSep2")!));
+        // A 2x2 GRID means ONE grid: the four figures are cells of the same Grid, so the column widths are shared and a
+        // figure on row 2 lines up under the one on row 1. Two separate grids could only align each line with itself,
+        // which is what the user rejected ("those items should be aligned as a 2x2 grid").
+        Assert.Same(panel, context.Parent);
+        Assert.Same(panel, speed.Parent);
+        Assert.Equal(2, panel.RowDefinitions.Count);
+        Assert.Equal(3, panel.ColumnDefinitions.Count);
+        Assert.Equal(0, Grid.GetColumn(context)); Assert.Equal(0, Grid.GetRow(context));
+        Assert.Equal(2, Grid.GetColumn(cache));   Assert.Equal(0, Grid.GetRow(cache));
+        Assert.Equal(0, Grid.GetColumn(speed));   Assert.Equal(1, Grid.GetRow(speed));
+        Assert.Equal(2, Grid.GetColumn(cost));    Assert.Equal(1, Grid.GetRow(cost));
+        Assert.Equal(1, Grid.GetColumn(sep));
+        Assert.Equal(1, Grid.GetColumn(sep2));
+        o.WriteLine($"cells: ({Grid.GetRow(context)},{Grid.GetColumn(context)}) ({Grid.GetRow(cache)},{Grid.GetColumn(cache)}) " +
+                    $"({Grid.GetRow(speed)},{Grid.GetColumn(speed)}) ({Grid.GetRow(cost)},{Grid.GetColumn(cost)})");
     }
 
     /// <summary>With no cost and no speed yet, it stays ONE line rather than leaving an empty second one.</summary>
@@ -86,11 +92,43 @@ public sealed class MergeButtonAndUsageTests(ITestOutputHelper o)
         Dispatcher.UIThread.RunJobs();
 
         var context = app.Window.FindControl<TextBlock>("UsageText")!;
-        var line2 = app.Window.FindControl<Grid>("UsageLine2")!;
+        var panel = app.Window.FindControl<Grid>("UsagePanel")!;
         var sep = app.Window.FindControl<TextBlock>("UsageSep")!;
-        o.WriteLine($"line1: '{context.Text}' line2 visible={line2.IsVisible} sep visible={sep.IsVisible}");
-        Assert.False(line2.IsVisible);                       // nothing for the second line, so it is not there
+        o.WriteLine($"line1: '{context.Text}' row2={app.Window.FindControl<Grid>("UsagePanel")!.RowDefinitions[1].Height} sep visible={sep.IsVisible}");
+        Assert.Equal(new GridLength(0), app.Window.FindControl<Grid>("UsagePanel")!.RowDefinitions[1].Height);
         Assert.False(sep.IsVisible);                         // and no dangling separator on the first
+    }
+
+    /// <summary>With a cost but no speed yet, the cost sits in the RIGHT column and no separator dangles.</summary>
+    /// <remarks>
+    /// The screenshot that prompted this (2026-10-18) showed a second line that was just "· ₽18413.11": the separator
+    /// was shown because the cost existed, but its left neighbour (the speed) did not. It also sat in the MIDDLE column,
+    /// so it did not line up under the cache figure.
+    /// </remarks>
+    [AvaloniaFact]
+    public void A_cost_without_a_speed_sits_in_the_right_column_with_no_dangling_separator()
+    {
+        using var sb = new Sandbox();
+        using var app = SecretAuditorRealUiTests.StartUi(sb, new JsonArray { Script.Text("hi") });
+        var sv = app.Session;
+        sv.PromptTokens = 624_700;
+        sv.ContextWindow = 1_000_000;
+        sv.LifetimePromptTokens = 1_000_000;
+        sv.LifetimeCachedTokens = 950_000;
+        sv.CostRub = 18413.11;                                     // a cost, and NO throughput yet
+        typeof(MainWindow).GetMethod("UpdateUsage", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(app.Window, null);
+        Dispatcher.UIThread.RunJobs();
+
+        var speed = app.Window.FindControl<TextBlock>("UsageText2")!;
+        var cost = app.Window.FindControl<TextBlock>("UsageCost")!;
+        var sep2 = app.Window.FindControl<TextBlock>("UsageSep2")!;
+        var panel = app.Window.FindControl<Grid>("UsagePanel")!;
+        o.WriteLine($"speed='{speed.Text}' cost='{cost.Text}' sep2 visible={sep2.IsVisible} cost column={Grid.GetColumn(cost)}");
+        Assert.Contains("₽", cost.Text);
+        Assert.False(sep2.IsVisible);                              // nothing to its left: no dangling dot
+        Assert.Equal(2, Grid.GetColumn(cost));                      // aligned under the cache figure
+        Assert.NotEqual(new GridLength(0), panel.RowDefinitions[1].Height);
+        app.Window.Close();
     }
 
     // ---------------------------------------------------------------- the merge button

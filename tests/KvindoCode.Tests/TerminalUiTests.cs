@@ -683,13 +683,31 @@ public sealed class TerminalUiTests
             "the pane never came back live: " + PaneDiag(pane3));
         Assert.True(await Eventually(() => Task.FromResult(HasSession(session) && SessionPanePid(session) is var rp && rp > 0)));
         pidBefore = SessionPanePid(session);
-        terminals.TypeText("exit\r");
-        Assert.True(await Eventually(() => Task.FromResult(!HasSession(session))), "the shell did not exit");
+        // The exit is sent through TMUX, not typed into the control: right after a restart the keystroke can arrive
+        // while tmux is still starting and is consumed by it (measured: the same call works when the pane is warm and
+        // vanishes after a restart). What is under test here is the pane's RESPONSE to the shell ending, not the input
+        // path — Typing_reaches_the_active_pane_only covers that.
+        SendKeys(session, "exit", "Enter");
+        Assert.True(await Eventually(() => Task.FromResult(!HasSession(session))),
+            "the shell did not exit:\n" + Capture(session));
 
         // the pane relaunches by itself: a new session, a new shell
         Assert.True(await Eventually(() => Task.FromResult(HasSession(session) && SessionPanePid(session) is var p && p > 0 && p != pidBefore)),
             $"the pane did not come back after the shell exited (session={HasSession(session)} pid={SessionPanePid(session)})");
         _out.WriteLine($"came back: {session} pid {pidBefore} -> {SessionPanePid(session)}");
+    }
+
+    /// <summary>Send keys to a tmux session, as a user at that terminal would.</summary>
+    void SendKeys(string session, params string[] keys)
+    {
+        using var p = Process.Start(new ProcessStartInfo("tmux")
+        {
+            UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true,
+            ArgumentList = { "-L", _socket, "send-keys", "-t", session, keys[0], keys.Length > 1 ? keys[1] : "" },
+        })!;
+        p.StandardOutput.ReadToEnd();
+        p.StandardError.ReadToEnd();
+        p.WaitForExit(10_000);
     }
 
     /// <summary>The whole visible buffer of a terminal control, as text (the emulator's own screen model).</summary>
