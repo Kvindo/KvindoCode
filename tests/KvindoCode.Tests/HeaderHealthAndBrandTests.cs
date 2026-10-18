@@ -405,3 +405,41 @@ public sealed class HeaderHealthAndBrandTests(ITestOutputHelper o)
         Assert.True(Math.Abs(pct.Value - expected) < 1.0, $"shown {pct:0.#}% vs df {expected:0.#}%");
     }
 }
+
+/// <summary>
+/// The brand mark must not touch its own canvas edge.
+/// </summary>
+/// <remarks>
+/// Reported 2026-10-19: "Kvindo brand icon on the right middle part has part of background". Measured on the asset: the
+/// artwork was CLIPPED by its 64 px canvas — 15 fully opaque rows sat on the right-hand edge column and 26 on the top
+/// row — so at 34 px in the sidebar it read as a straight vertical cut, with a sliver of something that is not the mark
+/// beside it. A logo that bleeds off its own box has no margin to shrink into, so the asset now carries a 6% inset and
+/// this test keeps it that way.
+/// </remarks>
+public sealed class BrandMarkAssetTests
+{
+    // AvaloniaFact: the asset loader needs the platform services the headless harness sets up.
+    [Avalonia.Headless.XUnit.AvaloniaFact]
+    public void The_mark_does_not_bleed_off_its_canvas()
+    {
+        // Loaded through the SAME avares URI the window uses, so the test cannot pass on a file that the app does not
+        // actually ship.
+        using var stream = Avalonia.Platform.AssetLoader.Open(new Uri("avares://kvindocode/Assets/kvindo-k.png"));
+        using var bmp = new Avalonia.Media.Imaging.Bitmap(stream);
+        Assert.Equal(64, bmp.PixelSize.Width);          // square, so Width == Height in the Image element stays true
+        Assert.Equal(64, bmp.PixelSize.Height);
+        // Read the pixels with Bitmap.CopyPixels: the asset is small and this runs once.
+        var w = bmp.PixelSize.Width; var h = bmp.PixelSize.Height;
+        var bytes = new byte[w * h * 4];
+        unsafe
+        {
+            fixed (byte* p = bytes)
+                bmp.CopyPixels(new Avalonia.PixelRect(0, 0, w, h), (IntPtr)p, bytes.Length, w * 4);
+        }
+        int Ink(int x, int y) => bytes[(y * w + x) * 4 + 3];      // BGRA: alpha
+        var border = 0;
+        for (var x = 0; x < w; x++) { if (Ink(x, 0) > 10) border++; if (Ink(x, h - 1) > 10) border++; }
+        for (var y = 0; y < h; y++) { if (Ink(0, y) > 10) border++; if (Ink(w - 1, y) > 10) border++; }
+        Assert.True(border == 0, $"{border} pixels of the mark touch its canvas edge — the artwork is clipped");
+    }
+}
