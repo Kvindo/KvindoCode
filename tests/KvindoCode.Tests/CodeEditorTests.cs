@@ -6,7 +6,9 @@ using System.Text.Json.Nodes;
 using System.Threading.Tasks;
 using Avalonia;                          // TranslatePoint returns an Avalonia.Point
 using Avalonia.Controls;
+using Avalonia.Headless;                 // MouseDown/KeyPress: the real input pipeline
 using Avalonia.Headless.XUnit;
+using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Threading;
 using Avalonia.VisualTree;
@@ -339,6 +341,138 @@ public sealed class CodeEditorTests(ITestOutputHelper o)
         o.WriteLine($"back to the session: top bar visible={topBar.IsVisible}");
         Assert.True(topBar.IsVisible);
         win.Close();
+    }
+
+    /// <summary>A single left click on a file row opens that file.</summary>
+    /// <remarks>
+    /// The report was "when i click on file it wont open" (2026-10-18), and the cause was SelectionChanged: it does not
+    /// fire when the row is ALREADY selected, so the file you had looked at before could never be reopened by clicking
+    /// it. This drives a real pointer through the window, and clicks the same row TWICE — the second click is the case
+    /// the old handler missed. Revert-check: replace the PointerReleased handler with SelectionChanged and the second
+    /// half fails.
+    /// </remarks>
+    [AvaloniaFact]
+    public async Task A_single_click_opens_a_file_even_when_it_is_already_selected()
+    {
+        using var sb = new Sandbox();
+        var (win, _) = Start(sb);
+        var a = sb.Write("first.py", "a = 1\n");
+        sb.Write("second.py", "b = 2\n");
+        var view = Open(win, sb.Project);
+        win.Measure(new Avalonia.Size(1400, 900));
+        win.Arrange(new Avalonia.Rect(0, 0, 1400, 900));
+        Dispatcher.UIThread.RunJobs();
+
+        var tree = Field<TreeView>(view, "_tree");
+        var row = tree.GetVisualDescendants().OfType<TreeViewItem>()
+            .First(i => (i.Tag as string) == a);
+        o.WriteLine($"row bounds={row.Bounds}");
+        foreach (var it in tree.GetVisualDescendants().OfType<TreeViewItem>())
+            o.WriteLine($"  item '{Path.GetFileName((it.Tag as string) ?? "?")}' bounds={it.Bounds} origin={it.TranslatePoint(new Avalonia.Point(0, 0), tree)} visible={it.IsVisible}");
+        var probe = row.TranslatePoint(new Avalonia.Point(20, row.Bounds.Height / 2), tree)!.Value;
+        o.WriteLine($"probe in tree = {probe}; tree bounds={tree.Bounds}");
+        var hitMethod = typeof(CodeEditorView).GetMethod("ItemAt", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var hit = hitMethod.Invoke(view, new object[] { probe });
+        o.WriteLine("ItemAt(probe) = " + ((hit as TreeViewItem)?.Tag as string ?? "<null>"));
+
+        ClickAt(win, row);
+        Assert.True(await Eventually(() => Task.FromResult(view.OpenPath == a)),
+            "the first click did not open the file; open=" + view.OpenPath);
+
+        // open the OTHER file, then click the first one again: it is no longer selected, and must open again
+        await view.OpenFileAsync(Path.Combine(sb.Project, "second.py"));
+        Assert.Equal(Path.Combine(sb.Project, "second.py"), view.OpenPath);
+        ClickAt(win, row);
+        Assert.True(await Eventually(() => Task.FromResult(view.OpenPath == a)),
+            "clicking the row again did not reopen it; open=" + view.OpenPath);
+        win.Close();
+    }
+
+    /// <summary>A right click on a row opens the file manager's context menu.</summary>
+    [AvaloniaFact]
+    public void Right_clicking_a_tree_row_opens_a_context_menu()
+    {
+        using var sb = new Sandbox();
+        var (win, _) = Start(sb);
+        var a = sb.Write("first.py", "a = 1\n");
+        var view = Open(win, sb.Project);
+        win.Measure(new Avalonia.Size(1400, 900));
+        win.Arrange(new Avalonia.Rect(0, 0, 1400, 900));
+        Dispatcher.UIThread.RunJobs();
+
+        var tree = Field<TreeView>(view, "_tree");
+        var row = tree.GetVisualDescendants().OfType<TreeViewItem>().First(i => (i.Tag as string) == a);
+        var point = row.TranslatePoint(new Avalonia.Point(20, row.Bounds.Height / 2), win)!.Value;
+        win.MouseMove(point);
+        win.MouseDown(point, MouseButton.Right);
+        win.MouseUp(point, MouseButton.Right);
+        Dispatcher.UIThread.RunJobs();
+
+        var menu = view.LastContextMenu;
+        Assert.NotNull(menu);
+        var headers = menu!.ItemsSource!.Cast<object>().OfType<MenuItem>().Select(m => m.Header as string).ToList();
+        o.WriteLine("menu: " + string.Join(" | ", headers));
+        foreach (var expected in new[] { "New file", "New folder", "Rename", "Copy", "Paste", "Duplicate", "Delete", "Open in terminal" })
+            Assert.Contains(expected, headers);
+        win.Close();
+    }
+
+    /// <summary>Ctrl+C then Ctrl+V on the tree copies the selected entry into the selected folder.</summary>
+    /// <remarks>
+    /// Reported as "CtrlC + CtrlV doesnt work on tree items". The shortcuts were bound to the TREE, but clicking a row
+    /// left the keyboard in the editor, so they never fired. The click handler now focuses the tree first; this drives
+    /// the keys through the window, as a keyboard would, with the tree focused.
+    /// </remarks>
+    [AvaloniaFact]
+    public void Ctrl_c_and_ctrl_v_copy_a_tree_item()
+    {
+        using var sb = new Sandbox();
+        var (win, _) = Start(sb);
+        var a = sb.Write("first.py", "a = 1\n");
+        Directory.CreateDirectory(Path.Combine(sb.Project, "sub"));
+        var view = Open(win, sb.Project);
+        win.Measure(new Avalonia.Size(1400, 900));
+        win.Arrange(new Avalonia.Rect(0, 0, 1400, 900));
+        Dispatcher.UIThread.RunJobs();
+
+        var tree = Field<TreeView>(view, "_tree");
+        var fileRow = tree.GetVisualDescendants().OfType<TreeViewItem>().First(i => (i.Tag as string) == a);
+        ClickAt(win, fileRow);                       // selects it AND keeps the keyboard in the tree
+        Dispatcher.UIThread.RunJobs();
+        // THE contract the report was about: after clicking a file, the keyboard must be in the TREE. Two things broke
+        // it — the TreeView was not focusable at all (so it never got a key event, whatever the handler said), and
+        // opening the file then called _editor.Focus(), taking the keyboard away again.
+        o.WriteLine($"tree focusable={tree.Focusable} focused={tree.IsFocused} editor focused={view.Editor.IsFocused} open={view.OpenPath}");
+        Assert.True(tree.Focusable, "the tree is not focusable, so its shortcuts can never fire");
+        Assert.True(tree.IsFocused, "clicking a file did not leave the keyboard in the tree");
+
+        win.KeyPress(Avalonia.Input.Key.C, Avalonia.Input.RawInputModifiers.Control, Avalonia.Input.PhysicalKey.C, null);
+        win.KeyRelease(Avalonia.Input.Key.C, Avalonia.Input.RawInputModifiers.Control, Avalonia.Input.PhysicalKey.C, null);
+        Dispatcher.UIThread.RunJobs();
+        o.WriteLine("copied field: " + Field<string>(view, "_copied"));
+
+        // now select the folder and paste
+        var subRow = tree.GetVisualDescendants().OfType<TreeViewItem>().First(i => (i.Tag as string) == Path.Combine(sb.Project, "sub"));
+        tree.SelectedItem = subRow;
+        Dispatcher.UIThread.RunJobs();
+        win.KeyPress(Avalonia.Input.Key.V, Avalonia.Input.RawInputModifiers.Control, Avalonia.Input.PhysicalKey.V, null);
+        win.KeyRelease(Avalonia.Input.Key.V, Avalonia.Input.RawInputModifiers.Control, Avalonia.Input.PhysicalKey.V, null);
+        Dispatcher.UIThread.RunJobs();
+
+        var pasted = Path.Combine(sb.Project, "sub", "first.py");
+        o.WriteLine($"pasted exists={File.Exists(pasted)}");
+        Assert.True(File.Exists(pasted), "Ctrl+V did not copy the file into the selected folder");
+        Assert.Equal("a = 1\n", File.ReadAllText(pasted));
+        win.Close();
+    }
+
+    static void ClickAt(Window w, Control c)
+    {
+        var point = c.TranslatePoint(new Avalonia.Point(20, c.Bounds.Height / 2), w) ?? throw new InvalidOperationException("not laid out");
+        w.MouseMove(point);
+        w.MouseDown(point, MouseButton.Left);
+        w.MouseUp(point, MouseButton.Left);
+        Dispatcher.UIThread.RunJobs();
     }
 
     static async Task<bool> Eventually(Func<Task<bool>> cond, int ms = 6000)
