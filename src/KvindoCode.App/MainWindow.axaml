@@ -102,7 +102,7 @@
       <Border Grid.Row="0" Classes="edge" Height="52" BorderThickness="0,0,0,1" x:Name="TopBar" Padding="22,0,10,0">
         <Grid ColumnDefinitions="*,Auto,Auto,Auto,Auto,Auto">
           <!-- One control per column: sharing a column is what makes two texts draw over each other. -->
-          <Grid ColumnDefinitions="*,Auto,Auto,Auto,Auto" VerticalAlignment="Center" Margin="0,0,12,0">
+          <Grid ColumnDefinitions="*,Auto,Auto,Auto,Auto,Auto" VerticalAlignment="Center" Margin="0,0,12,0">
             <!-- The title lives in a *-column INSIDE this group so it truncates instead of overlapping: with an Auto
                  column a long session name kept its full width and ran under the icons and the search box
                  (reported 2026-10-08). The icons stay adjacent to the name because their column is Auto next to it. -->
@@ -117,7 +117,6 @@
                 <Button x:Name="PinBtn" Classes="ghost" Padding="6" ToolTip.Tip="Pin / unpin session"/>
               </StackPanel>
             </Grid>
-            <TextBlock Grid.Column="1" x:Name="ProjectText" Classes="muted" FontSize="12.5" TextTrimming="CharacterEllipsis" MaxWidth="200" Margin="8,0,0,0" VerticalAlignment="Center"/>
             <!-- Find moved to the SIDE PANEL (asked 2026-10-15): a result list needs room and you want to click through
                  results. This button opens it and searches the whole history, not just the rendered window. -->
             <!-- An ICON, not the word "Find": it sits in a row of icon buttons (pin, panel, attach) and the label made
@@ -139,6 +138,11 @@
                       ToolTip.Tip="Ask the model to merge this session's work (its own worktree branch) and push it — into dev where the repository has one, otherwise the mainline. It runs the tests before pushing and reports what it merged."/>
               <Button x:Name="WorkspaceBtn" Classes="ghost" Padding="6,3" IsVisible="False" FontSize="12" ToolTip.Tip="This session works in its own git worktree. Click to copy the merge command."/>
             </StackPanel>
+            <!-- The project name sits AFTER the workspace chip (asked 2026-10-19: "lets move project name after this
+                 icon" — the icon being the isolation chip, whose tooltip says which branch this session works on).
+                 Reading order is now: session title, what you can do to it, where it lives, what it is branched from. -->
+            <TextBlock Grid.Column="5" x:Name="ProjectText" Classes="muted" FontSize="12.5" TextTrimming="CharacterEllipsis"
+                       MaxWidth="200" Margin="8,0,0,0" VerticalAlignment="Center"/>
           </Grid>
           <!-- A 2x2 GRID, one cell per figure (asked 2026-10-18: "align columns", then "those items should be aligned
                as a 2x2 grid"). It used to be one TextBlock with a newline, so the figures on the two lines had
