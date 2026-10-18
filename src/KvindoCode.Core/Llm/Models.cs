@@ -14,6 +14,18 @@ public sealed class ChatMessage
 {
     public string Role { get; set; } = "user";           // user | assistant | tool
     public string? Content { get; set; }
+    /// <summary>
+    /// What the human actually typed, when <see cref="Content"/> was wrapped in injected text (the configured prompt
+    /// prefix/suffix, UserPromptSubmit hook context).
+    /// </summary>
+    /// <remarks>
+    /// Stored rather than re-derived. The wrap used to be stripped on replay by matching the CURRENT settings, so
+    /// editing the prefix/suffix — or growing it, which is exactly what the user did — left the old words visible in
+    /// every historic message ("when i open transcript i see text after every prompt in all historic messages",
+    /// 2026-10-18). Null for a message that was never wrapped, and for everything written before this field existed;
+    /// the replay then falls back to the best-effort strip.
+    /// </remarks>
+    public string? Display { get; set; }
     public string? Reasoning { get; set; }                // never sent back to the API
     public List<ToolCall>? ToolCalls { get; set; }
     public string? ToolCallId { get; set; }
