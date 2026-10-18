@@ -720,14 +720,28 @@ public sealed class CodeEditorView : UserControl
     // ---------------------------------------------------------------- the bottom terminal
 
     /// <summary>A terminal panel docked at the bottom, the way VS Code has one.</summary>
+    /// <summary>The bottom panel: a title bar and a LIST OF TERMINAL TABS on the right, as VS Code has.</summary>
+    /// <remarks>
+    /// Asked 2026-10-18: "terminal in file manager doesnt have right part with switching between sessions like vs code
+    /// does". The panel used to show exactly one terminal. It now keeps one per directory: opening a terminal in another
+    /// folder adds a tab instead of replacing the pane, so you can switch between them — and each tab is its own tmux
+    /// session, so switching does not lose a running command.
+    /// </remarks>
     Border BuildTerminalPanel()
     {
-        var head = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto"), Height = 24, Margin = new Thickness(8, 0, 4, 0) };
+        var head = new Grid { ColumnDefinitions = new ColumnDefinitions("Auto,*,Auto"), Height = 24, Margin = new Thickness(8, 0, 4, 0) };
+        _terminalTitle.FontSize = 11.5;
         head.Children.Add(_terminalTitle);
+        _terminalTabs.Orientation = Orientation.Horizontal;
+        _terminalTabs.Spacing = 2;
+        _terminalTabs.VerticalAlignment = VerticalAlignment.Center;
+        _terminalTabs.HorizontalAlignment = HorizontalAlignment.Right;
+        Grid.SetColumn(_terminalTabs, 1);
+        head.Children.Add(_terminalTabs);
         var hide = new Button { Name = "EditorTerminalClose", Classes = { "ghost" }, Padding = new Thickness(6), Content = Ui.Icon("IconX", "KvMuted", 12) };
         ToolTip.SetTip(hide, "Hide the terminal panel (F4)");
         hide.Click += (_, _) => ToggleTerminal();
-        Grid.SetColumn(hide, 1);
+        Grid.SetColumn(hide, 2);
         head.Children.Add(hide);
 
         var host = new Border
@@ -741,6 +755,51 @@ public sealed class CodeEditorView : UserControl
         return host;
     }
 
+    /// <summary>The tab strip on the right of the terminal panel's title bar.</summary>
+    readonly StackPanel _terminalTabs = new();
+
+    /// <summary>One terminal per directory, keyed by that directory; the visible one is the selected tab.</summary>
+    readonly Dictionary<string, TerminalPaneView> _terminals = new(StringComparer.Ordinal);
+
+    /// <summary>Rebuild the tab strip from the open terminals.</summary>
+    void RefreshTerminalTabs()
+    {
+        _terminalTabs.Children.Clear();
+        foreach (var (dir, pane) in _terminals.OrderBy(kv => kv.Key, StringComparer.Ordinal))
+        {
+            var name = Path.GetFileName(dir.TrimEnd('/')) is { Length: > 0 } n ? n : "/";
+            var active = ReferenceEquals(pane, _terminalPane);
+            var tab = new Button
+            {
+                Name = "EditorTerminalTab-" + name,
+                Content = name,
+                FontSize = 11,
+                Padding = new Thickness(7, 1),
+                Classes = { active ? "plan" : "ghost" },
+            };
+            ToolTip.SetTip(tab, dir);
+            tab.Click += (_, _) => SelectTerminal(dir);
+            _terminalTabs.Children.Add(tab);
+        }
+    }
+
+    /// <summary>Show the terminal for a directory that is already open, without restarting anything.</summary>
+    void SelectTerminal(string dir)
+    {
+        if (!_terminals.TryGetValue(dir, out var pane)) return;
+        if (!ReferenceEquals(pane, _terminalPane) && _terminalHost.Child is DockPanel dock)
+        {
+            if (_terminalPane is { } old) dock.Children.Remove(old);
+            dock.Children.Add(pane);
+            _terminalPane = pane;
+        }
+        _terminalDir = dir;
+        _terminalTitle.Text = "Terminal — " + (Path.GetFileName(dir.TrimEnd('/')) is { Length: > 0 } n2 ? n2 : dir);
+        _terminalHost.IsVisible = true;
+        pane.FocusTerminal();
+        RefreshTerminalTabs();
+    }
+
     /// <summary>Show or hide the bottom terminal.</summary>
     void ToggleTerminal()
     {
@@ -750,15 +809,18 @@ public sealed class CodeEditorView : UserControl
     /// <summary>Open the bottom terminal, rooted at <paramref name="dir"/>.</summary>
     void ShowTerminalAt(string dir)
     {
-        if (_terminalPane is not null && _terminalDir == dir) { _terminalHost.IsVisible = true; _terminalPane.FocusTerminal(); return; }
-        CloseTerminalPane();                 // stops the old pane AND hides the host; the line below shows it again
+        // Already open: just select its tab. This is the whole point of keeping them — switching does not restart.
+        if (_terminals.ContainsKey(dir)) { SelectTerminal(dir); return; }
         _terminalHost.IsVisible = true;
         _terminalDir = dir;
         var backend = new KvindoCode.Core.Terminal.TmuxBackend(socketName: Environment.GetEnvironmentVariable("KVINDOCODE_TMUX_SOCKET"));
         var pane = new TerminalPaneView(backend, dir, 0);
+        _terminals[dir] = pane;
+        if (_terminalPane is { } previous && _terminalHost.Child is DockPanel d0) d0.Children.Remove(previous);
         _terminalPane = pane;
-        _terminalTitle.Text = "Terminal — " + Path.GetRelativePath(_root, dir).Replace("/", "/") is { Length: > 0 } rel and not "." ? rel : Path.GetFileName(dir.TrimEnd('/'));
+        _terminalTitle.Text = "Terminal — " + (Path.GetFileName(dir.TrimEnd('/')) is { Length: > 0 } n ? n : dir);
         if (_terminalHost.Child is DockPanel dock) dock.Children.Add(pane);
+        RefreshTerminalTabs();
         // the pane launches its PTY when it is attached, which happens on the next layout pass
         Dispatcher.UIThread.Post(() => { pane.Start(); pane.FocusTerminal(); }, DispatcherPriority.Loaded);
     }
@@ -767,7 +829,9 @@ public sealed class CodeEditorView : UserControl
     void CloseTerminalPane()
     {
         _terminalHost.IsVisible = false;
-        if (_terminalPane is { } pane)
+        // Hiding the panel stops every PTY client but keeps the panes and their tmux sessions, so reopening brings each
+        // tab back with its scrollback (the sessions live in the tmux server, as in the grid).
+        foreach (var pane in _terminals.Values)
         {
             try { pane.Stop(); } catch { }
             if (_terminalHost.Child is DockPanel dock) dock.Children.Remove(pane);
