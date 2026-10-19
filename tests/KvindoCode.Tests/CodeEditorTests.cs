@@ -242,10 +242,11 @@ public sealed class CodeEditorTests(ITestOutputHelper o)
         o.WriteLine("texts: " + string.Join(" | ", texts.Where(t => t.Length > 0).Take(8)));
         Assert.DoesNotContain(texts, t => t.StartsWith("Files —", StringComparison.Ordinal));
 
-        // ...and the operations are all still there, inside the tree column (left of the editor)
-        // The operation ICONS were removed on request ("this icons are not needed, search should be opened"): every
-        // operation is in the right-click menu and on a shortcut, and only "back" stays reachable by mouse.
-        var names = new[] { "EditorBack" };
+        // ...and the search controls are inside the tree column (left of the editor)
+        // The operation ICONS were removed on request ("this icons are not needed, search should be opened"), and then
+        // the back chevron too ("remove back to session icon"). What remains in the tree column is the SEARCH controls:
+        // the filter box and the button that opens the project-wide find/replace panel.
+        var names = new[] { "EditorSearchFiles" };
         var buttons = view.GetVisualDescendants().OfType<Button>().Where(b => b.Name is not null).ToList();
         foreach (var n in names)
             Assert.Contains(buttons, b => b.Name == n);
@@ -448,7 +449,7 @@ public sealed class CodeEditorTests(ITestOutputHelper o)
         var x2 = X("a/b/c");
         o.WriteLine($"indent per level: a={x0:0} a/b={x1:0} a/b/c={x2:0}  steps={x1 - x0:0},{x2 - x1:0}");
         Assert.Equal(x1 - x0, x2 - x1, 1);                       // one consistent step per level
-        Assert.True(x1 - x0 <= 12, $"each level indents {x1 - x0:0} px — too deep for a 300 px column");
+        Assert.True(x1 - x0 <= 6, $"each level indents {x1 - x0:0} px — too deep for a 300 px column");
         win.Close();
     }
 

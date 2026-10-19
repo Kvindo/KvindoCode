@@ -303,14 +303,14 @@
     <Style Selector="TreeView.compact TreeViewItem /template/ ToggleButton#PART_ExpandCollapseChevron">
       <Setter Property="MinHeight" Value="0"/>
       <Setter Property="Height" Value="20"/>
-      <Setter Property="Width" Value="16"/>
+      <Setter Property="Width" Value="12"/>
       <Setter Property="Padding" Value="0"/>
       <Setter Property="Margin" Value="0"/>
     </Style>
-    <!-- 8 px per level, measured: the step is the chevron column (16) plus this margin, so a deep tree stays readable in
-         a 300 px column ("hierarchical offsets are too big", 2026-10-18). VS Code indents by about the same. -->
+    <!-- The step per level is the chevron column plus this margin: 12 + 4 = 16 px, half the 32 it started at (asked
+         2026-10-19: "offsets of tree item are still too big, lets decrease by 50%"). -->
     <Style Selector="TreeView.compact TreeViewItem /template/ ItemsPresenter#PART_ItemsPresenter">
-      <Setter Property="Margin" Value="8,0,0,0"/>
+      <Setter Property="Margin" Value="4,0,0,0"/>
     </Style>
   </Application.Styles>
 

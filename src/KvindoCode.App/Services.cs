@@ -41,6 +41,14 @@ public sealed class SessionView
     public bool RemoveQueued(QueuedMessage message) { lock (_queueLock) return Queue.Remove(message); }
     public string Draft { get; set; } = "";
     /// <summary>
+    /// Set when the header's merge button was used: the worktree may be removed once the session's branch is merged
+    /// and nothing is left uncommitted. Cleared when it is removed or when the check keeps it.
+    /// </summary>
+    /// <remarks>Asked 2026-10-19: "I never delete session. I want on merge button after session is merged remove
+    /// worktree". The button sends the merge instruction; this is what makes the cleanup follow the merge instead of
+    /// waiting for the next app start.</remarks>
+    public bool CleanupWorktreeAfterMerge { get; set; }
+    /// <summary>
     /// Prompts the user sent in this session, for ↑/↓ recall in the composer (asked 2026-10-09, like [CC]). Held per
     /// view and bounded, so a long session does not grow it without limit.
     /// </summary>

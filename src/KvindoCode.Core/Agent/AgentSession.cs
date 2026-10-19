@@ -1461,12 +1461,16 @@ public sealed class AgentSession : IDisposable
     {
         get
         {
-            lock (_lock)
-                return _context.Where(m => m.Role == "user" && !m.IsSummary && !m.IsNotification && !m.IsInternal
-                                           && !string.IsNullOrWhiteSpace(m.Content))
-                               .Select(m => m.Content!)
-                               .TakeLast(100)
-                               .ToList();
+            // The HUMAN'S words, not the outbound content: m.Content carries the injected prefix/suffix and the hook
+            // context, so walking ↑ used to put that block back into the composer ("when i enter arrow up i still see
+            // my message with injected text", 2026-10-19). DisplayUserText is the same clean-up the transcript uses.
+            List<ChatMessage> msgs;
+            lock (_lock) msgs = _context.Where(m => m.Role == "user" && !m.IsSummary && !m.IsNotification && !m.IsInternal
+                                                    && !string.IsNullOrWhiteSpace(m.Content)).ToList();
+            return msgs.Select(m => m.Display is { Length: > 0 } own ? own : DisplayUserText(m))
+                       .Where(t => !string.IsNullOrWhiteSpace(t))
+                       .TakeLast(100)
+                       .ToList();
         }
     }
 
