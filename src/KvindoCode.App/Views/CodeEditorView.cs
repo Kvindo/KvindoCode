@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using Avalonia;
 using Avalonia.Controls;
@@ -557,6 +558,17 @@ public sealed class CodeEditorView : UserControl
         row.Children.Add(_replaceInFile);
         row.Children.Add(Btn("IconReplace", "Replace this match", () => ReplaceInFile(false), "EditorReplaceOne"));
         row.Children.Add(Btn("IconCheck", "Replace all matches in this file", () => ReplaceInFile(true), "EditorReplaceAll"));
+        // REGEX toggle (asked 2026-10-19: "i also want regexp search in file manager across opened file"). Off by
+        // default: a literal search is what most finds are, and a stray "(" must not silently become a pattern.
+        _findRegex = new Avalonia.Controls.Primitives.ToggleButton
+        {
+            Name = "EditorFindRegex", Classes = { "ghost" }, Padding = new Thickness(6), MinWidth = 0,
+            Content = new TextBlock { Text = ".*", FontFamily = new FontFamily(TerminalsView.MonoFont), FontSize = 12 },
+            IsChecked = false,
+        };
+        ToolTip.SetTip(_findRegex, "Treat the search text as a regular expression (case-sensitive, like VS Code's .* toggle)");
+        _findRegex.IsCheckedChanged += (_, _) => { _status.Text = _findRegex.IsChecked == true ? "regex" : "saved"; };
+        row.Children.Add(_findRegex);
         var close = Btn("IconX", "Close (Esc)", HideFindBar, "EditorFindClose");
         row.Children.Add(close);
 
@@ -579,31 +591,54 @@ public sealed class CodeEditorView : UserControl
         _editor.Focus();
     }
 
-    /// <summary>Move the caret to the next (or previous) occurrence of the find text, wrapping around.</summary>
+    Avalonia.Controls.Primitives.ToggleButton? _findRegex;
+
+    /// <summary>
+    /// The matcher for the current find text: a regex when the .* toggle is on, a literal otherwise.
+    /// </summary>
+    /// <remarks>
+    /// One place builds it, so find/replace/replace-all cannot disagree about what matches. A REGEX is case-SENSITIVE
+    /// unless the pattern says otherwise (that is what VS Code's .* does), while a literal search is case-INSENSITIVE —
+    /// the behaviour each mode is expected to have. An invalid pattern returns null, and the caller says so in the
+    /// status text rather than throwing out of a keystroke handler.
+    /// </remarks>
+    Regex? Matcher(string needle, out string? error)
+    {
+        error = null;
+        if (needle.Length == 0) return null;
+        if (_findRegex?.IsChecked != true)
+            return new Regex(Regex.Escape(needle), RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        try { return new Regex(needle, RegexOptions.CultureInvariant); }
+        catch (ArgumentException e) { error = e.Message; return null; }
+    }
+
+    /// <summary>Move the caret to the next (or previous) match, wrapping around.</summary>
     void FindNextInFile(bool backwards)
     {
         var needle = _findInFile.Text ?? "";
         if (needle.Length == 0) { _findInFileStatus.Text = ""; return; }
+        var rx = Matcher(needle, out var error);
+        if (rx is null) { _findInFileStatus.Text = error is null ? "" : "bad pattern"; return; }
         var text = _editor.Text ?? "";
-        var hits = CountOccurrences(text, needle);
-        if (hits == 0) { _findInFileStatus.Text = "no results"; return; }
+        var all = rx.Matches(text).Cast<System.Text.RegularExpressions.Match>().ToList();
+        if (all.Count == 0) { _findInFileStatus.Text = "no results"; return; }
         var start = _editor.SelectionStart;
-        int at;
+        System.Text.RegularExpressions.Match pick;
         if (backwards)
-        {
-            at = text.LastIndexOf(needle, Math.Max(0, start - 1), StringComparison.OrdinalIgnoreCase);
-            if (at < 0) at = text.LastIndexOf(needle, StringComparison.OrdinalIgnoreCase);
-        }
+            pick = all.LastOrDefault(m => m.Index < start) ?? all[^1];
         else
         {
-            var from = Math.Min(text.Length, start + Math.Max(1, _editor.SelectionLength));
-            at = text.IndexOf(needle, from, StringComparison.OrdinalIgnoreCase);
-            if (at < 0) at = text.IndexOf(needle, StringComparison.OrdinalIgnoreCase);
+            // Start the search AT the caret when nothing is selected — a fresh find with the caret at 0 must find the
+            // match that begins at 0 (it skipped it, and reported the second one). With a selection, start after it, so
+            // Enter walks forward through the file.
+            var from = _editor.SelectionLength > 0 ? Math.Min(text.Length, start + _editor.SelectionLength) : start;
+            pick = all.FirstOrDefault(m => m.Index >= from) ?? all[0];
         }
-        if (at < 0) return;
-        _editor.Select(at, needle.Length);
-        _editor.CaretOffset = at + needle.Length;
-        _findInFileStatus.Text = $"{hits} match" + (hits == 1 ? "" : "es");
+        // an empty-width match would put the caret nowhere and repeat forever
+        if (pick.Length == 0) { _findInFileStatus.Text = $"{all.Count} match" + (all.Count == 1 ? "" : "es") + " (zero-width)"; return; }
+        _editor.Select(pick.Index, pick.Length);
+        _editor.CaretOffset = pick.Index + pick.Length;
+        _findInFileStatus.Text = $"{all.Count} match" + (all.Count == 1 ? "" : "es");
     }
 
     /// <summary>Replace the current selection (when it is the match) or all matches in the open file.</summary>
@@ -614,12 +649,15 @@ public sealed class CodeEditorView : UserControl
         if (needle.Length == 0) return;
         var with = _replaceInFile.Text ?? "";
         var text = _editor.Text ?? "";
+        var rx = Matcher(needle, out var error);
+        if (rx is null) { _findInFileStatus.Text = error is null ? "" : "bad pattern"; return; }
         if (all)
         {
-            var count = CountOccurrences(text, needle);
+            var count = rx.Matches(text).Count;
             if (count == 0) { _findInFileStatus.Text = "no results"; return; }
             _loading = true;
-            _editor.Text = ReplaceAll(text, needle, with);
+            // Regex.Replace, so a replacement can use $1 or $& exactly as in VS Code
+            _editor.Text = rx.Replace(text, with);
             _loading = false;
             Save();
             _findInFileStatus.Text = $"replaced {count}";
@@ -627,12 +665,16 @@ public sealed class CodeEditorView : UserControl
             return;
         }
         var sel = _editor.SelectedText;
-        if (!string.Equals(sel, needle, StringComparison.OrdinalIgnoreCase)) { FindNextInFile(false); return; }
-        var at = _editor.SelectionStart;
+        var at0 = _editor.SelectionStart;
+        var m0 = rx.Match(text, Math.Min(at0, text.Length));
+        if (!(m0.Success && m0.Index == at0 && string.Equals(m0.Value, sel, StringComparison.Ordinal)))
+        { FindNextInFile(false); return; }
+        var at = at0;
+        var replaced = m0.Result(with);
         _loading = true;
-        _editor.Text = text[..at] + with + text[(at + _editor.SelectionLength)..];
+        _editor.Text = text[..at] + replaced + text[(at + m0.Length)..];
         _loading = false;
-        _editor.CaretOffset = at + with.Length;
+        _editor.CaretOffset = at + replaced.Length;
         Save();
         FindNextInFile(false);
     }
