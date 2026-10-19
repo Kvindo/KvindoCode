@@ -122,11 +122,20 @@ public sealed class TerminalPaneView : UserControl
         // A click in the pane gives the TERMINAL the keyboard — that is how the human picks one. Except on the name
         // field: that focus request ran on the tunnel route and moved the keyboard back to the shell, so the field
         // could be clicked but never typed into ("terminal names are not editable", reported 2026-10-17).
+        //
+        // AND EXCEPT ANY CONTROL THAT HANDLES ITS OWN PRESS. The handler runs on the TUNNEL route, before the pressed
+        // control sees the press, and a Button in Avalonia drops its pressed state when the keyboard moves away — so
+        // moving focus to the shell on a press on the ↺ button meant the button never fired a Click at all. That is the
+        // whole of "in terminal grid 'Restart this terminal' still doesn't work" (2026-10-19): the handler was proven by
+        // tests that raised Button.ClickEvent directly, and a real mouse press produced nothing. A press on the name
+        // field or on a header button is left alone; everything else in the pane still gives the shell the keyboard.
         AddHandler(PointerPressedEvent, (_, e) =>
         {
-            if (e.Source is Visual v && (v == _name || v.GetVisualAncestors().Contains(_name))) return;
+            if (e.Source is Visual v && (Within(v, _name) || Within(v, close))) return;
             FocusRequested?.Invoke(this);
         }, RoutingStrategies.Tunnel);
+
+        static bool Within(Visual source, Visual owner) => source == owner || owner.IsVisualAncestorOf(source);
     }
 
     /// <summary>A fresh terminal control for this pane, wired to a new PTY running the pane's tmux session.</summary>

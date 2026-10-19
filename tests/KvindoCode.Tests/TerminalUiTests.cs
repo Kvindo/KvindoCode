@@ -540,6 +540,61 @@ public sealed class TerminalUiTests
     }
 
     /// <summary>
+    /// A REAL MOUSE CLICK on a grid pane's restart icon restarts that pane.
+    /// </summary>
+    /// <remarks>
+    /// Every other restart test in this class raises <c>Button.ClickEvent</c> directly, which skips hit testing entirely:
+    /// it proves the handler works, not that the human's click ever reaches the button. "In terminal grid 'Restart this
+    /// terminal' still doesn't work" (2026-10-19) is exactly the symptom a raised event cannot catch — the pane's header
+    /// is 19 px tall, the button is stretched inside it, and anything covering or clipping it would leave the click on
+    /// the terminal instead. So this drives the window's own pointer pipeline at the button's centre and asserts the
+    /// shell behind the pane is a NEW process.
+    /// </remarks>
+    [AvaloniaFact]
+    public async Task A_mouse_click_on_the_restart_icon_restarts_that_pane()
+    {
+        if (!new TmuxBackend().IsAvailable) { _out.WriteLine("tmux not available; skipping"); return; }
+        var (sb, main, _, _) = Shared();
+        var terminals = OpenGrid();
+        var backend = new TmuxBackend(socketName: _socket);
+        var session = backend.SessionName(sb.Project, 0);
+        Assert.True(await Eventually(() => Task.FromResult(HasSession(session))));
+        Relayout(main, 1100, 800);
+        for (var i = 0; i < 6; i++) { Dispatcher.UIThread.RunJobs(); await Task.Delay(40); }
+
+        var pidBefore = SessionPanePid(session);
+        var pane = terminals.Panes.Single(p => p.Index == 0);
+        var restart = pane.GetVisualDescendants().OfType<Button>().First(b => b.Name == "TerminalRestart0");
+        var point = restart.TranslatePoint(new Point(restart.Bounds.Width / 2, restart.Bounds.Height / 2), main)
+                    ?? throw new InvalidOperationException("the restart button is not laid out");
+        var hit = main.InputHitTest(point) as Control;
+        _out.WriteLine($"clicking restart at {point}: bounds={restart.Bounds} visible={restart.IsEffectivelyVisible} " +
+                       $"hit={(hit is null ? "null" : hit.GetType().Name + " '" + (hit.Name ?? "") + "'")}");
+        Assert.NotNull(hit);
+        Assert.True(hit == restart || restart.IsVisualAncestorOf(hit),
+            $"the click at {point} lands on {(hit is null ? "nothing" : hit.GetType().Name + " '" + (hit.Name ?? "") + "'")} instead of the restart button");
+
+        // The BUTTON must actually fire, not merely be under the pointer: the pane's tunnel handler used to move focus
+        // to the shell on every press, and Avalonia drops a Button's pressed state when the keyboard moves away — so the
+        // real click produced no Click event at all.
+        var clicks = 0;
+        restart.Click += (_, _) => clicks++;
+        main.MouseMove(point);
+        main.MouseDown(point, MouseButton.Left);
+        Dispatcher.UIThread.RunJobs();
+        var pressed = restart.IsPressed;
+        main.MouseUp(point, MouseButton.Left);
+        Dispatcher.UIThread.RunJobs();
+        _out.WriteLine($"pressed on the way down={pressed}, Click events={clicks}");
+        Assert.True(pressed, "the restart button never entered its pressed state, so the press was stolen before it saw it");
+        Assert.Equal(1, clicks);
+
+        Assert.True(await Eventually(() => Task.FromResult(SessionPanePid(session) is var now && now > 0 && now != pidBefore)),
+            $"the clicked restart did not replace the shell: {pidBefore} -> {SessionPanePid(session)}");
+        Assert.True(terminals.Panes.Single(p => p.Index == 0).Terminal.IsLive, "the pane is not live after the click");
+    }
+
+    /// <summary>
     /// Restarting a pane CLEARS what it showed — the screen and the scrollback, not only the tmux session.
     /// </summary>
     /// <remarks>
