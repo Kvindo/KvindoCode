@@ -2206,10 +2206,10 @@ public partial class MainWindow : Window
         if (_terminals is not null) CloseTerminals();                 // one view in the main area at a time
         _project = project;
         foreach (var tv in Host.Children.OfType<TranscriptView>().ToList()) Host.Children.Remove(tv);
-        _codeEditor = new CodeEditorView(project, CloseCodeEditor, ShowInfo,
-            // "open in integrated terminal": the same grid, scoped to the folder you are looking at, with the same tmux
-            // persistence — a folder's session is named after the folder, so it comes back after a restart.
-            dir => OpenTerminals(dir));
+        // "open in integrated terminal": the same grid, scoped to the folder you are looking at, with the same tmux
+        // persistence — a folder's session is named after the folder, so it comes back after a restart. The settings
+        // are passed so the view can remember the open file and the expanded folders.
+        _codeEditor = new CodeEditorView(project, CloseCodeEditor, ShowInfo, dir => OpenTerminals(dir), _settings);
         Host.Children.Insert(0, _codeEditor);
         BottomColumn.IsVisible = false;
         TopBar.IsVisible = false;            // the file manager is not a session either: no title, no merge, no usage line

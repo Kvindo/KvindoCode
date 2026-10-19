@@ -41,7 +41,12 @@
                (measured with Skia, and confirmed against the mark's 26 exact pixels in a screenshot of the running
                app), so a 26px mark could not contain them — they overlapped it by 5.5px. 34 leaves a 2.5px gap
                between the lines. Square PNG: Width and Height must stay equal. -->
-          <Image Grid.Column="0" Source="avares://kvindocode/Assets/kvindo-k.png" Width="34" Height="34" VerticalAlignment="Top"/>
+          <!-- HighQuality, not the default: at 34 px from a 64 px source the default interpolation smears the mark's
+               edges into a halo of semi-transparent colour, which reads as "part of the background" on the dark
+               sidebar (reported twice, 2026-10-18 and 2026-10-19). The asset itself is clean — rendered at 34 px on
+               the sidebar colour it is sharp — so the fix belongs here. -->
+          <Image Grid.Column="0" Source="avares://kvindocode/Assets/kvindo-k.png" Width="34" Height="34" VerticalAlignment="Top"
+                 RenderOptions.BitmapInterpolationMode="HighQuality"/>
           <!-- The same 34 as the mark (a vertical Margin here would push the lines off by a pixel). -->
           <Grid Grid.Column="1" Height="34" Margin="10,0,0,0">
             <!-- The negative vertical margins correct the FONT's ink gap: a TextBlock's box top is the ASCENT line,

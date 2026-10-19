@@ -158,6 +158,14 @@ public sealed class AppSettings
     /// <remarks>Dragging a splitter is a deliberate act and it was lost on every switch away from the project — the grid
     /// was rebuilt at an even 2x2 (reported 2026-10-17). Kept per project because the sizes suit one project's work.</remarks>
     public Dictionary<string, string> TerminalLayouts { get; set; } = new();
+
+    /// <summary>
+    /// The file manager's state per project: the open file first, then one relative path per expanded directory.
+    /// </summary>
+    /// <remarks>Asked 2026-10-19: "in file manager opened tree and files not preserved across app restarts". Keyed by
+    /// the project root, and every path is relative to it, so a session that runs in its own worktree still finds the
+    /// same files.</remarks>
+    public Dictionary<string, string> EditorState { get; set; } = new();
     public List<string> Projects { get; set; } = new();
 
     /// <summary>The last time a previous run was seen alive. Refreshed every 20 s while the app runs, so after a restart

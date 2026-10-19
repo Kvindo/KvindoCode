@@ -95,9 +95,12 @@ public sealed class CodeEditorView : UserControl
     string _terminalDir = "";
     readonly TextBlock _terminalTitle = new() { Classes = { "muted" }, FontSize = 11.5, VerticalAlignment = VerticalAlignment.Center };
 
-    public CodeEditorView(string projectRoot, Action close, Action<string> onNotice, Action<string> openTerminalHere)
+    readonly AppSettings? _settings;
+
+    public CodeEditorView(string projectRoot, Action close, Action<string> onNotice, Action<string> openTerminalHere, AppSettings? settings = null)
     {
         Name = "CodeEditorView";
+        _settings = settings;
         _root = Path.GetFullPath(projectRoot);
         _close = close;
         _onNotice = onNotice;
@@ -134,7 +137,7 @@ public sealed class CodeEditorView : UserControl
             _save.Stop();
             _save.Start();
         };
-        DetachedFromVisualTree += (_, _) => { Save(); CloseTerminalPane(); };
+        DetachedFromVisualTree += (_, _) => { Save(); SaveEditorState(); CloseTerminalPane(); };
 
         _findBar = BuildFindBar();
         _searchPanel = BuildSearchPanel();
@@ -150,9 +153,28 @@ public sealed class CodeEditorView : UserControl
         // the access attributes. One muted line under the editor, the same place an editor puts them.
         _fileFacts.FontSize = 11.5; _fileFacts.Classes.Add("muted");
         _fileFacts.TextTrimming = TextTrimming.CharacterEllipsis;
-        statusBar.Child = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto,Auto"), Children = { _path, _fileFacts, _status } };
+        var actions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 1, VerticalAlignment = VerticalAlignment.Center };
+        Button Small(string icon, string tip, Action onClick, string name)
+        {
+            var b = new Button { Name = name, Classes = { "ghost" }, Padding = new Thickness(4, 1), Content = Ui.Icon(icon, "KvMuted", 12), MinWidth = 0 };
+            ToolTip.SetTip(b, tip);
+            b.Click += (_, _) => onClick();
+            return b;
+        }
+        // asked 2026-10-19: "on bottom where file stats i want buttons: open externally, open in folder, copy to exchange
+        // buffer, toggle word wrap"
+        actions.Children.Add(Small("IconGlobe", "Open this file in the system's default application", OpenExternally, "EditorOpenExternal"));
+        actions.Children.Add(Small("IconFolder", "Show this file in the system file manager", OpenInFolder, "EditorOpenFolder"));
+        actions.Children.Add(Small("IconCopy", "Copy the whole file's text to the clipboard", CopyFileText, "EditorCopyAll"));
+        var wrap = new Avalonia.Controls.Primitives.ToggleButton { Name = "EditorWordWrap", Classes = { "ghost" }, Padding = new Thickness(4, 1), MinWidth = 0, IsChecked = false };
+        wrap.Content = Ui.Icon("IconRewind", "KvMuted", 12);
+        ToolTip.SetTip(wrap, "Toggle word wrap");
+        wrap.IsCheckedChanged += (_, _) => { _editor.WordWrap = wrap.IsChecked == true; };
+        actions.Children.Add(wrap);
+        statusBar.Child = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto,Auto,Auto"), Children = { _path, _fileFacts, actions, _status } };
         Grid.SetColumn(_fileFacts, 1); _fileFacts.Margin = new Thickness(12, 0);
-        Grid.SetColumn(_status, 2);
+        Grid.SetColumn(actions, 2); actions.Margin = new Thickness(12, 0, 4, 0);
+        Grid.SetColumn(_status, 3);
         DockPanel.SetDock(statusBar, Dock.Bottom);
         editorArea.Children.Add(statusBar);
         // the in-file find/replace bar sits above the text, as it does in VS Code
@@ -175,6 +197,7 @@ public sealed class CodeEditorView : UserControl
         Content = dock;
 
         LoadTree();
+        RestorePersistedState();
         // "search should be opened" (2026-10-18): the box is the first thing you can type into, and the tree is one
         // click away. POSTED, because a control that is not attached yet cannot take focus — calling Focus() in the
         // constructor did nothing at all (measured: IsFocused stayed false). The editor takes the keyboard as soon as a
@@ -191,7 +214,59 @@ public sealed class CodeEditorView : UserControl
     /// top of a 300 px column was mostly decoration, and it pushed the tree down. The chevron stays because it is the
     /// only way back out of the view with the mouse.
     /// </remarks>
+    /// <summary>
+    /// Remember the open file and the expanded directories for this project, so reopening after a restart comes back to
+    /// the same place.
+    /// </summary>
+    /// <remarks>
+    /// Asked 2026-10-19: "in file manager opened tree and files not preserved across app restarts". Stored per PROJECT
+    /// (two projects do not share a tree), as relative paths where possible so the record survives the worktree the
+    /// session actually runs in; the open file is restored only when it still exists.
+    /// </remarks>
+    internal void SaveEditorState()
+    {
+        if (_settings is null) return;
+        var expanded = _expanded.Select(Rel).Where(r => r.Length > 0).Take(200).ToList();
+        var open = _openPath is null ? "" : Rel(_openPath);
+        _settings.EditorState[_root] = open + "\n" + string.Join("\n", expanded);
+        try { _settings.Save(); } catch { /* a layout is not worth an error dialog */ }
+    }
+
+    string Rel(string path)
+    {
+        var full = Path.GetFullPath(path);
+        return full.StartsWith(_root, StringComparison.Ordinal) ? Path.GetRelativePath(_root, full) : full;
+    }
+
+    internal void RestorePersistedState()
+    {
+        if (_settings is null || !_settings.EditorState.TryGetValue(_root, out var saved) || saved.Length == 0) return;
+        var lines = saved.Split('\n');
+        var open = lines.Length > 0 ? lines[0] : "";
+        foreach (var rel in lines.Skip(1))
+        {
+            if (rel.Length == 0) continue;
+            var full = Path.IsPathRooted(rel) ? rel : Path.Combine(_root, rel);
+            if (Directory.Exists(full)) _expanded.Add(full);
+        }
+        if (open.Length > 0)
+        {
+            var full = Path.IsPathRooted(open) ? open : Path.Combine(_root, open);
+            if (File.Exists(full)) _ = OpenFileAsync(full, focus: false);
+        }
+    }
+
+    /// <summary>Directories the human has expanded, kept so the tree comes back the way it was left.</summary>
+    readonly System.Collections.Generic.HashSet<string> _expanded = new(StringComparer.Ordinal);
+
     Control BuildTools()
+    {
+        // (asked 2026-10-19: "remove back to session icon") Opening a session in the sidebar already leaves the file
+        // view, and the header's Files icon toggles it — a third way out was a glyph that ate the top of the column.
+        return new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0) };
+    }
+
+    Control BuildToolsUnused()
     {
         var back = new Button
         {
@@ -242,6 +317,13 @@ public sealed class CodeEditorView : UserControl
     {
         _search.TextChanged += (_, _) => ApplyFilter();
         _tree.Classes.Add("compact");
+        // no sideways scrolling, and a vertical bar that is always there (asked 2026-10-19: "horizontal scroll still
+        // present and vertical scroll is not unminimized"). These are ATTACHED properties on the control, which its
+        // template's ScrollViewer inherits — assigning them in an initializer does not compile.
+        Avalonia.Controls.ScrollViewer.SetHorizontalScrollBarVisibility(_tree,
+            Avalonia.Controls.Primitives.ScrollBarVisibility.Disabled);
+        Avalonia.Controls.ScrollViewer.SetVerticalScrollBarVisibility(_tree,
+            Avalonia.Controls.Primitives.ScrollBarVisibility.Visible);
         // A file OPENS ON A CLICK. SelectionChanged alone was not enough: clicking the row that is already selected
         // fires nothing, and clicking a row whose item the TreeView considers already current fires nothing either, so
         // "when i click on file it wont open" (reported 2026-10-18) happened for exactly the file you had looked at
@@ -319,10 +401,24 @@ public sealed class CodeEditorView : UserControl
         // the find-in-files panel sits above the tree, in the sidebar column, exactly where VS Code puts its search
         var sp = new DockPanel { Margin = new Thickness(10, 0, 0, 0) };
         if (_tools is { } t) sp.Children.Add(t);
+        // the SEARCH CONTROLS: the filter box above the tree, and the whole-project find/replace panel under it
+        // (asked 2026-10-19: "you removed search icon, but didnt added search controlls"). The box was always there;
+        // the panel is what the icon used to open, and it now opens from the box itself and from Ctrl+Shift+F.
+        var searchRow = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto"), Margin = new Thickness(0, 0, 0, 4) };
+        searchRow.Children.Add(_search);
+        var allBtn = new Button
+        {
+            Name = "EditorSearchFiles", Classes = { "ghost" }, Padding = new Thickness(5),
+            Content = Ui.Icon("IconSearch", "KvMuted", 14), VerticalAlignment = VerticalAlignment.Center,
+        };
+        ToolTip.SetTip(allBtn, "Search in files, with replace (Ctrl+Shift+F)");
+        allBtn.Click += (_, _) => ShowFindInFiles();
+        Grid.SetColumn(allBtn, 1);
+        searchRow.Children.Add(allBtn);
+        DockPanel.SetDock(searchRow, Dock.Top);
+        sp.Children.Add(searchRow);
         DockPanel.SetDock(_searchPanel, Dock.Top);
         sp.Children.Add(_searchPanel);
-        DockPanel.SetDock(_search, Dock.Top);
-        sp.Children.Add(_search);
         sp.Children.Add(_tree);
         return sp;
     }
@@ -865,7 +961,12 @@ public sealed class CodeEditorView : UserControl
             ItemsSource = isDir ? new[] { new TreeViewItem { Header = "…", Tag = null } } : null,
         };
         if (isDir && depth <= 24)
-            item.Expanded += (_, _) => { if (item.ItemsSource is TreeViewItem[] { Length: 1 } only && (only[0].Tag is null)) Fill(item, path, depth); };
+            item.Expanded += (_, _) =>
+            {
+                _expanded.Add(path);
+                if (item.ItemsSource is TreeViewItem[] { Length: 1 } only && (only[0].Tag is null)) Fill(item, path, depth);
+            };
+            item.Collapsed += (_, _) => _expanded.Remove(path);
         return item;
     }
 
@@ -922,6 +1023,23 @@ public sealed class CodeEditorView : UserControl
         try
         {
             if (Directory.Exists(path)) return Task.CompletedTask;
+            // NEVER hand a binary or a huge file to the editor: a 200 MB binary (or a core dump) froze the whole app
+            // while TextMate tried to tokenise it (reported 2026-10-19: "file manager tries to open binary files which
+            // causes app to hung"). 1 MiB is the limit asked for, and a NUL byte in the first 8 KiB is the standard
+            // "this is not text" test — the same one git and grep use.
+            var info = new FileInfo(path);
+            if (info.Length > MaxOpenBytes)
+            {
+                _onNotice($"{Path.GetFileName(path)} is {Size(info.Length)} — larger than the {Size(MaxOpenBytes)} the editor opens. " +
+                          "Open it in a terminal (right-click → Open in terminal) or with an external editor.");
+                return Task.CompletedTask;
+            }
+            if (LooksBinary(path))
+            {
+                _onNotice($"{Path.GetFileName(path)} looks binary (it contains NUL bytes), so it is not opened as text. " +
+                          "Right-click → Open in terminal to inspect it.");
+                return Task.CompletedTask;
+            }
             var text = File.ReadAllText(path);
             _loading = true;
             _editor.Text = text;
@@ -940,6 +1058,41 @@ public sealed class CodeEditorView : UserControl
         }
         catch (Exception e) { _onNotice("Could not open " + path + ": " + e.Message); }
         return Task.CompletedTask;
+    }
+
+    /// <summary>Open the file with the desktop's default application.</summary>
+    void OpenExternally()
+    {
+        if (_openPath is not { } path) { _onNotice("No file is open."); return; }
+        Launch("xdg-open", path);
+    }
+
+    /// <summary>Reveal the file in the desktop file manager (Nautilus selects it with <c>--select</c>).</summary>
+    void OpenInFolder()
+    {
+        if (_openPath is not { } path) { _onNotice("No file is open."); return; }
+        Launch("nautilus", "--select", path);
+    }
+
+    /// <summary>The whole buffer to the clipboard (not just the selection).</summary>
+    async void CopyFileText()
+    {
+        var clip = TopLevel.GetTopLevel(this)?.Clipboard;
+        if (clip is null) { _onNotice("No clipboard available."); return; }
+        await clip.SetTextAsync(_editor.Text ?? "");
+        _onNotice("The file's text is on the clipboard.");
+    }
+
+    /// <summary>Start a detached desktop command, reporting a failure instead of throwing.</summary>
+    void Launch(params string[] args)
+    {
+        try
+        {
+            var psi = new System.Diagnostics.ProcessStartInfo(args[0]) { UseShellExecute = false };
+            for (var i = 1; i < args.Length; i++) psi.ArgumentList.Add(args[i]);
+            System.Diagnostics.Process.Start(psi);
+        }
+        catch (Exception e) { _onNotice("Could not start " + args[0] + ": " + e.Message); }
     }
 
     /// <summary>
@@ -970,6 +1123,27 @@ public sealed class CodeEditorView : UserControl
         }
         catch (Exception e) { parts.Add("(no stat: " + e.GetType().Name + ")"); }
         return string.Join("  ·  ", parts);
+    }
+
+    /// <summary>The largest file the editor will open.</summary>
+    internal const long MaxOpenBytes = 1024 * 1024;
+
+    /// <summary>
+    /// Does the file contain a NUL byte in its first 8 KiB? The standard text/binary test, and the cheap one: reading
+    /// 8 KiB can never hang, and a binary that happens to have no NUL there is still refused by the size limit above if
+    /// it is big. A UTF-16 text file would be refused too — the editor renders UTF-8, so that is honest.
+    /// </summary>
+    internal static bool LooksBinary(string path)
+    {
+        try
+        {
+            using var fs = File.OpenRead(path);
+            var buf = new byte[8192];
+            var n = fs.Read(buf, 0, buf.Length);
+            for (var i = 0; i < n; i++) if (buf[i] == 0) return true;
+            return false;
+        }
+        catch { return false; }        // unreadable: let the open itself report it
     }
 
     static string Size(long bytes) => bytes < 1024 ? $"{bytes} B"

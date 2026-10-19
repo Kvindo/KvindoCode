@@ -296,6 +296,19 @@ public sealed class TerminalPaneView : UserControl
     }
 
     /// <summary>
+    /// Start the pane again after <see cref="Stop"/>, keeping the SAME control and therefore its tmux session.
+    /// </summary>
+    /// <remarks>Used when the grid is reopened: the session in the tmux server still holds the shell, its output and any
+    /// program it is running, so the pane reattaches and gets its scrollback back (the history is replayed before the
+    /// live session draws).</remarks>
+    public void Relaunch()
+    {
+        _stopped = false;
+        _started = false;
+        Start();
+    }
+
+    /// <summary>
     /// Stop this pane's terminal PROCESS without touching the tmux session, so the scrollback survives.
     /// </summary>
     /// <remarks>

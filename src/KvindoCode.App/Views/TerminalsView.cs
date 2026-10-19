@@ -163,7 +163,9 @@ public sealed class TerminalsView : UserControl
     public void StartPanes()
     {
         if (!_backend.IsAvailable) return;
-        foreach (var (_, pane) in _panes.OrderBy(p => p.Key)) pane.Start();
+        // A pane that was already stopped needs its _started/_stopped flags cleared, or Start() is a silent no-op and
+        // the grid comes back as four dead rectangles.
+        foreach (var (_, pane) in _panes.OrderBy(p => p.Key)) pane.Relaunch();
         SetActive(_active);
     }
 
@@ -187,6 +189,9 @@ public sealed class TerminalsView : UserControl
     /// rendering into nothing, once per closed grid.</remarks>
     public void StopPanes()
     {
+        // Detach WITHOUT killing the tmux sessions: a pane's PTY is only a tmux CLIENT, so stopping the client leaves
+        // the shell, its scrollback and whatever it is running in the server — which is what makes closing the grid and
+        // reopening it bring everything back ("terminal changes are not preserved even on grid reopen", 2026-10-19).
         foreach (var pane in _panes.Values) pane.Stop();
     }
 
