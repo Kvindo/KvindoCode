@@ -756,6 +756,17 @@ public sealed class AgentSession : IDisposable
 
     /// <summary>Ask the UI to show the given tmux session as a terminal in the side panel.</summary>
     public void ShowTerminal(string session, string title, string dir) => TerminalRequested?.Invoke(session, title, dir);
+
+    /// <summary>
+    /// Raised when the session wants a FILE shown in the side panel: (absolute path, line or null).
+    /// </summary>
+    /// <remarks>Asked 2026-10-19: the same thing as <see cref="TerminalRequested"/>, for files — "now i also want
+    /// session to be able to open file in side panel". The pane already renders a file with its line highlighted; this
+    /// is what lets the MODEL point at one instead of describing it.</remarks>
+    public event Action<string, int?>? FileRequested;
+
+    /// <summary>Ask the UI to show a file in the side panel, optionally at a line.</summary>
+    public void ShowFile(string path, int? line = null) => FileRequested?.Invoke(path, line);
     /// <summary>UI callback: dequeue one message submitted while this turn is running. Called only between model/tool rounds.</summary>
     public Func<QueuedTurn?>? DequeueQueuedTurn { get; set; }
     /// <summary>Asked (without consuming) whether more user messages are waiting; the UI provides it.</summary>
