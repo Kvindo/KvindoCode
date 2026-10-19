@@ -19,6 +19,17 @@ public interface ISessionBridge
 /// </summary>
 public sealed class SessionsTool : Tool
 {
+    /// <summary>
+    /// Always available, INCLUDING in Delegate mode.
+    /// </summary>
+    /// <remarks>
+    /// Delegating is exactly the mode in which a session must be able to reach the others: it cannot edit a checkout
+    /// itself, so handing work to a project's session (or asking one a question) is the whole job. It was <c>Direct</c>,
+    /// which silently removed the tool from the COORDINATOR — the one session whose purpose is cross-project
+    /// coordination (found 2026-10-19 while answering "can coordinator write messages to sessions?").
+    /// </remarks>
+    public override SessionToolRole SessionRole => SessionToolRole.Always;
+
     public override string Name => "Sessions";
     public override string Description =>
         "Work with the user's other KvindoCode sessions. Actions: " +

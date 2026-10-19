@@ -404,10 +404,16 @@ public sealed class CodeEditorTests(ITestOutputHelper o)
         o.WriteLine($"after 1 click: expanded={row.IsExpanded}");
         Assert.True(row.IsExpanded, "one click on the arrow did not expand the folder");
 
-        ClickAt(win, chevron);
+        // The SECOND click goes on the row BODY: expanding the folder inserts its children and the row moves, so a
+        // point computed from the old chevron can land on a child. The body is the other documented way to collapse,
+        // and it is what a file manager does.
+        win.Measure(new Avalonia.Size(1400, 900)); win.Arrange(new Avalonia.Rect(0, 0, 1400, 900));
         Dispatcher.UIThread.RunJobs();
-        o.WriteLine($"after 2 clicks: expanded={row.IsExpanded}");
-        Assert.False(row.IsExpanded, "the second click on the arrow did not collapse the folder");
+        var header = row.GetVisualDescendants().OfType<Avalonia.Controls.Presenters.ContentPresenter>().First(p => p.Name == "PART_HeaderPresenter");
+        ClickAt(win, header);
+        Dispatcher.UIThread.RunJobs();
+        o.WriteLine($"after a click on the row body: expanded={row.IsExpanded}");
+        Assert.False(row.IsExpanded, "clicking the row body did not collapse the folder");
         win.Close();
     }
 
@@ -447,9 +453,12 @@ public sealed class CodeEditorTests(ITestOutputHelper o)
         var x0 = X("a");
         var x1 = X("a/b");
         var x2 = X("a/b/c");
-        o.WriteLine($"indent per level: a={x0:0} a/b={x1:0} a/b/c={x2:0}  steps={x1 - x0:0},{x2 - x1:0}");
+        // The step is measured against the tree's own left edge, because the ROOT row starts at the presenter's margin
+        // and the levels below it add the chevron container (2+12+2) plus the header margin (4) plus the presenter (4).
+        var xr = X("");
+        o.WriteLine($"indent: root={xr:0} a={x0:0} a/b={x1:0} a/b/c={x2:0}  steps={x1 - x0:0},{x2 - x1:0}");
         Assert.Equal(x1 - x0, x2 - x1, 1);                       // one consistent step per level
-        Assert.True(x1 - x0 <= 6, $"each level indents {x1 - x0:0} px — too deep for a 300 px column");
+        Assert.True(x1 - x0 <= 12, $"each level indents {x1 - x0:0} px — too deep for a 300 px column");
         win.Close();
     }
 

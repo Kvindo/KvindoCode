@@ -2057,6 +2057,9 @@ public sealed class AgentSession : IDisposable
 
     List<ChatMessage> SnapshotContext() { lock (_lock) return _context.ToList(); }
 
+    /// <summary>The conversation as the model sees it (a copy). Used by the Telegram bridge to read the last answer.</summary>
+    public IReadOnlyList<ChatMessage> History() => SnapshotContext();
+
     async Task<ChatMessage> ExecuteToolAsync(ToolCall call, bool argsMaybeTruncated, CancellationToken ct)
     {
         var sw = Stopwatch.StartNew();

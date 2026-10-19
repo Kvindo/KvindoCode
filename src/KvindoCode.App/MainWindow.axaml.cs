@@ -322,6 +322,7 @@ public partial class MainWindow : Window
         health.Start();
         Input.Focus();
         _ = RunStartupChecksAsync();                          // offer to continue what was active in the previous run
+        StartTelegramBridge();                                // @tag in Telegram -> COORDINATOR -> reply (off by default)
         _ = WarnAboutVaultProblemsAsync();                    // a lost vault key or a corrupt vault silently "empty" it otherwise
         if (Environment.GetEnvironmentVariable("KVINDOCODE_TRACE_LAYOUT") is { Length: > 0 }) StartLayoutTrace();
         // Always-on, tiny record of what is under the pointer and which control receives each press. It writes
@@ -1178,7 +1179,7 @@ public partial class MainWindow : Window
         sv.Transcript.ScrollToEnd();
         Input.Text = sv.Draft;
         _pane.Reset();
-        if (PaneHost.IsVisible)
+        if (PaneHost.IsVisible && !_pane.ShowsTerminal)
         {
             if (sv.Transcript.LatestPlan is { } lp) _pane.ShowPlan(lp, _settings.FontSize); else ShowPaneHint();
         }
@@ -3111,11 +3112,30 @@ public partial class MainWindow : Window
 
     IEnumerable<string> ProjectOrder()
     {
-        var byActivity = _all.Concat(_live.Values.Where(l => l.Session.Info.Exists && !_all.Any(x => x.Id == l.Id)).Select(l => l.Session.Info)).Where(s => !s.Archived).GroupBy(s => s.Cwd).OrderByDescending(g => g.Max(s => s.Updated)).Select(g => g.Key).ToList();
+        var byActivity = _all.Concat(_live.Values.Where(l => l.Session.Info.Exists && !_all.Any(x => x.Id == l.Id)).Select(l => l.Session.Info))
+            .Where(s => !s.Archived && !IsCoordinatorDir(s.Cwd))          // the COORDINATOR has its own pinned row
+            .GroupBy(s => s.Cwd).OrderByDescending(g => g.Max(s => s.Updated)).Select(g => g.Key).ToList();
         var res = new List<string>(byActivity);
-        foreach (var p in _settings.Projects.Where(Directory.Exists)) if (!res.Contains(p)) res.Add(p);
-        if (_project != null && !res.Contains(_project)) res.Insert(0, _project);
+        foreach (var p in _settings.Projects.Where(Directory.Exists))
+            if (!res.Contains(p) && !IsCoordinatorDir(p)) res.Add(p);
+        if (_project != null && !res.Contains(_project) && !IsCoordinatorDir(_project)) res.Insert(0, _project);
         return res;
+    }
+
+    /// <summary>
+    /// Is this path the COORDINATOR's own folder? It is not a project.
+    /// </summary>
+    /// <remarks>
+    /// Reported 2026-10-19: "for some reason there are 2 coordinators". The session's working directory is a folder
+    /// under the config dir, so the sidebar listed it as a PROJECT as well as showing the pinned row — the same session
+    /// twice, once under "coordinator" and once at the top.
+    /// </remarks>
+    internal static bool IsCoordinatorDir(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path)) return false;
+        var dir = Path.Combine(Paths.ConfigDir, "coordinator");
+        return string.Equals(Path.TrimEndingDirectorySeparator(Path.GetFullPath(path)),
+                             Path.TrimEndingDirectorySeparator(Path.GetFullPath(dir)), StringComparison.Ordinal);
     }
 
     void RebuildSidebar()
@@ -3127,6 +3147,82 @@ public partial class MainWindow : Window
         var keepOffset = SidebarScroll.Offset;
         RebuildSidebarCore();
         Dispatcher.UIThread.Post(() => SidebarScroll.Offset = keepOffset, DispatcherPriority.Loaded);
+    }
+
+    /// <summary>
+    /// Poll Telegram for messages that carry the coordinator tag, hand them to the COORDINATOR and reply with its answer.
+    /// </summary>
+    /// <remarks>
+    /// Asked 2026-10-19: "i want setting that will send my messages in telegram that contain @kc be sent to coordinator
+    /// so that i can ask agent from telegram chat and receive response here as reply to my message".
+    ///
+    /// Off unless <see cref="AppSettings.TelegramCoordinatorTag"/> is set. The tag is matched case-insensitively in the
+    /// message text; the message is delivered to the coordinator as a normal user turn (so it has its own transcript and
+    /// the same delegate rules), and the assistant's final text is sent back as a REPLY to that message.
+    /// </remarks>
+    void StartTelegramBridge()
+    {
+        if (_settings.TelegramCoordinatorTag.Trim().Length == 0) return;
+        var seconds = Math.Clamp(_settings.TelegramCoordinatorPollSeconds, 5, 300);
+        var timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(seconds) };
+        timer.Tick += async (_, _) =>
+        {
+            if (_telegramPolling) return;
+            _telegramPolling = true;
+            try { await PollTelegramAsync(); }
+            catch (Exception e) { UiTrace.Line("telegram bridge: " + e.Message); }
+            finally { _telegramPolling = false; }
+        };
+        timer.Start();
+        _telegramTimer = timer;
+        UiTrace.Line($"telegram bridge: polling every {seconds}s for '{_settings.TelegramCoordinatorTag.Trim()}'");
+    }
+
+    DispatcherTimer? _telegramTimer;
+    bool _telegramPolling;
+
+    async Task PollTelegramAsync()
+    {
+        var tag = _settings.TelegramCoordinatorTag.Trim();
+        if (tag.Length == 0) return;
+        if (_telegram is null)
+        {
+            _telegram = KvindoCode.Core.Telegram.TelegramUserClient.Open(_settings, out var err);
+            if (_telegram is null) { UiTrace.Line("telegram bridge: " + err); return; }
+        }
+        var messages = await _telegram.NewMessagesAsync();
+        foreach (var m in messages)
+        {
+            if (!m.Text.Contains(tag, StringComparison.OrdinalIgnoreCase)) continue;
+            // the coordinator session, created on demand (the same one the sidebar's row opens)
+            var sv = _live.Values.FirstOrDefault(v => string.Equals(v.Session.Info.Title, CoordinatorTitle, StringComparison.Ordinal));
+            if (sv is null)
+            {
+                await OpenCoordinatorAsync();
+                sv = _live.Values.FirstOrDefault(v => string.Equals(v.Session.Info.Title, CoordinatorTitle, StringComparison.Ordinal));
+                if (sv is null) return;
+            }
+            var before = sv.Transcript.ItemCount;
+            var text = m.Text.Replace(tag, "", StringComparison.OrdinalIgnoreCase).Trim();
+            if (text.Length == 0) continue;
+            SendSessionPrompt(sv, text);
+            // wait for that turn to finish (bounded), then send what the assistant said as the reply
+            for (var i = 0; i < 600 && (sv.Running || sv.Transcript.ItemCount == before); i++) await Task.Delay(200);
+            var answer = LastAssistantText(sv);
+            if (answer.Length == 0) answer = "(the coordinator produced no text answer)";
+            try { await _telegram.SendTextAsync(m.ChatId.ToString(), answer, replyTo: m.MessageId); }
+            catch (Exception e) { UiTrace.Line("telegram bridge reply failed: " + e.Message); }
+        }
+    }
+
+    KvindoCode.Core.Telegram.TelegramUserClient? _telegram;
+
+    /// <summary>The newest assistant text in a session, which is what a Telegram reply should carry.</summary>
+    static string LastAssistantText(SessionView sv)
+    {
+        var texts = sv.Session.History().Where(m => m.Role == "assistant" && !string.IsNullOrWhiteSpace(m.Content))
+            .Select(m => m.Content!).ToList();
+        return texts.Count > 0 ? texts[^1] : "";
     }
 
     /// <summary>The fixed name of the cross-project session.</summary>

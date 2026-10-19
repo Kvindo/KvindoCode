@@ -262,6 +262,46 @@ public sealed class TelegramUserClient : IDisposable
         return ToInputPeer(resolved.peer, Users(resolved.users), Chats(resolved.chats));
     }
 
+    /// <summary>
+    /// New incoming messages since the last call, as (chat id, sender, text, message id).
+    /// </summary>
+    /// <remarks>
+    /// Asked 2026-10-19: "i want setting that will send my messages in telegram that contain @kc be sent to coordinator
+    /// so that i can ask agent from telegram chat and receive response here as reply to my message".
+    ///
+    /// Polling, not a push subscription: the app already holds ONE session and its calls are serialised, so a poll on
+    /// the same connection needs no second client, no update-state juggling and cannot miss the answer to its own send.
+    /// The offset is kept per client, so a restart simply starts from "now".
+    /// </remarks>
+    public async Task<List<(long ChatId, string Sender, string Text, int MessageId)>> NewMessagesAsync(int limit = 50)
+    {
+        if (_me is null) await SignInAsync(default);
+        var dialogs = await _client.Messages_GetAllDialogs();
+        var (users, chats) = Maps(dialogs);
+        var found = new List<(long, string, string, int)>();
+        foreach (var d in dialogs.dialogs.Take(30))
+        {
+            if (d.Peer is not PeerUser pu) continue;                 // direct messages only: a group is not "me asking"
+            var peer = ToInputPeer(d.Peer, users, chats);
+            var history = await _client.Messages_GetHistory(peer, limit: Math.Clamp(limit, 1, 50), offset_id: 0);
+            foreach (var mb in history.Messages)
+            {
+                if (mb is not Message m) continue;
+                if (m.flags.HasFlag(Message.Flags.out_)) continue;   // something I sent
+                if (m.ID <= _lastSeen.GetValueOrDefault(pu.user_id)) continue;
+                var who = m.From is PeerUser from && users.TryGetValue(from.user_id, out var u)
+                    ? (u.username is { Length: > 0 } un ? "@" + un : $"{u.first_name} {u.last_name}".Trim())
+                    : pu.user_id.ToString();
+                if (!string.IsNullOrWhiteSpace(m.message)) found.Add((pu.user_id, who, m.message, m.ID));
+                _lastSeen[pu.user_id] = Math.Max(_lastSeen.GetValueOrDefault(pu.user_id), m.ID);
+            }
+        }
+        return found;
+    }
+
+    /// <summary>The last message id seen per chat, so a poll returns only what arrived after the previous one.</summary>
+    readonly Dictionary<long, int> _lastSeen = new();
+
     // Messages_DialogsSlice / Messages_MessagesSlice / Messages_ChannelMessages DERIVE from these base shapes, so the
     // first arm already covers them (a second arm made the compiler report an unreachable pattern).
     static (Dictionary<long, User>, Dictionary<long, ChatBase>) Maps(Messages_DialogsBase d) => d switch

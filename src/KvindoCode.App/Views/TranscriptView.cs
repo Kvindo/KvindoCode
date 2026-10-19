@@ -119,6 +119,7 @@ public sealed class TranscriptView : UserControl
             {
                 ((Panel)temporary).Children.Remove(c);
                 _stack.Children.Insert(insertAt++, c);
+                ApplyOnlyMine(c);
             }
             double after = _scroll.Extent.Height;
             double delta = Math.Max(0, after - before);
@@ -343,8 +344,22 @@ public sealed class TranscriptView : UserControl
     void Add(Control c)
     {
         _stack.Children.Add(c);
+        ApplyOnlyMine(c);                 // a message that arrives WHILE the filter is on must obey it
         _msgOf.Add((c, _curMsgIndex));
         if (_stick) ScrollToEndSoon();
+    }
+
+    /// <summary>
+    /// Hide a freshly added control when "show only my messages" is on.
+    /// </summary>
+    /// <remarks>
+    /// The filter used to run only when the toggle was flipped, so every message that arrived afterwards — the
+    /// assistant's answer, tool cards, notices — was added visible and the mode leaked (reported 2026-10-19: "when i
+    /// trigger show only my messages new your messages appear at the end while mode is still active").
+    /// </remarks>
+    void ApplyOnlyMine(Control c)
+    {
+        if (OnlyUserMessages) c.IsVisible = c.Tag as string == UserTag;
     }
 
     /// <summary>Which history message each rendered control belongs to, and the index being appended right now.</summary>
@@ -507,6 +522,7 @@ public sealed class TranscriptView : UserControl
     void AddIndexed(Control c, int historyIndex)
     {
         _stack.Children.Add(c);
+        ApplyOnlyMine(c);
         _msgOf.Add((c, historyIndex));
         if (_stick) ScrollToEndSoon();
     }

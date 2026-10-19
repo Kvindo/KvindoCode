@@ -99,6 +99,7 @@ public sealed class SettingsWindow : Window
         // settings — the api_id/api_hash values stay in the vault and are never shown.
         var tgChat = T(s.TelegramDefaultChat, "@username, a chat id, or me"); tgChat.Name = "TelegramDefaultChat";
         var tgApiId = T(s.TelegramApiIdSecret, "telegram-api-id"); tgApiId.Name = "TelegramApiIdSecret";
+        var tgBridge = new TextBox { Text = s.TelegramCoordinatorTag, Watermark = "e.g. @kc", FontSize = 12.5, MaxWidth = 200, HorizontalAlignment = HorizontalAlignment.Left };
         var tgApiHash = T(s.TelegramApiHashSecret, "telegram-api-hash"); tgApiHash.Name = "TelegramApiHashSecret";
         var tgStatus = new TextBlock { Classes = { "muted" }, FontSize = 12, TextWrapping = TextWrapping.Wrap };
         void RefreshTelegram()
@@ -231,6 +232,7 @@ public sealed class SettingsWindow : Window
             s.TelegramApiIdSecret = (tgApiId.Text ?? "").Trim();
             s.TelegramApiHashSecret = (tgApiHash.Text ?? "").Trim();
             s.TelegramDefaultChat = (tgChat.Text ?? "").Trim();
+            s.TelegramCoordinatorTag = (tgBridge.Text ?? "").Trim();
             s.ClaudeSessionsDir = (claudeDir.Text ?? "").Trim(); s.ClaudeProjectsDir = (claudeProj.Text ?? "").Trim();
             s.ChromePort = (int)(chromePort.Value ?? 9222); s.ChromePath = (chromePath.Text ?? "").Trim(); s.ChromeAutoLaunch = chromeAuto.IsChecked == true; s.ChromeUseMyProfile = chromeMine.IsChecked == true;
             s.ChromeKeepBackground = chromeQuiet.IsChecked == true;
@@ -346,6 +348,9 @@ public sealed class SettingsWindow : Window
                 new TextBlock { Text = "The Telegram tool acts AS YOU over a user session (MTProto): it reads a chat's history and sends as you. There is no bot mode — a bot cannot read history at all.", Classes = { "muted" }, FontSize = 12, TextWrapping = TextWrapping.Wrap },
                 new StackPanel { Orientation = Orientation.Horizontal, Spacing = 24, Children = { Field("api_id vault entry", tgApiId, "The NAME of a secret, from my.telegram.org."), Field("api_hash vault entry", tgApiHash, "The NAME of a secret, from my.telegram.org.") } },
                 new StackPanel { Orientation = Orientation.Horizontal, Spacing = 24, Children = { Field("Default chat", tgChat, "Used when a call passes no chat.") } },
+                Field("Coordinator tag", tgBridge,
+                    "Telegram messages containing this tag are handed to the COORDINATOR and its answer is sent back as a reply " +
+                    "to that message. Empty = off (nothing polls Telegram). The tag is removed from the text before the agent sees it."),
                 tgStatus) },
         });
 
