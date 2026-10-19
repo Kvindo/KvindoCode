@@ -41,8 +41,11 @@ public sealed class WorkModeTests
         Assert.Contains("AgentOutput", offered);
         Assert.Contains("AgentList", offered);
         Assert.Contains("AgentStop", offered);
+        // ...and so does the ability to reach the OTHER sessions: delegating across projects is the coordinator's whole
+        // job, and it was Direct, which silently removed it from that session (2026-10-19).
+        Assert.Contains("Sessions", offered);
         // everything that acts on the machine directly is gone
-        foreach (var direct in new[] { "Read", "Write", "Edit", "Glob", "Grep", "Bash", "WebFetch", "Browser", "Monitor", "SchedulePrompt", "Sessions" })
+        foreach (var direct in new[] { "Read", "Write", "Edit", "Glob", "Grep", "Bash", "WebFetch", "Browser", "Monitor", "SchedulePrompt" })
             Assert.DoesNotContain(direct, offered);
     }
 
