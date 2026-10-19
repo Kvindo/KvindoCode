@@ -226,11 +226,15 @@ public sealed class TelegramUserClient : IDisposable
     }
 
     /// <summary>Send a message as the human. Returns a short confirmation line.</summary>
-    public async Task<string> SendTextAsync(string chat, string text, int replyTo = 0)
+    public async Task<string> SendTextAsync(string chat, string text, int replyTo = 0) =>
+        (await SendTextWithIdAsync(chat, text, replyTo)).Line;
+
+    /// <summary>Send, and report the new message's id so a caller that reads the chat back can skip its own message.</summary>
+    public async Task<(string Line, int MessageId)> SendTextWithIdAsync(string chat, string text, int replyTo)
     {
         var peer = await ResolveAsync(chat);
         var sent = await _client.SendMessageAsync(peer, text, reply_to_msg_id: replyTo);
-        return $"Sent to {chat} (message_id {sent.ID}).";
+        return ($"Sent to {chat} (message_id {sent.ID}).", sent.ID);
     }
 
     /// <summary>Upload and send a local file as the human.</summary>
@@ -263,7 +267,7 @@ public sealed class TelegramUserClient : IDisposable
     }
 
     /// <summary>
-    /// New incoming messages since the last call, as (chat id, sender, text, message id).
+    /// New messages since the last call, as (chat id, sender, text, message id, whether I wrote it).
     /// </summary>
     /// <remarks>
     /// Asked 2026-10-19: "i want setting that will send my messages in telegram that contain @kc be sent to coordinator
@@ -272,28 +276,44 @@ public sealed class TelegramUserClient : IDisposable
     /// Polling, not a push subscription: the app already holds ONE session and its calls are serialised, so a poll on
     /// the same connection needs no second client, no update-state juggling and cannot miss the answer to its own send.
     /// The offset is kept per client, so a restart simply starts from "now".
+    ///
+    /// EVERY KIND OF CHAT IS READ, not only direct messages, and MY OWN messages are included. Both were wrong:
+    /// <list type="bullet">
+    /// <item>It iterated <c>PeerUser</c> dialogs alone, with the note "a group is not 'me asking'" — so a tag written in
+    /// a supergroup was never seen (2026-10-19: "I wrote @kc in group 'Флудилка' but coordinator seems to miss my
+    /// message").</item>
+    /// <item>It skipped <c>out_</c> messages as "something I sent" — but the bridge runs as the USER's own account, so
+    /// the person asking IS the sender and every tagged message was skipped. Direction is now reported instead of
+    /// filtered, and the caller skips only the ids IT sent (otherwise the bridge would answer its own reply for ever).
+    /// </item>
+    /// </list>
+    ///
+    /// The FIRST call PRIMES instead of replaying: with no watermark every chat would hand back its last 50 messages,
+    /// including days-old tagged ones, and the coordinator would answer a backlog. So the first poll records the newest
+    /// id per chat and returns nothing.
     /// </remarks>
-    public async Task<List<(long ChatId, string Sender, string Text, int MessageId)>> NewMessagesAsync(int limit = 50)
+    public async Task<List<(long ChatId, string Sender, string Text, int MessageId, bool Outgoing)>> NewMessagesAsync(int limit = 50)
     {
         if (_me is null) await SignInAsync(default);
         var dialogs = await _client.Messages_GetAllDialogs();
         var (users, chats) = Maps(dialogs);
-        var found = new List<(long, string, string, int)>();
+        var found = new List<(long, string, string, int, bool)>();
+        var primed = _lastSeen.Count > 0;
         foreach (var d in dialogs.dialogs.Take(30))
         {
-            if (d.Peer is not PeerUser pu) continue;                 // direct messages only: a group is not "me asking"
-            var peer = ToInputPeer(d.Peer, users, chats);
+            var peer = ToInputPeer(d.Peer, users, chats);       // users, groups and channels alike
+            var chatId = d.Peer.ID;
             var history = await _client.Messages_GetHistory(peer, limit: Math.Clamp(limit, 1, 50), offset_id: 0);
             foreach (var mb in history.Messages)
             {
                 if (mb is not Message m) continue;
-                if (m.flags.HasFlag(Message.Flags.out_)) continue;   // something I sent
-                if (m.ID <= _lastSeen.GetValueOrDefault(pu.user_id)) continue;
+                var outgoing = m.flags.HasFlag(Message.Flags.out_);
+                if (m.ID <= _lastSeen.GetValueOrDefault(chatId)) continue;
                 var who = m.From is PeerUser from && users.TryGetValue(from.user_id, out var u)
                     ? (u.username is { Length: > 0 } un ? "@" + un : $"{u.first_name} {u.last_name}".Trim())
-                    : pu.user_id.ToString();
-                if (!string.IsNullOrWhiteSpace(m.message)) found.Add((pu.user_id, who, m.message, m.ID));
-                _lastSeen[pu.user_id] = Math.Max(_lastSeen.GetValueOrDefault(pu.user_id), m.ID);
+                    : chatId.ToString();
+                if (primed && !string.IsNullOrWhiteSpace(m.message)) found.Add((chatId, who, m.message, m.ID, outgoing));
+                _lastSeen[chatId] = Math.Max(_lastSeen.GetValueOrDefault(chatId), m.ID);
             }
         }
         return found;

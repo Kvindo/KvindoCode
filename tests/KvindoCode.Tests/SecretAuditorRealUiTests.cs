@@ -33,6 +33,21 @@ using Xunit;
 
 namespace KvindoCode.Tests;
 
+/// <summary>
+/// The secret auditor, end to end through the real window against the REAL local model.
+/// </summary>
+/// <remarks>
+/// This class talks to a real vllm at <c>http://127.0.0.1:8001/v1</c>: every audited tool output is a real inference.
+/// Measured 2026-10-19 — the 64 tests here take TEN of the suite's 26 minutes, and one of them
+/// (<c>Scenario_6_1</c>, which reads the whole KvindoCode source tree and requires no false positive on it) is three
+/// minutes by itself. That cost is genuine model work, not harness overhead, so it cannot be optimised away; it can only
+/// be kept out of the run you do on every edit.
+///
+/// Hence the trait: <c>tools/test.sh</c> excludes <c>Category=RealLlm</c> by default and runs everything with
+/// <c>--all</c> (or <c>KVINDOCODE_SLOW_TESTS=1</c>). Nothing is dropped — this class still runs, in full, on demand and
+/// in CI.
+/// </remarks>
+[Trait("Category", "RealLlm")]
 public sealed class SecretAuditorRealUiTests
 {
     internal sealed class App : IDisposable

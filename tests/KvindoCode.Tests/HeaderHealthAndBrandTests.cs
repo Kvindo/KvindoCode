@@ -442,4 +442,61 @@ public sealed class BrandMarkAssetTests
         for (var y = 0; y < h; y++) { if (Ink(0, y) > 10) border++; if (Ink(w - 1, y) > 10) border++; }
         Assert.True(border == 0, $"{border} pixels of the mark touch its canvas edge — the artwork is clipped");
     }
+
+    /// <summary>
+    /// No pixel of the mark is WHITE — the logo's white page must not survive anywhere in the crop.
+    /// </summary>
+    /// <remarks>
+    /// Reported three times ("part of background" on 2026-10-18, then 2026-10-19 twice). Cutting the page away with an
+    /// alpha threshold removes the SOLID page and leaves the antialiased edge: the logo artwork is white-backed, so every
+    /// edge pixel of a crop is a blend of ink and WHITE, and it keeps an RGB near 255 with a low alpha. Measured on the
+    /// shipped asset before this test existed: 206 such pixels, 99% of them on the silhouette, alphas 1-12 — a one-pixel
+    /// white rim that is invisible on the light sidebar and a pale halo on the dark one, which is the "part of
+    /// background" the user kept seeing. The fix is colour DECONTAMINATION (tools/brand-assets.py): each such pixel takes
+    /// the colour of the nearest real ink and keeps its alpha, so the silhouette is byte-identical and only the halo
+    /// changes. This asserts the property directly, on the asset the app ships.
+    ///
+    /// The channels must come from the PNG FILE, not from a decoded <c>Bitmap</c>. Avalonia stores bitmaps
+    /// PREMULTIPLIED, so a white pixel at alpha 1 is stored as RGB (1,1,1) and un-premultiplying it gives 255 again — the
+    /// first version of this test compared the premultiplied bytes against 235 and passed on the very asset it was
+    /// written to reject, and the second one (un-premultiplying) reported 34 pixels of pure quantization noise on a clean
+    /// asset. The file is what ships inside the assembly verbatim, so it is what is checked.
+    /// </remarks>
+    [Fact]
+    public void The_mark_has_no_white_pixels_left_from_the_logo_page()
+    {
+        var path = FindAsset("kvindo-k.png");
+        using var stream = File.OpenRead(path);
+        // Skia, decoded as UN-PREMULTIPLIED RGBA: the PNG's own bytes, with no alpha multiplication applied
+        using var codec = SkiaSharp.SKCodec.Create(stream);
+        using var bitmap = new SkiaSharp.SKBitmap(new SkiaSharp.SKImageInfo(
+            codec.Info.Width, codec.Info.Height, SkiaSharp.SKColorType.Rgba8888, SkiaSharp.SKAlphaType.Unpremul));
+        codec.GetPixels(bitmap.Info, bitmap.GetPixels());
+        var white = 0;
+        var worst = "";
+        for (var y = 0; y < bitmap.Height; y++)
+            for (var x = 0; x < bitmap.Width; x++)
+            {
+                var c = bitmap.GetPixel(x, y);
+                if (c.Alpha == 0) continue;
+                if (Math.Min(c.Red, Math.Min(c.Green, c.Blue)) < 235) continue;
+                white++;
+                if (worst.Length == 0) worst = $"first at ({x},{y}) alpha={c.Alpha} colour=({c.Red},{c.Green},{c.Blue})";
+            }
+        Assert.True(white == 0,
+            $"{white} pixel(s) of the mark are white ({worst}) — that is the logo's page surviving as a halo; " +
+            "run tools/brand-assets.py on the asset");
+    }
+
+    /// <summary>The asset on disk, found by walking up from the test's own output directory.</summary>
+    static string FindAsset(string name)
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        for (var i = 0; i < 8 && dir is not null; i++, dir = dir.Parent)
+        {
+            var candidate = Path.Combine(dir.FullName, "src", "KvindoCode.App", "Assets", name);
+            if (File.Exists(candidate)) return candidate;
+        }
+        throw new FileNotFoundException($"could not find src/KvindoCode.App/Assets/{name} above {AppContext.BaseDirectory}");
+    }
 }

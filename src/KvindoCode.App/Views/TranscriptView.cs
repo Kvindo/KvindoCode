@@ -417,6 +417,13 @@ public sealed class TranscriptView : UserControl
                 _glyphPulse?.Cancel(); _glyphPulse = Ui.Pulse(_statusGlyph); UpdateStatus(); break;
             case TurnEndEvent:
                 _statusBar.IsVisible = false; _turnWatch.Stop(); _glyphPulse?.Cancel(); _glyphPulse = null;
+                // A review round that is still open when the turn ends was INTERRUPTED: no finish event is ever coming,
+                // so its card would keep its pulsing dot and "the reviewer is criticising the plan…" for ever — which
+                // reads exactly like "Stop didn't work" even though the turn really ended (reported 2026-10-19:
+                // "Looks like stop doesnt work while 'Reviewing plan (round 2/2)…'"). The cancellation itself is
+                // correct; this closes the card so the screen agrees with it.
+                foreach (var card in _reviews.Values)
+                    if (card.IsRunning) card.Interrupt();
                 // A tool card is created from the model's streaming tool-call delta (ToolPendingEvent) and closed by
                 // its ToolStart/ToolEnd. If the model call then FAILS and is not retried — which is now possible,
                 // because those callbacks are forwarded live instead of being dropped with the failed attempt — no
@@ -590,6 +597,8 @@ public sealed class TranscriptView : UserControl
 
     TaskNoticeCard? _lastTask;
     readonly Dictionary<int, PlanReviewCard> _reviews = new();
+    /// <summary>The review cards on screen, so a test can read their state without a visual tree.</summary>
+    internal IReadOnlyCollection<PlanReviewCard> ReviewCardsForTest => _reviews.Values;
 
     void AddTaskNotice(TaskNoticeEvent e)
     {

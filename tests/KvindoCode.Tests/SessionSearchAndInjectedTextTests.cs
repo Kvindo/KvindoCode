@@ -245,6 +245,34 @@ public sealed class SessionSearchAndInjectedTextTests(ITestOutputHelper o)
         Assert.Null(AgentSession.StripTrailingRunThatIsPrefixOf("text that runs into C = Check logs pedantically\nQ: = Read only", today));
     }
 
+    /// <summary>
+    /// A suffix EDITED IN THE MIDDLE still leaves legacy messages clean — the block's first line is the anchor.
+    /// </summary>
+    /// <remarks>
+    /// Reported 2026-10-19: "i still see messages with appended part, i think the cause is that i edit it often". The
+    /// prefix rule above only covers a suffix that grew at its END; reword one line in the middle and the old block
+    /// matches neither exactly nor as a prefix, so it stayed on screen for ever. The first line of the suffix survives
+    /// most edits, so it is used as the anchor — but only near the end of the message, and only where an injected block
+    /// would begin (after a blank line), so a message that quotes the line half-way through is left alone.
+    /// </remarks>
+    [Fact]
+    public void A_legacy_message_survives_a_suffix_edited_in_the_middle()
+    {
+        const string today = "1) Shorthands that user may write:\nC = Check the logs\nQ: = Read only, just asking";
+        const string oldBlock = "1) Shorthands that user may write:\nC = old wording here\nE = elaborate";
+        var legacy = "what is the status?\n\n" + oldBlock;
+
+        var cleaned = AgentSession.StripTrailingBlockStartingWith(legacy, today);
+        o.WriteLine("cleaned: " + (cleaned ?? "<null>"));
+        Assert.Equal("what is the status?", cleaned);
+
+        // the same line quoted in the MIDDLE of a message is not a trailing block
+        var quoted = "the file starts with 1) Shorthands that user may write:\nand then it goes on\nwith more of my own text";
+        Assert.Null(AgentSession.StripTrailingBlockStartingWith(quoted, today));
+        // a suffix whose first line is too short to be evidence never matches anything
+        Assert.Null(AgentSession.StripTrailingBlockStartingWith("hello\n\nrules: x", "rules: x"));
+    }
+
     // ---------------------------------------------------------------- (4) naming the sending session
 
     /// <summary>

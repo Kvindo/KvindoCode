@@ -79,6 +79,9 @@ public sealed class AgentSession : IDisposable
             if (text.EndsWith(suf, StringComparison.Ordinal)) text = text[..^suf.Length].TrimEnd();
             // the suffix was EXTENDED after this message was written, so the stored tail is a PREFIX of today's
             else if (StripTrailingRunThatIsPrefixOf(text, suf) is { } shorter) text = shorter;
+            // ...or it was EDITED somewhere in the middle, which defeats both of those; the block's first line is the
+            // anchor that survives such an edit
+            else if (StripTrailingBlockStartingWith(text, suf) is { } anchored) text = anchored;
         }
         return text;
     }
@@ -101,6 +104,42 @@ public sealed class AgentSession : IDisposable
             if (!suffix.AsSpan().StartsWith(text.AsSpan(cut))) continue;
             if (cut == 0 || text[cut - 1] == '\n') return text[..cut].TrimEnd();
             return null;                       // the same words, but not where an injected block would begin
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Strip a trailing block that STARTS with the suffix's first line, for messages written before the applied text was
+    /// recorded.
+    /// </summary>
+    /// <remarks>
+    /// The prefix-of-the-current-suffix rule only covers a suffix that GREW at its end. The user edits theirs often — a
+    /// line reworded in the middle is enough — and then the old block matches the current suffix neither exactly nor as a
+    /// prefix, so it stayed on screen for ever ("i still see messages with appended part, i think the cause is that i
+    /// edit it often", 2026-10-19).
+    ///
+    /// The anchor is the suffix's FIRST line, which survives most edits because it is what names the block. It must
+    /// begin a line, be preceded by a blank line (that is how the block is separated from the user's words) and be long
+    /// enough not to be a coincidence. A message that genuinely ends with that line and no block after it is still
+    /// stripped — which is the right reading: the line is the injected text either way.
+    /// </remarks>
+    internal static string? StripTrailingBlockStartingWith(string text, string suffix)
+    {
+        var firstLine = suffix.Split('\n')[0].TrimEnd();
+        if (firstLine.Length < MinInjectedRun) return null;          // too short to be evidence of anything
+        // The injected block is the TAIL, so the anchor must sit near the end. The bound is generous (twice the current
+        // suffix, and never under 2000 characters) because the block was written by an EARLIER version of the suffix,
+        // which may have been much longer; but it stops a message that merely quotes the line half-way through from
+        // being cut there.
+        var window = Math.Max(2000, suffix.Length * 2);
+        var from = Math.Max(0, text.Length - window);
+        while (from < text.Length)
+        {
+            var i = text.IndexOf(firstLine, from, StringComparison.Ordinal);
+            if (i < 0) return null;
+            var startsBlock = i == 0 || (i >= 2 && text[i - 1] == '\n' && text[i - 2] == '\n');
+            if (startsBlock) return text[..i].TrimEnd();
+            from = i + 1;
         }
         return null;
     }
@@ -779,16 +818,33 @@ public sealed class AgentSession : IDisposable
 
     /// <summary>Completion tokens per second for the last request, or 0 when it cannot be computed honestly.</summary>
     /// <remarks>
-    /// Counted from the FIRST STREAMED CHUNK to the end of the stream: including the pre-first-token wait would fold
-    /// queueing and prompt prefill into "generation speed", which is the number a model comparison is not about. Zero
-    /// when nothing was streamed (a non-streaming answer or a tool-only round) or the window is under a millisecond.
+    /// Measured over the WHOLE request — from the moment it was sent to the moment the stream ended — because that is
+    /// the number a human compares against their own clock. It used to start at the first streamed chunk, which folds
+    /// out the queueing and prompt-prefill wait; on a large context that wait is tens of seconds, so the displayed
+    /// figure ran far above what the user could see happening ("tokens per second looks higher than actual", reported
+    /// 2026-10-19). The chunk-to-end figure is still computed, as <see cref="GenerationTokPerSecond"/>, and shown in the
+    /// tooltip for anyone comparing models.
+    ///
+    /// Zero when nothing was streamed (a non-streaming answer or a tool-only round) or the window is under a
+    /// millisecond.
     /// </remarks>
     double TokPerSecond(int completionTokens)
+    {
+        if (_requestStartedAt is not { } start || completionTokens <= 0) return 0;
+        var seconds = (DateTime.UtcNow - start).TotalSeconds;
+        return seconds < 0.001 ? 0 : completionTokens / seconds;
+    }
+
+    /// <summary>The same tokens per second from the first streamed chunk: generation only, prefill excluded.</summary>
+    double GenerationTokPerSecond(int completionTokens)
     {
         if (_firstChunkAt is not { } start || completionTokens <= 0) return 0;
         var seconds = (DateTime.UtcNow - start).TotalSeconds;
         return seconds < 0.001 ? 0 : completionTokens / seconds;
     }
+
+    /// <summary>When the current request was SENT. The wall-clock rate starts here (see <see cref="TokPerSecond"/>).</summary>
+    DateTime? _requestStartedAt;
 
     public AgentSession(AppSettings settings, ILlmClient llm, string projectCwd, IUserInteraction interaction,
                         SessionInfo? info = null, ISessionStorage? storage = null, string? workDirOverride = null,
@@ -1835,6 +1891,7 @@ public sealed class AgentSession : IDisposable
             // first token is a different number (queueing, prefill) and mixing them makes tok/s meaningless
             // (asked 2026-10-11). `_firstChunkAt` is set by the stream callbacks below.
             _firstChunkAt = null;
+            _requestStartedAt = DateTime.UtcNow;
             var requestWatch = System.Diagnostics.Stopwatch.StartNew();
             try
             {
@@ -1889,7 +1946,8 @@ public sealed class AgentSession : IDisposable
                 // turned one transient read error into a permanent overwrite of settings.json (S7). Persisted at turn end.
                 _settingsDirty = true;
                 LifetimePromptTokens += u.PromptTokens; LifetimeCachedTokens += u.CachedTokens;
-                EmitRaw(new UsageEvent(u.PromptTokens, u.CompletionTokens, ContextWindow, CostRub, u.CachedTokens, (int)Math.Min(int.MaxValue, LifetimePromptTokens), (int)Math.Min(int.MaxValue, LifetimeCachedTokens), TokPerSecond(u.CompletionTokens)));
+                EmitRaw(new UsageEvent(u.PromptTokens, u.CompletionTokens, ContextWindow, CostRub, u.CachedTokens, (int)Math.Min(int.MaxValue, LifetimePromptTokens), (int)Math.Min(int.MaxValue, LifetimeCachedTokens),
+                    TokPerSecond(u.CompletionTokens), GenerationTokPerSecond(u.CompletionTokens)));
             }
 
             // The gateway sometimes returns a diagnostic as ORDINARY content with 0/0 tokens ("[error: console_blocked]"),

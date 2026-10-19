@@ -2027,6 +2027,10 @@ public partial class MainWindow : Window
                 lv.Session.ApplySettingsChange();
             }
             if (before != (_settings.ClaudeSessionsDir, _settings.ClaudeProjectsDir)) ShowError("The session store location changed — restart KvindoCode to apply it.");
+            // the Telegram bridge is a TIMER, created once at startup only if a tag was already configured — so setting
+            // the tag and pressing Save left it off until the next app start ("now i configured it, still doesnt
+            // respond", 2026-10-19). Restart it here: a new tag, a new interval or a cleared tag all take effect at once.
+            RestartTelegramBridge();
             UpdateAll();
         }
     }
@@ -3006,13 +3010,16 @@ public partial class MainWindow : Window
         var cache = life > 0 ? $"↓{lifePct}% avg" : "";
         // Generation speed right beside the cache figure (asked 2026-10-11): a 5-minute weighted average over the
         // session's completed calls, so it says what the provider is actually delivering now, not what one call did.
+        // Each call's window is the WHOLE request (prefill included) — measuring from the first streamed chunk made the
+        // figure run well above what a human could see happening (reported 2026-10-19: "tokens per second looks higher
+        // than actual"); the generation-only rate is in the tooltip for model comparison.
         var speed = CurrentSpeed();
         var speedText = speed > 0 ? $"{speed:0.#} tok/s avg5m" : "";
         var cost = _current.CostRub > 0 ? $"₽{_current.CostRub:0.00}" : "";
         SetUsage(context, cache, speedText, cost);
         var tip = $"Context used by the last request (older messages are summarised automatically at {KvindoCode.Core.Agent.AgentSession.CompactionThreshold * 100:0}%) · session cost reported by the gateway";
         if (life > 0) tip += $"\nPrompt cache, whole session: {Ui.Tokens(_current.LifetimeCachedTokens)} of {Ui.Tokens(life)} tokens ({lifePct}%). A single request is either a full hit or a miss, so the per-request figure jumps — the session average is the one to watch.";
-        if (speed > 0) tip += $"\nGeneration speed: {speed:0.#} completion tokens/second, weighted over the calls of the last 5 minutes (measured from the first streamed chunk, so queueing and prompt prefill are not counted as generation).";
+        if (speed > 0) tip += $"\nGeneration speed: {speed:0.#} completion tokens/second, weighted over the calls of the last 5 minutes, measured over each WHOLE request — queueing and prompt prefill included, so it matches the clock you are watching.";
         ToolTip.SetTip(UsagePanel, tip);
         // the warning colour matches the real threshold; every cell takes it, or half a row turns red
         var over = pct >= KvindoCode.Core.Agent.AgentSession.CompactionThreshold * 100;
@@ -3181,6 +3188,14 @@ public partial class MainWindow : Window
     DispatcherTimer? _telegramTimer;
     bool _telegramPolling;
 
+    /// <summary>Stop the poller and start it again from the CURRENT settings (a tag added or changed takes effect now).</summary>
+    void RestartTelegramBridge()
+    {
+        _telegramTimer?.Stop();
+        _telegramTimer = null;
+        StartTelegramBridge();
+    }
+
     async Task PollTelegramAsync()
     {
         var tag = _settings.TelegramCoordinatorTag.Trim();
@@ -3193,7 +3208,10 @@ public partial class MainWindow : Window
         var messages = await _telegram.NewMessagesAsync();
         foreach (var m in messages)
         {
-            if (!m.Text.Contains(tag, StringComparison.OrdinalIgnoreCase)) continue;
+            // The rule lives in Core so it can be tested without a network session: the tag must be present, the message
+            // must not be the bridge's OWN reply (it posts as the user, so its own messages come back as outgoing), and
+            // the chat's kind does not matter — a tag in a group counts exactly like a direct message.
+            if (!KvindoCode.Core.Telegram.TelegramBridgeRule.ShouldAnswer(m.Text, tag, _telegramReplies.Contains((m.ChatId, m.MessageId)))) continue;
             // the coordinator session, created on demand (the same one the sidebar's row opens)
             var sv = _live.Values.FirstOrDefault(v => string.Equals(v.Session.Info.Title, CoordinatorTitle, StringComparison.Ordinal));
             if (sv is null)
@@ -3203,17 +3221,26 @@ public partial class MainWindow : Window
                 if (sv is null) return;
             }
             var before = sv.Transcript.ItemCount;
-            var text = m.Text.Replace(tag, "", StringComparison.OrdinalIgnoreCase).Trim();
+            var text = KvindoCode.Core.Telegram.TelegramBridgeRule.QuestionOf(m.Text, tag);
             if (text.Length == 0) continue;
+            UiTrace.Line($"telegram bridge: '{text}' from {m.Sender} in chat {m.ChatId}");
             SendSessionPrompt(sv, text);
             // wait for that turn to finish (bounded), then send what the assistant said as the reply
             for (var i = 0; i < 600 && (sv.Running || sv.Transcript.ItemCount == before); i++) await Task.Delay(200);
             var answer = LastAssistantText(sv);
             if (answer.Length == 0) answer = "(the coordinator produced no text answer)";
-            try { await _telegram.SendTextAsync(m.ChatId.ToString(), answer, replyTo: m.MessageId); }
+            try
+            {
+                var (sentLine, newId) = await _telegram.SendTextWithIdAsync(m.ChatId.ToString(), answer, m.MessageId);
+                if (newId > 0) _telegramReplies.Add((m.ChatId, newId));
+                UiTrace.Line("telegram bridge: " + sentLine);
+            }
             catch (Exception e) { UiTrace.Line("telegram bridge reply failed: " + e.Message); }
         }
     }
+
+    /// <summary>Message ids this bridge posted, so it never answers its own reply (it sends AS the user).</summary>
+    readonly HashSet<(long ChatId, int MessageId)> _telegramReplies = new();
 
     KvindoCode.Core.Telegram.TelegramUserClient? _telegram;
 

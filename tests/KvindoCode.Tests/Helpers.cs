@@ -5,7 +5,11 @@ using KvindoCode.Core.Context;
 using KvindoCode.Core.Llm;
 using KvindoCode.Core.Tools;
 
-[assembly: Xunit.CollectionBehavior(DisableTestParallelization = true)]   // tests share the KVINDOCODE_HOME env var
+// SERIAL, and measured rather than assumed: making collections parallel (each Sandbox flow-scoped, the UI tests in one
+// exclusive collection) cut a full run from 26m02 to only 24m42 — 5% — while three tests started failing on shared
+// statics (SecretVault.Default, the notifier). The suite's time is NOT parallel work: it is the real-LLM auditor class
+// (10 of the 26 minutes) and the serial UI collection. See tools/test.sh for the split that actually helps.
+[assembly: Xunit.CollectionBehavior(DisableTestParallelization = true)]
 
 namespace KvindoCode.Tests;
 
@@ -27,12 +31,16 @@ public sealed class Sandbox : IDisposable
     public string Root { get; } = Path.Combine(Path.GetTempPath(), "kvindocode-test-" + Guid.NewGuid().ToString("N")[..8]);
     public string Home => Path.Combine(Root, "home");
     public string Project => Path.Combine(Root, "proj");
-    readonly string? _oldHome = Environment.GetEnvironmentVariable("KVINDOCODE_HOME");
+    readonly string? _oldFlow = Paths.FlowConfigDir.Value;
 
     public Sandbox()
     {
         Directory.CreateDirectory(Home); Directory.CreateDirectory(Project);
-        Environment.SetEnvironmentVariable("KVINDOCODE_HOME", Home);
+        // FLOW-scoped, not process-wide. KVINDOCODE_HOME is one value for the whole process, so two tests running at the
+        // same time overwrote each other's home — which is why the suite had to disable parallelism entirely and took
+        // 23 minutes. An AsyncLocal follows this test's own awaits and the tasks it starts, and no other test can see it.
+        // The environment variable stays the fallback, so the product itself is unaffected.
+        Paths.FlowConfigDir.Value = Home;
     }
 
     public string Write(string rel, string content)
@@ -51,21 +59,17 @@ public sealed class Sandbox : IDisposable
     }
 
     /// <summary>
-    /// Restore the process-wide pin, NOT the value that happened to be set when this sandbox was built.
+    /// Give the config dir back to whoever had it before this sandbox.
     /// </summary>
     /// <remarks>
-    /// A sandbox restores the previous value on dispose, which is only correct when sandboxes nest — they never do. The
-    /// real failure: a helper that creates a Sandbox and never disposes it leaves KVINDOCODE_HOME pointing at THAT
-    /// sandbox for the rest of the run, and every later Sandbox then captures the stale value as "previous", so one
-    /// leak propagates. TestIsolationTests exists to prove the process never leaves the pinned scratch dir and caught it
-    /// ("Expected /tmp/kvindocode-testrun, Actual /tmp/kvindocode-test-<id>/home"). Always restoring the pin is
-    /// idempotent and cannot leak.
+    /// The flow value is restored, not the process-wide pin: a test's home is now flow-scoped (see the constructor), so
+    /// there is nothing to leak into the process. <see cref="TestRunHome"/> still pins KVINDOCODE_HOME for the whole run,
+    /// which is what keeps anything that escapes a test (a timer, a detached thread) inside the scratch dir rather than
+    /// the user's real config.
     /// </remarks>
     public void Dispose()
     {
-        Environment.SetEnvironmentVariable("KVINDOCODE_HOME", TestRunHome.Dir);
-        if (_oldHome is { Length: > 0 } prev && prev != TestRunHome.Dir && !prev.StartsWith(Path.Combine(Path.GetTempPath(), "kvindocode-test-"), StringComparison.Ordinal))
-            Environment.SetEnvironmentVariable("KVINDOCODE_HOME", prev);      // an explicitly different home: honour it
+        Paths.FlowConfigDir.Value = _oldFlow;
         try { Directory.Delete(Root, true); } catch { }
     }
 }

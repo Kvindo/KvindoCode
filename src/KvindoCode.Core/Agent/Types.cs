@@ -93,8 +93,14 @@ public sealed record ToolEndEvent(string Id, string Name, string Output, bool Is
 public sealed record ModeChangedEvent(PermissionMode Mode) : AgentEvent;
 public sealed record WorkModeChangedEvent(SessionMode Mode) : AgentEvent;
 public sealed record TodosChangedEvent(IReadOnlyList<TodoItem> Todos) : AgentEvent;
+/// <param name="TokensPerSecond">Completion tokens per second over the WHOLE request — time to first token included, so
+/// it matches the wall clock a human sees. This is the figure to show.</param>
+/// <param name="GenerationTokensPerSecond">The same tokens per second measured from the first streamed chunk, i.e. pure
+/// generation without queueing and prompt prefill. Diagnostic only: it is always HIGHER than the wall-clock rate, which
+/// is why it stopped being the displayed number (reported 2026-10-19: "tokens per second looks higher than actual").</param>
 public sealed record UsageEvent(int PromptTokens, int CompletionTokens, int ContextWindow, double TotalCostRub = 0, int CachedTokens = 0,
-                                int LifetimePromptTokens = 0, int LifetimeCachedTokens = 0, double TokensPerSecond = 0) : AgentEvent;
+                                int LifetimePromptTokens = 0, int LifetimeCachedTokens = 0, double TokensPerSecond = 0,
+                                double GenerationTokensPerSecond = 0) : AgentEvent;
 public sealed record TaskNoticeEvent(int TaskId, string Description, string Text, bool IsExit) : AgentEvent;
 public sealed record TasksChangedEvent : AgentEvent;
 /// <summary>Round = 1-based review round; Running=true while the reviewer works; Text = critique (or a note).</summary>

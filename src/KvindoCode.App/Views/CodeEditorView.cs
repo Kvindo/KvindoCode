@@ -301,6 +301,13 @@ public sealed class CodeEditorView : UserControl
     {
         if (this.TryFindResource("KvBg", ActualThemeVariant, out var bg) && bg is Avalonia.Media.IBrush b) _editor.Background = b;
         if (this.TryFindResource("KvText", ActualThemeVariant, out var fg) && fg is Avalonia.Media.IBrush f) _editor.Foreground = f;
+        // The editor carries its OWN selection brushes (the app's TextBox style does not reach it), and its default
+        // highlight is the same unreadable mid blue the transcript had — "in dark theme highlit text looks unreadable"
+        // (reported 2026-10-19). Same pair as everywhere else, so a selection looks identical in both places.
+        if (this.TryFindResource("KvSelection", ActualThemeVariant, out var sel) && sel is Avalonia.Media.IBrush sb)
+            _editor.TextArea.SelectionBrush = sb;
+        if (this.TryFindResource("KvSelectionText", ActualThemeVariant, out var selfg) && selfg is Avalonia.Media.IBrush sf)
+            _editor.TextArea.SelectionForeground = sf;
     }
 
     /// <summary>

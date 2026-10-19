@@ -507,4 +507,24 @@ public sealed class PlanReviewCard : Border
         if (_live is null) { _live = new MarkdownView { BaseSize = fontSize - 1 }; _body.Children.Clear(); _body.Children.Add(_live); }
         _live.SetText(critique);
     }
+
+    /// <summary>
+    /// The turn ended while this round was still running — the user stopped it, so no finish event is coming.
+    /// </summary>
+    /// <remarks>
+    /// Without this the card kept its pulsing dot and "the reviewer is criticising the plan…" after a Stop, so the
+    /// screen said the review was still going while the turn was over — reported as "Looks like stop doesnt work while
+    /// 'Reviewing plan (round 2/2)…'" (2026-10-19). The pulse animation is CANCELLED, not merely hidden: an animation
+    /// left running on a control nobody will ever look at again is a leak.
+    /// </remarks>
+    /// <summary>The header line, so a test can read what the card says without a visual tree.</summary>
+    internal string StatusForTest => _status.Text;
+
+    public void Interrupt()
+    {
+        IsRunning = false;
+        _pulse?.Cancel(); _pulse = null; _dot.Opacity = 1;
+        Ui.BindBrush(_dot, BackgroundProperty, "KvMuted");
+        _status.Text = $"Plan review · round {_round}/{_total} · interrupted — this round did not finish";
+    }
 }

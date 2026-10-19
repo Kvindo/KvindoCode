@@ -84,6 +84,17 @@
     <Style Selector="SelectableTextBlock">
       <Setter Property="Foreground" Value="{DynamicResource KvText}"/>
       <Setter Property="Background" Value="Transparent"/>
+      <!-- Selected text must stay readable in BOTH themes. The theme's default highlight follows the accent, and the
+           dark theme's pale body text on it measures 2.69:1 — "in dark theme highlit text looks unreadable" (reported
+           2026-10-19). These brushes are 8.6:1 (dark) and 10.5:1 (light); SelectionContrastTests renders a frame and
+           measures the pixels, so a future palette change cannot quietly undo this. -->
+      <Setter Property="SelectionBrush" Value="{DynamicResource KvSelection}"/>
+      <Setter Property="SelectionForegroundBrush" Value="{DynamicResource KvSelectionText}"/>
+    </Style>
+    <!-- Every other control that can hold a selection: inputs, the editor, the composer, the terminal's own text. -->
+    <Style Selector="TextBox">
+      <Setter Property="SelectionBrush" Value="{DynamicResource KvSelection}"/>
+      <Setter Property="SelectionForegroundBrush" Value="{DynamicResource KvSelectionText}"/>
     </Style>
     <Style Selector="TextBlock"><Setter Property="Background" Value="Transparent"/></Style>
     <Style Selector="TextBlock.muted"><Setter Property="Foreground" Value="{DynamicResource KvMuted}"/></Style>
@@ -417,6 +428,12 @@
           <SolidColorBrush x:Key="KvPlan">#6FA8DC</SolidColorBrush>
           <SolidColorBrush x:Key="KvPlanBg">#22313F</SolidColorBrush>
           <SolidColorBrush x:Key="KvInlineCode">#3A3935</SolidColorBrush>
+          <!-- Text selection. Set explicitly because the theme's own highlight follows SystemAccentColor (#D97757),
+               and the dark theme's pale body text on it is 2.69:1 — measured on a rendered frame, and exactly what
+               "in dark theme highlit text looks unreadable" means (reported 2026-10-19). This pair is 8.6:1; WCAG AA
+               asks for 4.5:1. Pinned by SelectionContrastTests, which renders a frame and measures it. -->
+          <SolidColorBrush x:Key="KvSelection">#7C2D12</SolidColorBrush>
+          <SolidColorBrush x:Key="KvSelectionText">#FFF3EC</SolidColorBrush>
         </ResourceDictionary>
         <ResourceDictionary x:Key="Light">
           <SolidColorBrush x:Key="KvBg">#FAF9F5</SolidColorBrush>
@@ -439,6 +456,9 @@
           <SolidColorBrush x:Key="KvPlan">#2C6FAE</SolidColorBrush>
           <SolidColorBrush x:Key="KvPlanBg">#E3EEF8</SolidColorBrush>
           <SolidColorBrush x:Key="KvInlineCode">#ECE9DD</SolidColorBrush>
+          <!-- Light theme: a pale accent tint, which measures 10.5:1 against the body text (see the Dark note). -->
+          <SolidColorBrush x:Key="KvSelection">#F2C4A8</SolidColorBrush>
+          <SolidColorBrush x:Key="KvSelectionText">#1F1E1D</SolidColorBrush>
         </ResourceDictionary>
       </ResourceDictionary.ThemeDictionaries>
     </ResourceDictionary>

@@ -8,6 +8,18 @@ public static class Paths
     public static string Home => Environment.GetEnvironmentVariable("HOME") is { Length: > 0 } h
         ? h : Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
 
+    /// <summary>A config dir for the CURRENT asynchronous flow, overriding the environment.</summary>
+    /// <remarks>
+    /// The environment variable is process-wide, which is fine for the product (one config dir per process) and wrong for
+    /// a test suite that wants to run classes in PARALLEL: two tests each setting <c>KVINDOCODE_HOME</c> overwrite each
+    /// other, which is why the suite had to disable parallelism entirely and took 23 minutes.
+    ///
+    /// <see cref="AsyncLocal{T}"/> flows into the test's own awaited continuations and into the tasks it starts, and it is
+    /// invisible to every other test, so each test can own its own home while the suite runs concurrently. The
+    /// environment stays the fallback, so nothing changes for the app itself (which never sets this).
+    /// </remarks>
+    public static readonly AsyncLocal<string?> FlowConfigDir = new();
+
     /// <summary>The config dir, COPIED from the pre-rename location on first use.</summary>
     /// <remarks>
     /// The product was called PvCode until 2026-10-08 and its data lived in <c>~/.pvcode</c> (settings, the encrypted
@@ -20,6 +32,7 @@ public static class Paths
     {
         get
         {
+            if (FlowConfigDir.Value is { Length: > 0 } flow) return flow;      // a parallel test's own home
             var env = Environment.GetEnvironmentVariable("KVINDOCODE_HOME") is { Length: > 0 } p ? p
                     : Environment.GetEnvironmentVariable("PVCODE_HOME") is { Length: > 0 } legacy ? legacy
                     : null;

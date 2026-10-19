@@ -37,8 +37,32 @@ for d in "${TMPDIR:-/tmp}"/kvindocode-test-*; do
 done
 [ "$swept" -gt 0 ] && echo "→ swept $swept stale test sandbox(es) from interrupted runs"
 
+# THE REAL-LLM CLASS IS OPT-IN. SecretAuditorRealUiTests drives a real vllm on 127.0.0.1:8001, one inference per audited
+# tool output: measured 2026-10-19 it is TEN of a 26-minute run, and its Scenario_6_1 (read the whole source tree, expect
+# no false positive) is three minutes on its own. That is genuine model work, so it cannot be made faster — only kept out
+# of the loop you run on every edit. --all (or KVINDOCODE_SLOW_TESTS=1) runs it; so does any run that passes its own
+# --filter, because then you asked for a specific selection and this script must not narrow it further.
+ARGS=("$@")
+WANT_ALL=0
+[ "${KVINDOCODE_SLOW_TESTS:-}" = "1" ] && WANT_ALL=1
+HAS_FILTER=0
+for a in "${ARGS[@]}"; do
+  case "$a" in
+    --all) WANT_ALL=1;;
+    --filter|--filter=*|-filter) HAS_FILTER=1;;
+  esac
+done
+if [ "$WANT_ALL" = 1 ]; then
+  FILTERED=()
+  for a in "${ARGS[@]}"; do [ "$a" = "--all" ] || FILTERED+=("$a"); done
+  ARGS=("${FILTERED[@]}")
+elif [ "$HAS_FILTER" = 0 ]; then
+  echo "→ skipping Category=RealLlm (real vllm on :8001); --all or KVINDOCODE_SLOW_TESTS=1 to include it"
+  ARGS+=(--filter "Category!=RealLlm")
+fi
+
 exec "${POLITE[@]}" env \
   DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1 DOTNET_gcServer=0 DOTNET_TieredPGO=0 \
   MSBUILDDISABLENODEREUSE=1 \
   "$DOTNET" test tests/KvindoCode.Tests -c Release \
-    -maxcpucount:"${KVINDOCODE_TEST_JOBS:-4}" -nodeReuse:false -p:UseSharedCompilation=false --nologo -v q "$@"
+    -maxcpucount:"${KVINDOCODE_TEST_JOBS:-4}" -nodeReuse:false -p:UseSharedCompilation=false --nologo -v q "${ARGS[@]}"
