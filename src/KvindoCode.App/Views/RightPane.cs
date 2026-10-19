@@ -101,8 +101,15 @@ public sealed class RightPane : UserControl
 
     // ------------------------------------------------------------------ public API
 
+    /// <summary>What the pane is showing, for the window to decide whether a switch may reset it.</summary>
+    public bool ShowsTerminal => _active == "terminal";
+
     public void Reset()
     {
+        // A TERMINAL survives a session switch: it is a shell on a server, not a view of the conversation, and closing
+        // it because the human looked at another session loses the login they were in the middle of (found 2026-10-19
+        // while chasing "terminal doesnt open in side bar": the tool opened it and the next Show() reset it away).
+        if (ShowsTerminal) return;
         _plan = null; _detail = null; _file = null; _agent = null; _context = null; _active = "";
         _planTab.IsVisible = _detailTab.IsVisible = _fileTab.IsVisible = false;
         _session = null; _searchTab.IsVisible = false;

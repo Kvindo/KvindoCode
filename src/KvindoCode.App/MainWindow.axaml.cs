@@ -1179,7 +1179,7 @@ public partial class MainWindow : Window
         sv.Transcript.ScrollToEnd();
         Input.Text = sv.Draft;
         _pane.Reset();
-        if (PaneHost.IsVisible)
+        if (PaneHost.IsVisible && !_pane.ShowsTerminal)
         {
             if (sv.Transcript.LatestPlan is { } lp) _pane.ShowPlan(lp, _settings.FontSize); else ShowPaneHint();
         }
