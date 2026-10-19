@@ -87,6 +87,19 @@ public sealed class AppSettings
     public string TelegramApiBase { get; set; } = "";
     /// <summary>Chat the <c>Telegram</c> tool uses when no chat is given (a numeric id, @username, or "me").</summary>
     public string TelegramDefaultChat { get; set; } = "";
+
+    /// <summary>
+    /// Telegram messages containing this tag are handed to the COORDINATOR, and its answer is sent back as a reply.
+    /// </summary>
+    /// <remarks>
+    /// Asked 2026-10-19: "i want setting that will send my messages in telegram that contain @kc be sent to coordinator
+    /// so that i can ask agent from telegram chat and receive response here as reply to my message". Empty = off, so
+    /// nothing polls Telegram unless it is switched on; the tag is compared case-insensitively against the whole
+    /// message.
+    /// </remarks>
+    public string TelegramCoordinatorTag { get; set; } = "";
+    /// <summary>How often to poll Telegram for tagged messages, in seconds (0 = only when a turn is idle).</summary>
+    public int TelegramCoordinatorPollSeconds { get; set; } = 20;
     /// <summary>Vault entry NAME holding the api_id from my.telegram.org.</summary>
     public string TelegramApiIdSecret { get; set; } = "telegram-api-id";
     /// <summary>Vault entry NAME holding the api_hash.</summary>

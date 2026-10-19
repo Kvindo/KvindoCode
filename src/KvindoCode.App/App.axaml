@@ -307,8 +307,24 @@
       <Setter Property="Padding" Value="0"/>
       <Setter Property="Margin" Value="0"/>
     </Style>
-    <!-- The step per level is the chevron column plus this margin: 12 + 4 = 16 px, half the 32 it started at (asked
-         2026-10-19: "offsets of tree item are still too big, lets decrease by 50%"). -->
+    <!-- MEASURED, not guessed (2026-10-19): the real per-level step is the chevron CONTAINER's margins (12+12) plus
+         the chevron's own width plus this presenter's margin — about 40 px, which is why changing only the ToggleButton
+         width did nothing. The container carries a Margin of 12,0,12,0 and the header's own Grid another 16 at every
+         level. All three are tightened here, so the step really halves. -->
+    <!-- The tree's OWN ScrollViewer: an attached property on the TreeView is inherited by its template, but the
+         vertical bar came back "minimized" because the template's own style sets Auto. A style on the part wins over
+         the inherited value. -->
+    <Style Selector="TreeView.compact /template/ ScrollViewer">
+      <Setter Property="HorizontalScrollBarVisibility" Value="Disabled"/>
+      <Setter Property="VerticalScrollBarVisibility" Value="Visible"/>
+    </Style>
+    <Style Selector="TreeView.compact TreeViewItem /template/ Panel#PART_ExpandCollapseChevronContainer">
+      <Setter Property="Margin" Value="2,0,2,0"/>
+      <Setter Property="Width" Value="12"/>
+    </Style>
+    <Style Selector="TreeView.compact TreeViewItem /template/ Grid#PART_Header">
+      <Setter Property="Margin" Value="4,0,0,0"/>
+    </Style>
     <Style Selector="TreeView.compact TreeViewItem /template/ ItemsPresenter#PART_ItemsPresenter">
       <Setter Property="Margin" Value="4,0,0,0"/>
     </Style>

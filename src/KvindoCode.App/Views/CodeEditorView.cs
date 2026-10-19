@@ -323,7 +323,19 @@ public sealed class CodeEditorView : UserControl
 
     Control BuildTreeColumn()
     {
-        _search.TextChanged += (_, _) => ApplyFilter();
+        // ONE BOX, TWO JOBS, and the rule is "it searches what you are looking at" (asked 2026-10-19: "regexp search in
+        // opened file via text box on top, with replace option"). With a file open it finds in that file — regex when
+        // the .* toggle is on, with the replace row underneath; with nothing open it filters file names, as before.
+        _search.TextChanged += (_, _) =>
+        {
+            if (_openPath is not null && _findRow is not null)
+            {
+                _findRow.IsVisible = true;
+                _findInFile.Text = _search.Text ?? "";
+                FindNextInFile(false);
+            }
+            else ApplyFilter();
+        };
         _tree.Classes.Add("compact");
         // no sideways scrolling, and a vertical bar that is always there (asked 2026-10-19: "horizontal scroll still
         // present and vertical scroll is not unminimized"). These are ATTACHED properties on the control, which its
@@ -423,8 +435,11 @@ public sealed class CodeEditorView : UserControl
         allBtn.Click += (_, _) => ShowFindInFiles();
         Grid.SetColumn(allBtn, 1);
         searchRow.Children.Add(allBtn);
+        var findRow = BuildFindRow();
         DockPanel.SetDock(searchRow, Dock.Top);
         sp.Children.Add(searchRow);
+        DockPanel.SetDock(findRow, Dock.Top);
+        sp.Children.Add(findRow);
         DockPanel.SetDock(_searchPanel, Dock.Top);
         sp.Children.Add(_searchPanel);
         sp.Children.Add(_tree);
@@ -522,6 +537,52 @@ public sealed class CodeEditorView : UserControl
     }
 
     // ---------------------------------------------------------------- find / replace
+
+    /// <summary>The replace row under the top search box, shown while a file is open.</summary>
+    StackPanel? _findRow;
+
+    /// <summary>The replace box of the TOP row. A control cannot live in two panels, and the find bar already owns
+    /// <c>_replaceInFile</c>; this one is the top row's own.</summary>
+    readonly TextBox _replaceTop = new() { Watermark = "Replace with…", FontSize = 12, MinHeight = 24, Width = 150 };
+
+    /// <summary>Build the replace row that sits under the top search box (file open only).</summary>
+    StackPanel BuildFindRow()
+    {
+        // Its OWN toggle: the find bar already owns one, and a control cannot live in two panels. Both drive the same
+        // state, so switching either one changes the search mode.
+        var regexTop = new Avalonia.Controls.Primitives.ToggleButton
+        {
+            Name = "EditorFindRegexTop", Classes = { "ghost" }, Padding = new Thickness(6), MinWidth = 0,
+            Content = new TextBlock { Text = ".*", FontFamily = new FontFamily(TerminalsView.MonoFont), FontSize = 12 },
+            IsChecked = _findRegex?.IsChecked == true,
+        };
+        ToolTip.SetTip(regexTop, "Treat the search as a regular expression");
+        regexTop.IsCheckedChanged += (_, _) =>
+        {
+            if (_findRegex is not null) _findRegex.IsChecked = regexTop.IsChecked;   // keep the two in step
+            if (_openPath is not null) FindNextInFile(false);
+        };
+
+        Button Small(string icon, string tip, Action onClick, string name)
+        {
+            var b = new Button { Name = name, Classes = { "ghost" }, Padding = new Thickness(4, 1), Content = Ui.Icon(icon, "KvMuted", 12), MinWidth = 0 };
+            ToolTip.SetTip(b, tip);
+            b.Click += (_, _) => onClick();
+            return b;
+        }
+
+        _replaceTop.Name = "EditorReplaceTop";
+        // The value is read from _replaceTop when a replace runs (see Replacement()), not copied on TextChanged: a
+        // handler only fires once the box is attached and typed into, so a test (or a paste before the row is shown)
+        // left the find bar's box empty and "replace" silently did nothing.
+        var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4, Margin = new Thickness(0, 0, 0, 4), IsVisible = false };
+        row.Children.Add(_replaceTop);
+        row.Children.Add(regexTop);
+        row.Children.Add(Small("IconReplace", "Replace this match", () => ReplaceInFile(false), "EditorReplaceOne"));
+        row.Children.Add(Small("IconCheck", "Replace all matches in this file", () => ReplaceInFile(true), "EditorReplaceAll"));
+        _findRow = row;
+        return row;
+    }
 
     /// <summary>The find bar above the text: find, next, previous, replace, replace all.</summary>
     /// <remarks>
@@ -641,13 +702,21 @@ public sealed class CodeEditorView : UserControl
         _findInFileStatus.Text = $"{all.Count} match" + (all.Count == 1 ? "" : "es");
     }
 
+    /// <summary>What to replace with: the TOP box when the file-manager row is showing, else the find bar's.</summary>
+    string Replacement()
+    {
+        var top = _replaceTop.Text ?? "";
+        if (_findRow is { IsVisible: true } && top.Length > 0) return top;
+        return _replaceInFile.Text ?? "";
+    }
+
     /// <summary>Replace the current selection (when it is the match) or all matches in the open file.</summary>
     void ReplaceInFile(bool all)
     {
         if (_openPath is null) return;
         var needle = _findInFile.Text ?? "";
         if (needle.Length == 0) return;
-        var with = _replaceInFile.Text ?? "";
+        var with = Replacement();
         var text = _editor.Text ?? "";
         var rx = Matcher(needle, out var error);
         if (rx is null) { _findInFileStatus.Text = error is null ? "" : "bad pattern"; return; }
@@ -1130,6 +1199,7 @@ public sealed class CodeEditorView : UserControl
             var scope = _registry.GetScopeByExtension(ext);
             _textMate.SetGrammar(scope);
             _status.Text = "saved";
+            if (_search.Text is { Length: > 0 } seed && _findRow is not null) { _findInFile.Text = seed; _findRow.IsVisible = true; }
             if (focus) _editor.Focus();
         }
         catch (Exception e) { _onNotice("Could not open " + path + ": " + e.Message); }
