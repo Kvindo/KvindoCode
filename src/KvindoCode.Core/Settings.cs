@@ -166,6 +166,9 @@ public sealed class AppSettings
     /// the project root, and every path is relative to it, so a session that runs in its own worktree still finds the
     /// same files.</remarks>
     public Dictionary<string, string> EditorState { get; set; } = new();
+
+    /// <summary>The file manager's terminal-panel height per project, in pixels.</summary>
+    public Dictionary<string, string> TerminalHeights { get; set; } = new();
     public List<string> Projects { get; set; } = new();
 
     /// <summary>The last time a previous run was seen alive. Refreshed every 20 s while the app runs, so after a restart

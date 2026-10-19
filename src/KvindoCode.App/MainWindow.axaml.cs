@@ -769,6 +769,15 @@ public partial class MainWindow : Window
         // The Terminal TOOL opens a real tmux session and asks for it to be SHOWN: put it in the side panel, so the human
         // can type into the same shell the model is driving (asked 2026-10-18: a terminal to a server that is already
         // logged in). Only the session on screen opens the pane — a background session must not steal the panel.
+        // The same for a FILE: the model points at one and it opens in the side panel, at the line if it gave one.
+        session.FileRequested += (path, line) => Dispatcher.UIThread.Post(() =>
+        {
+            if (!_live.ContainsKey(sv.Id) || sv != _current) return;
+            if (!File.Exists(path)) { ShowError("The session asked to show a file that does not exist: " + path); return; }
+            OpenPane();
+            _pane.SetProject(sv.Session.WorkDir);
+            _pane.ShowFile(path, line);
+        });
         session.TerminalRequested += (tmuxSession, title, dir) => Dispatcher.UIThread.Post(() =>
         {
             if (!_live.ContainsKey(sv.Id) || sv != _current) return;
@@ -3120,11 +3129,78 @@ public partial class MainWindow : Window
         Dispatcher.UIThread.Post(() => SidebarScroll.Offset = keepOffset, DispatcherPriority.Loaded);
     }
 
+    /// <summary>The fixed name of the cross-project session.</summary>
+    internal const string CoordinatorTitle = "COORDINATOR";
+
+    /// <summary>The COORDINATOR row: one session, always first, in Delegate mode when it is created.</summary>
+    /// <remarks>Delegate is the right default for a session that is not scoped to a project: it cannot edit files
+    /// directly, it works through subagents that do — which is exactly what coordinating several projects needs.</remarks>
+    Button CoordinatorRow()
+    {
+        var info = _all.FirstOrDefault(x => !x.Subagent && string.Equals(x.Title, CoordinatorTitle, StringComparison.Ordinal));
+        var row = new Button
+        {
+            Name = "CoordinatorRow",
+            Classes = { "ghost" },
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            HorizontalContentAlignment = HorizontalAlignment.Left,
+            Padding = new Thickness(10, 7),
+            Margin = new Thickness(0, 0, 0, 4),
+        };
+        var line = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
+        line.Children.Add(Ui.Icon("IconDelegate", "KvAccent", 14));
+        line.Children.Add(new TextBlock
+        {
+            Text = CoordinatorTitle,
+            FontWeight = FontWeight.Medium,
+            FontSize = 13,
+            VerticalAlignment = VerticalAlignment.Center,
+        });
+        if (info is not null && _settings.AttentionSessions.Contains(info.Id) && !_settings.AttentionAcknowledged.Contains(info.Id))
+        {
+            var dot = new Border { Width = 7, Height = 7, CornerRadius = new CornerRadius(4), VerticalAlignment = VerticalAlignment.Center };
+            Ui.BindBrush(dot, Border.BackgroundProperty, "KvAccent");
+            line.Children.Add(dot);
+        }
+        row.Content = line;
+        ToolTip.SetTip(row, "The cross-project session. It is not tied to a project and starts in Delegate mode: it answers, " +
+                            "asks and works through subagents that do the project work.");
+        row.Click += (_, _) => _ = OpenCoordinatorAsync();
+        return row;
+    }
+
+    /// <summary>Open the COORDINATOR, creating it on first use in its own directory.</summary>
+    async Task OpenCoordinatorAsync()
+    {
+        var existing = _all.FirstOrDefault(x => !x.Subagent && string.Equals(x.Title, CoordinatorTitle, StringComparison.Ordinal));
+        if (existing is not null) { await OpenSessionAsync(existing); return; }
+
+        // Its own folder: not a project, so a session that coordinates several of them does not claim one. Under the
+        // config dir, so it is never mistaken for the human's code.
+        var dir = Path.Combine(Paths.ConfigDir, "coordinator");
+        Directory.CreateDirectory(dir);
+        var inter = new UiInteraction();
+        var session = new AgentSession(_settings, _llm, dir, inter, null, _storage)
+        {
+            ModelLookup = LookupModel, ModelNameLookup = LookupModelByName, AutoTitle = false,
+        };
+        var sv = Attach(session, inter, replay: false);
+        session.SetWorkMode(SessionMode.Delegate);
+        session.SetTitle(CoordinatorTitle, "user");
+        Show(sv);
+        RebuildSidebar();
+    }
+
     void RebuildSidebarCore()
     {
         RebuildSidebarCount++;      // for the test that a replayed history does not rebuild the panel per event
         PromotePendingAttention();  // deferred entries whose session is no longer on screen enter the block here
         ProjectsPanel.Children.Clear();
+        // The COORDINATOR sits at the very top, above every project group, and is not scoped to one (asked 2026-10-19:
+        // "a system session named COORDINATOR that is not scoped to projects ... always on top in session list right
+        // after search bar ... by default work in delegate mode"). It is a real session like any other — its own
+        // transcript, its own mode — it just lives outside the project tree.
+        if (_query.Length == 0) ProjectsPanel.Children.Add(CoordinatorRow());
         if (_query.Length > 0) { RebuildSearchResults(); return; }
 
         // sessions started in this window are not in the cached list until the next refresh — show them anyway.

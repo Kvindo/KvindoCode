@@ -190,8 +190,15 @@ public sealed class CodeEditorView : UserControl
         _terminalHost = BuildTerminalPanel();
         DockPanel.SetDock(_terminalHost, Dock.Bottom);
         _terminalHost.IsVisible = false;
+        if (_settings is not null && _settings.TerminalHeights.TryGetValue(_root, out var savedH)
+            && double.TryParse(savedH, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var h))
+            _terminalHeight = Math.Max(80, h);
+        _terminalHost.Height = _terminalHeight;
+        // the grip sits directly above the panel, also docked bottom, so it drags the panel's top edge
+        if (_terminalGrip is { } g) { DockPanel.SetDock(g, Dock.Bottom); g.IsVisible = false; }
 
         var dock = new DockPanel();
+        if (_terminalGrip is { } grip2) dock.Children.Add(grip2);
         dock.Children.Add(_terminalHost);
         dock.Children.Add(body);
         Content = dock;
@@ -843,12 +850,38 @@ public sealed class CodeEditorView : UserControl
         var host = new Border
         {
             BorderThickness = new Thickness(0, 1, 0, 0),
-            Height = 260,
+            Height = _terminalHeight,
+            MinHeight = 80,
             Child = new DockPanel { Children = { head } },
         };
         DockPanel.SetDock(head, Dock.Top);
         Ui.BindBrush(host, Border.BorderBrushProperty, "KvBorder");
+        // A DRAGGABLE top edge (asked 2026-10-19: "in file manager i cant change height of terminal"). The border is
+        // docked at the bottom, so a thin splitter above it is what resizes it; the height is remembered per project
+        // like the grid's splitter sizes.
+        var grip = new GridSplitter
+        {
+            Name = "EditorTerminalSplitter",
+            Height = 5,
+            Background = Brushes.Transparent,
+            ResizeDirection = GridResizeDirection.Rows,
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            Cursor = new Avalonia.Input.Cursor(Avalonia.Input.StandardCursorType.SizeNorthSouth),
+        };
+        _terminalGrip = grip;
+        grip.DragDelta += (_, _) => { _terminalHeight = Math.Max(80, host.Bounds.Height); SaveTerminalHeight(); };
         return host;
+    }
+
+    /// <summary>The terminal panel's height, remembered per project.</summary>
+    double _terminalHeight = 260;
+    GridSplitter? _terminalGrip;
+
+    void SaveTerminalHeight()
+    {
+        if (_settings is null) return;
+        _settings.TerminalHeights[_root] = _terminalHeight.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture);
+        try { _settings.Save(); } catch { }
     }
 
     /// <summary>The tab strip on the right of the terminal panel's title bar.</summary>
@@ -925,6 +958,7 @@ public sealed class CodeEditorView : UserControl
     void CloseTerminalPane()
     {
         _terminalHost.IsVisible = false;
+        if (_terminalGrip is { } g1) g1.IsVisible = false;
         // Hiding the panel stops every PTY client but keeps the panes and their tmux sessions, so reopening brings each
         // tab back with its scrollback (the sessions live in the tmux server, as in the grid).
         foreach (var pane in _terminals.Values)
