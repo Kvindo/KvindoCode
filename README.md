@@ -97,11 +97,16 @@ Needs the **.NET 10 SDK** (Avalonia 12 is built against it). A user-local SDK is
 — the build scripts pick it up when `dotnet` on PATH is older.
 
 ```bash
-dotnet test tests/KvindoCode.Tests      # ~1180 tests
-python3 tools/update_scores.py      # refresh src/KvindoCode.App/Assets/scores.json
+./tools/test.sh                      # ~1230 tests, ~12 min — skips the real-model class
+./tools/test.sh --all                # everything, ~26 min (needs a local vllm on 127.0.0.1:8001)
+./tools/test.sh --filter FullyQualifiedName~SomeTests
+python3 tools/update_scores.py       # refresh src/KvindoCode.App/Assets/scores.json
 dotnet run --project src/KvindoCode.App -- /path/to/project
 ```
-`KVINDOCODE_SCRIPT=file.json` swaps the API for a scripted fake (UI tests/demos); `KVINDOCODE_HOME` relocates `~/.kvindocode`.
+`tools/test.sh` is preferred over a bare `dotnet test`: it nices the build so the desktop stays usable, and it excludes
+`Category=RealLlm` — `SecretAuditorRealUiTests` runs a real inference per audited tool output, which is 10 of a 26-minute
+run on its own. `KVINDOCODE_SCRIPT=file.json` swaps the API for a scripted fake (UI tests/demos); `KVINDOCODE_HOME`
+relocates `~/.kvindocode`.
 
 ## FAQ
 
