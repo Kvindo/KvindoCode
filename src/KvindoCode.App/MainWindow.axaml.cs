@@ -1054,7 +1054,10 @@ public partial class MainWindow : Window
                 }
                 else MarkPendingAttention(sv.Id);
                 sv.WaitingForUser = false;
-                RebuildSidebar(); if (cur) { UpdateSendButton(); UpdateTodos(); Input.Focus(); } break;
+                RebuildSidebar(); if (cur) { UpdateSendButton(); UpdateTodos(); Input.Focus(); }
+                // the merge the header's button asked for has finished: reclaim the worktree if it is really merged
+                if (sv.CleanupWorktreeAfterMerge) _ = ReclaimWorktreeAsync(sv);
+                break;
             case ModeChangedEvent: if (cur) UpdateMode(); break;
             case WorkModeChangedEvent: if (cur) { UpdateWorkModeButton(); UpdateMode(); } break;
             case WorkspaceReadyEvent wr:
@@ -1299,6 +1302,8 @@ public partial class MainWindow : Window
         // The prompt is a Settings field (asked 2026-10-18). `{branch}` is substituted so an override still gets the
         // one fact the button knows and the human should not have to retype.
         var template = string.IsNullOrWhiteSpace(_settings.MergePrompt) ? AppSettings.MergePromptDefault : _settings.MergePrompt.Trim();
+        // the cleanup follows this merge: when the turn ends, the worktree is reclaimed if the branch is merged
+        sv.CleanupWorktreeAfterMerge = true;
         SendSessionPrompt(sv, template.Replace("{branch}", branch, StringComparison.Ordinal));
     }
 
@@ -2147,6 +2152,42 @@ public partial class MainWindow : Window
             _current.Transcript.ScrollToEnd();
         }
         UpdateEmpty();
+    }
+
+    /// <summary>
+    /// Remove the session's worktree after its merge turn, if the branch really is merged and nothing is uncommitted.
+    /// </summary>
+    /// <remarks>
+    /// Asked 2026-10-19: "I never delete session. I want on merge button after session is merged remove worktree". The
+    /// merge button sends an instruction; the model does the merge. This runs when that turn ends and asks the same
+    /// conservative check the startup sweep uses (<see cref="Workspaces.Forget"/>): a branch not merged into the
+    /// project's HEAD, or any uncommitted file, keeps the tree and says why. The BRANCH is never deleted, so the work is
+    /// still recoverable; only the checkout goes.
+    /// </remarks>
+    async Task ReclaimWorktreeAsync(SessionView sv)
+    {
+        // give git a moment to finish writing after the turn, and let the model's own report land first
+        await Task.Delay(TimeSpan.FromSeconds(2));
+        if (!_live.ContainsKey(sv.Id)) return;
+        sv.CleanupWorktreeAfterMerge = false;
+        if (!sv.Session.IsIsolated) return;
+        var dir = sv.Session.WorkDir;
+        var (ok, reason) = await Task.Run(() => (sv.Session.ForgetWorkspace(out var r), r));
+        Dispatcher.UIThread.Post(() =>
+        {
+            if (ok)
+            {
+                ShowInfo($"Merged — the session's worktree was removed (the branch itself is kept). {dir} is gone; " +
+                         "the next turn works in a fresh checkout if you need one.");
+                RebuildSidebar();
+            }
+            else if (reason.Length > 0)
+            {
+                // NOT a silent no-op: the tree is still on disk, and the reason is what tells you whether to commit,
+                // merge by hand, or ignore it
+                ShowInfo("The worktree was kept: " + reason + " (It will be removed by the startup sweep once that is resolved.)");
+            }
+        });
     }
 
     /// <summary>Where keystrokes go when the terminal grid is on screen.</summary>
