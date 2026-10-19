@@ -3112,11 +3112,30 @@ public partial class MainWindow : Window
 
     IEnumerable<string> ProjectOrder()
     {
-        var byActivity = _all.Concat(_live.Values.Where(l => l.Session.Info.Exists && !_all.Any(x => x.Id == l.Id)).Select(l => l.Session.Info)).Where(s => !s.Archived).GroupBy(s => s.Cwd).OrderByDescending(g => g.Max(s => s.Updated)).Select(g => g.Key).ToList();
+        var byActivity = _all.Concat(_live.Values.Where(l => l.Session.Info.Exists && !_all.Any(x => x.Id == l.Id)).Select(l => l.Session.Info))
+            .Where(s => !s.Archived && !IsCoordinatorDir(s.Cwd))          // the COORDINATOR has its own pinned row
+            .GroupBy(s => s.Cwd).OrderByDescending(g => g.Max(s => s.Updated)).Select(g => g.Key).ToList();
         var res = new List<string>(byActivity);
-        foreach (var p in _settings.Projects.Where(Directory.Exists)) if (!res.Contains(p)) res.Add(p);
-        if (_project != null && !res.Contains(_project)) res.Insert(0, _project);
+        foreach (var p in _settings.Projects.Where(Directory.Exists))
+            if (!res.Contains(p) && !IsCoordinatorDir(p)) res.Add(p);
+        if (_project != null && !res.Contains(_project) && !IsCoordinatorDir(_project)) res.Insert(0, _project);
         return res;
+    }
+
+    /// <summary>
+    /// Is this path the COORDINATOR's own folder? It is not a project.
+    /// </summary>
+    /// <remarks>
+    /// Reported 2026-10-19: "for some reason there are 2 coordinators". The session's working directory is a folder
+    /// under the config dir, so the sidebar listed it as a PROJECT as well as showing the pinned row — the same session
+    /// twice, once under "coordinator" and once at the top.
+    /// </remarks>
+    internal static bool IsCoordinatorDir(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path)) return false;
+        var dir = Path.Combine(Paths.ConfigDir, "coordinator");
+        return string.Equals(Path.TrimEndingDirectorySeparator(Path.GetFullPath(path)),
+                             Path.TrimEndingDirectorySeparator(Path.GetFullPath(dir)), StringComparison.Ordinal);
     }
 
     void RebuildSidebar()

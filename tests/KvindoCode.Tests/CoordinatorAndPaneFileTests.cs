@@ -69,6 +69,32 @@ public sealed class CoordinatorAndPaneFileTests(ITestOutputHelper o)
         win.Close();
     }
 
+    /// <summary>The coordinator appears ONCE: its own folder must not be listed as a project.</summary>
+    /// <remarks>Reported 2026-10-19: "for some reason there are 2 coordinators" — the pinned row plus the folder the
+    /// session works in, which the sidebar treated as a project.</remarks>
+    [AvaloniaFact]
+    public async Task The_coordinator_folder_is_not_a_project()
+    {
+        using var sb = new Sandbox();
+        var win = Start(sb);
+        var row = win.FindControl<StackPanel>("ProjectsPanel")!.Children.OfType<Button>()
+            .First(b => b.Name == "CoordinatorRow");
+        row.RaiseEvent(new Avalonia.Interactivity.RoutedEventArgs(Button.ClickEvent));
+        for (var i = 0; i < 80; i++) { Dispatcher.UIThread.RunJobs(); await Task.Delay(25); }
+        var sv = Field<SessionView>(win, "_current");
+        var cwd = sv.Session.Project.Cwd;
+        o.WriteLine($"coordinator cwd: {cwd}; IsCoordinatorDir={MainWindow.IsCoordinatorDir(cwd)}");
+        Assert.True(MainWindow.IsCoordinatorDir(cwd));
+
+        // the sidebar shows the pinned row once and NO project group for that folder
+        var panel = win.FindControl<StackPanel>("ProjectsPanel")!;
+        var titles = panel.GetVisualDescendants().OfType<TextBlock>().Select(t => t.Text ?? "").ToList();
+        o.WriteLine("sidebar titles: " + string.Join(" | ", titles.Take(10)));
+        Assert.Single(titles.Where(t => t == "COORDINATOR"));
+        Assert.DoesNotContain(titles, t => t.Contains("coordinator") && t != "COORDINATOR");
+        win.Close();
+    }
+
     /// <summary>A session can ask for a FILE to be shown in the side panel, at a line.</summary>
     /// <remarks>Asked 2026-10-19: "now i also want session to be able to open file in side panel".</remarks>
     [AvaloniaFact]
